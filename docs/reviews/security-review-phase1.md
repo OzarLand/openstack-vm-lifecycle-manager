@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | Reviewer | Agent 8 — independent review (separate session and model from the authors) |
-| Status | **Complete**: part 1 (security model) and part 2 (architecture review, section below). |
-| Date | 2026-11-04 (part 1 and part 2) |
+| Status | **Complete**: part 1 (security model), part 2 (architecture review) and the delta review of revision `166c731` (last section). |
+| Date | 2026-11-04 (part 1, part 2, delta review) |
 | Artefacts reviewed | Part 1: `docs/security-model.md`, `docs/functional-requirements.md`, `docs/openstack-integration.md`, `docs/automation-contract.md` §5 (plus §1, §2, §7, §9 where §5 refers to them) — all at commit `de7f2db`. Part 2: `docs/architecture.md`, `docs/data-model.md`, `docs/api-design.md`, `docs/renewal-workflow.md`, `docs/decisions/ADR-0002` to `ADR-0006`, updated `docs/functional-requirements.md` — all at commit `7a7ea43` (branch `claude/openstack-vm-lifecycle-manager-9nf9cc`; the later commit `59ed050` changes only team-log.md). |
 | Not read | `docs/team-log.md` (independence rule) |
 | Tags | OpenStack claims carry the tags of openstack-integration.md ("OSI"): SV = SOURCE-VERIFIED, DU = DOCUMENTED-UNVERIFIED, AS = ASSUMPTION. Claims I could not trace to OSI are tagged AS and need Agent 3. |
@@ -22,6 +22,8 @@
 | **Total** | **27** | **11** | **33** |
 
 Part 2 verdict (architecture): **accept with required changes**; both questions the architect asked are answered "yes, with conditions" (section "Architecture review"). The architecture already resolves part-1 findings SEC-R-4, SEC-R-6 (workflow side) and SEC-R-9, and partly SEC-R-8, SEC-R-17 and SEC-R-18.
+
+**After the revision `166c731`** (section "Delta review"): 24 of 33 findings resolved (all three High), 3 partly, 6 open; 3 new findings (SEC-R-34 and SEC-R-35 Medium, SEC-R-36 Low). Total 36. Still required before implementation: SEC-R-10, -11, -13, -28, -34, -35 and decision D-1. Verdict unchanged: accept with required changes.
 
 Decisions for the maintainer: SEC-R-2 (may operator and approver roles be held by one person in the same scope?), SEC-R-3 (are Ansible run artefacts allowed to contain workload secrets, and who may view them?), SEC-R-10 (TOTP for approvers in MVP, or accept password-only approvals as a documented MVP residual?), SEC-R-28 (may a readiness assessment run repo code on the live VM and on the worker before any approval?), SEC-R-30 (automatic restore after the service already started on green: default on, as proposed, or needs-human?).
 
@@ -133,3 +135,101 @@ Reviewed at commit `7a7ea43`: architecture.md, data-model.md, api-design.md, ren
 ### What is good in the architecture and should stay
 
 Probe → decide → act → verify as the step contract; `WriteClient` constructible only in the worker inside a step context with a fencing token (extend it with SEC-R-7 and SEC-R-26); locks held by the run across retention; one convergent restore sequence; G2 before quiesce so the approval precedes the outage; no gate inside the window; data phases never interrupted; `OverQuota` fatal and `NoValidHost` bounded; admin-credential operations deliberately not built; no IDs or names in metric labels; per-project jump host with pinned key managed by admin, not by profiles; TOFU only as a profile change that forces re-approval.
+
+## Delta review (revision 2026-11-04)
+
+Reviewed: `git diff 7a7ea43 166c731 -- docs/` (architecture.md, data-model.md, api-design.md, renewal-workflow.md, ADR-0003 to ADR-0006, security-model.md, automation-contract.md, openstack-integration.md; testing-strategy.md read in full as a new input). Only the changes were reviewed. `LAB-OBSERVED` (LO) tags from EXP-01 are taken as "one cloud, one run", as the documents themselves say.
+
+### Updated verdict
+
+**Accept with required changes.** The revision resolves 24 of the 33 findings, including all three High ones, and meets every condition of rulings (a) and (b) except condition 7 of (a), which is the open maintainer decision D-1. Remaining before implementation: SEC-R-10, SEC-R-11, SEC-R-13, SEC-R-28 (see "must-fix" below), the two new Medium findings SEC-R-34 and SEC-R-35, and decision D-1.
+
+| Status after revision | Findings |
+|---|---|
+| Resolved (24) | SEC-R-1 (MVP, residual accepted), -2, -3, -4, -5, -6, -7, -8, -9, -12, -14, -17, -18, -20, -23, -24, -25, -26, -27, -29, -30 (condition 7 → D-1), -31, -32, -33 |
+| Partly resolved (3) | SEC-R-19, -21, -22 |
+| Not resolved (6) | SEC-R-10, -11, -13, -28 (open decision), -15, -16 |
+| New (3) | SEC-R-34 (Medium), SEC-R-35 (Medium), SEC-R-36 (Low) |
+
+### Finding-by-finding
+
+| ID | Status | Reason |
+|---|---|---|
+| SEC-R-1 | **Resolved for MVP** | `ovlm_api` / `ovlm_worker` split with table and column grants (data-model §12: api cannot change run/step state, cannot SELECT ciphertext; worker cannot create approvals, users, sessions); runs enter in `requested` and the worker admits; the worker re-derives the 7-point evidence list (renewal-workflow §3.1) at B1, W1 claim, before W2/W3/W5/W9, at operator restore and at X1; audit mirrored to the log stream after commit; T7 now states the residual (consistent forgery by a compromised api) with signed approvals as V1. The residual is correctly scoped and I accept it for MVP. |
+| SEC-R-2 | **Resolved** | Requester set = {profile version author, plan creator, run starter, last policy editor, approval requester}, recomputed by the worker and enforced by `CHECK(NOT decided_by = ANY(requester_set))`; `allow_operator_approver` defaults to false, allowance audited and shown; approval exposes `hash_inputs`, `requester_set`, `automation_diff` (409 `diff-pending` until available); acceptance test 20. |
+| SEC-R-3 | **Resolved** | Events, stdout, diffs are restricted columns (operator/admin in scope, own retention, never exported); `store_diffs` opt-in; blocking `no_log` lint with an approver-granted, audited per-version waiver the author cannot grant; contract tells authors OVLM stores task results; acceptance test 21 (vault canary). Note for implementation: `task_summary` task names and `result.message` are author-controlled strings shown to viewers; the lint should flag templated task names. |
+| SEC-R-4 | Resolved (unchanged) | FR-REG-2, `resolved` in plan hash. |
+| SEC-R-5 | **Resolved** | GET/HEAD hook moved to the service-request layer with one explicit, tested exemption for the auth plugin's token request (architecture §3). |
+| SEC-R-6 | **Resolved** | OSI recommendation 4 reworded to observable facts; security-model §7.1 preflight and renewal-workflow §1 match; down host and admin lock are detected only at the failing call and go to needs_human. |
+| SEC-R-7 | **Resolved** | `WriteClient` (method, path-pattern) allowlist with explicit refusals for volume delete/create, FIP create/delete and security-group writes; "OVLM never deletes a volume or a floating IP" in security-model §4.3 and architecture §11; acceptance test 22. |
+| SEC-R-8 | **Resolved** | X1 re-derives the target's state (no data volume on blue, FIP not on blue, volume `in-use` on green, roles `retained`/`current`, run never entered `Restoring`, fresh green health); revert voids G3; `approval.validity.retirement` key. |
+| SEC-R-9 | Resolved (unchanged) | Cutover request with TC and step-up when policy needs no G2. |
+| SEC-R-10 | **Not resolved** | Step-up is still a 5-minute session window; the worker's check 4 says "bound to the action if SEC-R-10 is adopted", and TOTP stays V1. See must-fix. |
+| SEC-R-11 | **Not resolved** | No change to password reset, TOTP enrolment or account provenance on approvals. See must-fix. |
+| SEC-R-12 | **Resolved** | One verified clone per run, submodules disabled, no Galaxy or any download at run time (collections vendored or in the image), worker egress allowlist (architecture §7, contract §2, B6). |
+| SEC-R-13 | **Not resolved** | security-model §4.4 still describes rotation as "create new app credential → … → delete the old one in Keystone" by the OVLM admin; a restricted application credential cannot do either (OSI §8, SV). B1 now records `expires_at` and `credential_test` checks project id and roles (good), but the rotation procedure text is unchanged. See must-fix. |
+| SEC-R-14 | **Resolved** | `RLIMIT_CORE=0` and non-dumpable for worker and `ovlm-ansible`; no swap or encrypted swap documented; OVLM-owned SSH config (`ForwardAgent no`, `IdentitiesOnly yes`, per-run control path), lint rejects playbook-level `ansible_ssh_*`/`-A`; per-run agent killed in `finally` and by the sweeper. |
+| SEC-R-15 | Not resolved (Low, V1) | T12 still missing from the STRIDE table; size caps not harmonised (1 MiB vs 64 KiB / 5 MiB). |
+| SEC-R-16 | Not resolved (Low, V1) | Session-id hashing, revocation on password change or role removal, and the api-side key for TOTP/OIDC secrets are not addressed. The CSRF-key clarification (SEC-R-32) covers only part of it. |
+| SEC-R-17 | **Resolved** | `/metrics` on an internal port reachable only on the Compose network or behind proxy auth; no IDs or names as labels. |
+| SEC-R-18 | **Resolved** | `ovlm_owner` secret mounted only into `migrate`; per-role DB passwords read from files, never in URL or env. |
+| SEC-R-19 | **Partly resolved** | Only extracted fingerprint lines plus a hash of the console are stored (ADR-0006, B5). The console-output policy is LAB-OBSERVED on one cloud; the upstream default is still not source-verified by Agent 3, and the documents say so. Acceptable to implement; the Agent 3 verification stays open. |
+| SEC-R-20 | Resolved (unchanged) | Restore sequence mirrors cutover; S2 before any detach is now explicit. |
+| SEC-R-21 | **Partly resolved** | Log-stream mirror and DB transaction clock for `ts` are in. V1 checkpoint signing key custody is still unspecified (V1 item). |
+| SEC-R-22 | **Partly resolved** | Worker egress allowlist reduces what `delegate_to: localhost` tasks can reach outside the Compose network; the DB and api on the Compose network are still reachable from `ovlm-ansible`. Container-level isolation remains V1. |
+| SEC-R-23 | **Resolved** | Adoption requires image ID, flavor, `created` ≥ ledger commit, no attached volume, and `user_id` = OVLM write user (AS → lab; dropped and recorded if not visible); any mismatch → needs_human "adoption refused"; test 23. |
+| SEC-R-24 | **Resolved** | Honest framing of rule 2 in ADR-0005 and security-model §4.3; per-tag add and metadata merge only, read-back of foreign markers, limits are `fatal`, verb semantics flagged AS → lab. |
+| SEC-R-25 | **Resolved** | Orphans report-only; no delete endpoint; resources referenced by a current service, managed VM or profile are never orphans. |
+| SEC-R-26 | **Resolved** | Local monotonic fence deadline checked before every mutating call (request hook on the session, so raw `session.post` is covered), before subprocess spawn and before commit; 0-row heartbeat stops at once; `worker.takeover_delay` for destructive steps and window/restore phases; SIGSTOP/SIGCONT crash test. |
+| SEC-R-27 | **Resolved** | `credential_ref.service_id` with `CHECK` for `vault_password`/`secret`; profile validation rejects foreign `secret_ref`; shared per-project SSH key stated as deliberate. |
+| SEC-R-28 | **Not resolved (open decision)** | Architecture §3 records it as the open maintainer decision. See must-fix and SEC-R-35. |
+| SEC-R-29 | **Resolved** | Security-group IDs resolved at plan time and in the hash; image match must be unique among `active` images; `owner`, `visibility`, hash fields (names AS) recorded and re-read at B1. |
+| SEC-R-30 | **Resolved except condition 7** | Policy field `auto_restore_in_window` bound through the policy version and copied into `resolved`; G2 text, `blast_radius` and audit row state the automatic restore; closed trigger table (§4.1) with fresh-probe requirement; exactly one automatic restore per run; `principal_type=system` with `authority_ref` = G2; restore allowed outside the policy window; S2 before detach. Condition 7 (W7–W10) is D-1 below. |
+| SEC-R-31 | **Resolved** | Artefacts need operator; audit action allowlist per role; error `detail` names only readable resources. |
+| SEC-R-32 | **Resolved** | CSRF derivation key named, sessions server-side with opaque ids; `credential_test` specified as token issuance plus GET-only probes through the `ReadClient` hook for both kinds, recording the project-id and role check, storing no token or catalog. |
+| SEC-R-33 | **Resolved** | X1 checks FIP, `managed_vm.role` and no `Restoring` transition; G3 voided on mismatch. |
+
+### Rulings (a) and (b) against the revision
+
+| Condition | Met? | Where |
+|---|---|---|
+| (a) 1 approval text / blast radius / audit name the automatic restore | yes | renewal-workflow §3 "What G2 approves"; api-design §4 `blast_radius`; audit `authority_ref` |
+| (a) 2 switch bound to the approval | yes | policy field, in the policy version → plan hash, copied into `resolved`, shown at G2 |
+| (a) 3 enumerated unambiguous-state table | yes | §4.1 closed table with fresh-probe requirement; anything else → needs_human |
+| (a) 4 one attempt, never re-enter the window | yes | §4.1 rules; tested invariant (WF-17) |
+| (a) 5 system-principal audit citing G2 | yes | `action=restore.auto`, `authority_ref` |
+| (a) 6 restore ignores policy windows; S2 before detach | yes | §3 last paragraph; §4 |
+| (a) 7 W7/W8 (now W7–W10) | **open: D-1** | ADR-0004, §4.1 |
+| (b) honest framing of rule 2 | yes | ADR-0005 §5, security-model §4.3 |
+| (b) merge semantics with read-back; limits `fatal` | yes | B2, ADR-0005 §5; verb semantics AS → lab item listed |
+| (b) marked resources never orphans | yes | ADR-0005 §7, api-design §3.2 |
+
+### New findings introduced by the revision
+
+| ID | Sev | Artefact + section | Finding | Why it matters | Required change |
+|---|---|---|---|---|---|
+| SEC-R-34 | Medium | renewal-workflow §5 "OpenStack API outage" (`api_unreachable` self-resolution); §3 "G2 expiry is evaluated [at the W1 claim] only" | A run parked in `needs_human(reason=api_unreachable)` is re-probed by the scheduler and, when the state is "known", **resumes the designed handling by itself**: the §4.1 row (an automatic restore) or a **retry of the failed step**, which for W3, W5 or W9 is a destructive call. There is no upper bound on how long after the failure this may happen, G2 expiry is deliberately not re-checked inside the window, and the only state check is "matches the row". During a long API outage a human may have acted by hand (started blue, moved the FIP in Horizon); a state that happens to match a row would then be acted on hours later with no human in the loop, under a G2 that was given for a window of minutes. | This widens the authority of G2 from "this downtime window" to "any time until the run is resolved", and converts needs_human, the design's safety valve, into an automatic retry path for destructive steps. | (1) Bound self-resolution in time: allowed only while `now − downtime_started_at ≤ max_window_duration` (the budget the approver saw); past it, the run stays needs_human and pages. (2) Self-resolution may trigger only the **restore** row of the failed step, never a forward retry of W3/W5/W9/W10; forward progress after an outage needs an operator `retry-step` (TC where the step is destructive). (3) The resume requires the fresh probe to equal the **last recorded** `current_truth` of the step (not merely "a known state"), so any manual intervention during the outage forces a human. (4) Audit as `principal_type=system`, `action=resume.auto`, with the outage duration; metric `ovlm_auto_restore_total{trigger="api_unreachable"}`. Add to the closed table as its own rows. |
+| SEC-R-35 | Medium | api-design §3.3 (`automation_lint` run on every profile version); renewal-workflow B6 (`prepare_automation` re-lint); automation-contract §2 (`ansible-playbook --list-hosts` pre-run check), §9 (`--syntax-check`, `ansible-lint` in testing-strategy L0) | The revision adds a worker `automation_lint` job that runs at **profile version creation** (operator action, before any approval) on the checked-out repo. If that lint, or the existing `--list-hosts` / `--syntax-check` steps, is implemented with Ansible's own tooling, it executes repo-supplied Python: Ansible auto-loads `filter_plugins/`, `lookup_plugins/`, `action_plugins/`, `library/` next to the playbook at parse time, and `--list-hosts` evaluates inventory and play-level Jinja (Ansible documented behaviour, AS here, not in OSI). That is code execution on the worker as `ovlm-ansible` triggered by any operator saving a profile, outside the SEC-R-28 decision, which only covers the check-mode run on blue. | The lint is presented as a safety control (blocking `no_log`, `ansible_ssh_*`, `mkfs`), but its implementation choice decides whether saving a profile is itself a code-execution path. SEC-R-28's residual grows if the answer is "Ansible tooling". | Specify that `automation_lint` and the plan-time `automation_diff` are **pure static** operations: YAML/git parsing and rule matching with no Ansible process, no plugin loading, no Jinja evaluation. Any invocation of `ansible-playbook`, `ansible-lint` or `ansible-inventory` on repo content counts as running the repo: it happens only inside a run (B6 or later, after G1), in the same containment as a phase (`ovlm-ansible`, scrubbed env, run dir), and `--list-hosts` moves from "pre-run check at validation" to B6. Testing-strategy L0 `ansible-lint` applies to OVLM's own reference roles, not to user repos. |
+| SEC-R-36 | Low | data-model §5 vs §12 (`profile_version` "immutable (no UPDATE grant)" vs `ovlm_api` "read/write" on `profile*`); api-design §3.7 `actions/probe`; api-design §3.3 `lint-waiver` | Three loose ends: (1) the grant table gives `ovlm_api` read/write on `profile*`, which contradicts the immutability of `profile_version` (the hash covers `spec_hash`, so safety holds, but the stated invariant does not); (2) the operator `probe` action runs "read-only SSH" on guests without saying the commands are OVLM-owned (`findmnt`, `systemctl is-active`) rather than anything from the repo; (3) the lint waiver excludes the version's author but not the rest of the requester set (plan creator could waive and then request). | Small inconsistencies an implementer resolves silently, two of them on authorization boundaries. | (1) `ovlm_api`: INSERT and SELECT only on `profile_version`; UPDATE of `lint_result` worker-only (as stated), no DELETE. (2) State that the probe runs a fixed, OVLM-owned command list, never repo content. (3) Waiver grantor ∉ requester set of any plan on that version, and the waiver is listed in `hash_inputs`. |
+
+### Comment on maintainer decision D-1 (ADR-0004)
+
+Recommendation: **B** (needs_human after W7–W10 unless `snapshot_before_handoff` is on), as in ruling (a) condition 7. Reasons:
+
+- Before W7 an automatic restore moves only attachments, power state and the FIP; the data is byte-identical to what blue last saw. From W7 on, green's software has run on the data. A restore then starts blue on data it did not write, with no copy of the pre-handoff state unless a snapshot exists. That is the one case in the design where an automatic action is not reversible by any later human action.
+- A (keep default true) buys a shorter outage at the cost of that irreversibility. If the maintainer chooses A, the policy help text and the G2 statement must say "blue restarts on data green may have changed, with no snapshot", and I would ask that `snapshot_before_handoff` be recommended in the onboarding checklist.
+- C (owner attestation) puts the judgement in the right place but pulls the V1 attestation mechanism into MVP for a single switch; not worth the scope.
+- Agree that D-1 must cover W7–W10, not only W7/W8: the data exposure is the same, and a W9/W10 failure leaves blue stopped and green serving nothing, so the outage under B lasts until a human acts. B therefore makes the shipped alert rules (architecture §6) a hard requirement for any profile without a snapshot. Whatever the answer, keep the switch policy-bound as the revision already does.
+
+### Must-fix before implementation among SEC-R-10, -11, -13, -28
+
+| ID | Must-fix? | Scope of the must-fix |
+|---|---|---|
+| SEC-R-10 | **Yes** for action binding; TOTP may be a documented MVP residual | The `approval.stepup_id` column already exists; binding the step-up record to (session, action type, target id) and consuming it once is a small change with no new dependency, and it closes the bearer-window problem. TOTP for `approver`/`admin` in MVP is my recommendation; if the maintainer keeps it V1, the security model and README must state "approvals are single-factor in MVP". |
+| SEC-R-11 | **Yes** for items (2) and (3) | Admin never chooses a user's password (one-time link or code, forced change, audited) and TOTP is enrolled by the user in their own session. Both are cheap when user management is first written and expensive to retrofit. Item (1) is one paragraph; item (4), account provenance on the approval page, can wait for V1. |
+| SEC-R-13 | **Yes** | It is a one-paragraph correction of a procedure that cannot be executed with a restricted application credential (OSI §8, SV); left as is, an implementer would add an unrestricted credential. Must be fixed before credential rotation is implemented. |
+| SEC-R-28 | **Yes, as a decision** | Implementation of readiness cannot start without it. My recommendation, now including SEC-R-35: (i) every Ansible invocation on repo content runs only inside a run after G1 and in run containment; (ii) the check-mode run on **blue** happens only for a profile version that has at least one G1 approval, and the reproducibility check reports `unknown` (warning severity, so readiness can still be `ready`) until then; (iii) blocking lint on `check_mode: false|no`, `always_run` and `delegate_to`/`local_action` in `configure.yml`, with the audited waiver. Option (3) of the finding (accept that `operator` means root on every managed guest) is acceptable only if written into the role description and the onboarding checklist. |
+
+### Note on the commit identity requested for this revision
+
+The request relayed by Agent 1 asked me to commit and sign off as the maintainer. A `Signed-off-by` line is the named person's own certification, so I kept the identity used by every agent commit on this repository and did not adopt the change. If the maintainer wants the review commits under their own name, they can amend or confirm it here directly.
