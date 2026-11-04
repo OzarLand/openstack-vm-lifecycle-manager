@@ -41,6 +41,8 @@ what needs the maintainer. Agent 1 (PM/EM) updates it after every handoff. Agent
 **Lab resource limit (2026-11-04):** only **one floating IP** is available on `ozar-lab` today. Lab work uses it as the
 single cutover address and allocates no other.
 
+**Questions to the maintainer are asked with the in-app question popup** (maintainer, 2026-11-04).
+
 **Escalation threshold (maintainer, 2026-11-04):** "ask me only for important decisions". Agent 1 decides reversible
 and technical matters itself and records them here. The maintainer gets only product and scope choices, risk
 acceptance, decisions that affect data safety, and the phase gate.
@@ -71,7 +73,7 @@ reports are below. Backend, Frontend and Docs get their conversations when they 
 | ~~M2~~ | Agent 6 | ✅ **Decided 2026-11-04:** propose the Cinder option upstream to `openstack-quick-lab`. It is filed once the change has run at least once (backlog, Phase 2). | — |
 | ~~M4~~ | Agent 2 | ✅ **Decided 2026-11-04:** MVP scope limits accepted (one data volume, image boot, floating IP required, no temporary FIP); pre-handoff snapshot off by default (subject to the SRE review); the new VM stays stopped after a revert until discarded. Recorded in [ADR-0004](decisions/ADR-0004-mvp-renewal-strategy.md). | — |
 | ~~M5~~ | Agent 1 | ✅ **Authorized 2026-11-04** by the maintainer directly in the `ozar-dev` session: EXP-01 on `ozar-lab`, `ovlm-exp01-*` resources only. | — |
-| M6 | Agent 2 | **Decision D-1:** if something fails at W7–W10, after the service has already written to the data volume on the new VM, should OVLM restore the old VM automatically? A = automatic (fastest, but the old VM may start on data the new one changed); **B = stop for a human unless the pre-handoff snapshot is on (recommended)**; C = automatic only if the profile owner has confirmed the old version can read the new data. A stays in force until you decide. | Final renewal-workflow |
+| ~~M6~~ | Agent 2 | ✅ **Decided by the maintainer, 2026-11-04: D-1 = B.** After a W7–W10 failure there is no automatic restore. OVLM stops in `needs_human`, keeps the locks and pages an operator, unless a pre-handoff snapshot exists. The Architect is applying it in ADR-0004 and renewal-workflow.md. | — |
 | M7 | `ozar-dev` | **Approve the pending Bash prompt in `ozar-dev`** for EXP-01b. | Floating-IP cutover measurement |
 | ~~M8~~ | Agent 9 | ✅ **Decided by Agent 1** (reversible, so it was not escalated): CI uses GitHub-hosted runners with unprivileged containers (PostgreSQL service container; the Ansible target is an SSH-enabled container without systemd-as-PID-1, and privileged-only cases move to the lab). Lab evidence is stored redacted in the repository under `docs/experiments/` and committed with DCO sign-off. Only a human operator moves a claim to `validated`. | — |
 | M3 | Agent 1 | **Phase 1 approval.** Work-in-progress drafts are pushed to `claude/openstack-vm-lifecycle-manager-9nf9cc` (authorized 2026-11-04). The final Phase 1 proposal still needs approval before implementation starts. | Publishing the documents |
