@@ -21,6 +21,7 @@ dependencies = [
   "pyotp==2.9.0",
   "cryptography==46.0.3",
   "python-multipart==0.0.20",
+  "openstacksdk==4.22.0",
 ]
 
 [dependency-groups]
