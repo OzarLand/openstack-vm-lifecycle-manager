@@ -9,7 +9,7 @@ help:  ## Show targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
 
 install:  ## Create the virtualenv from the hash-locked uv.lock
-	$(UV) sync --frozen
+	$(UV) sync --frozen --group automation
 
 lint:  ## ruff, ruff format check, mypy, import-linter
 	$(UV) run --frozen ruff check .
@@ -24,10 +24,10 @@ format:  ## Apply ruff fixes and formatting
 test: test-unit test-integration  ## Unit then integration tests (integration needs Docker or OVLM_TEST_DATABASE_URL)
 
 test-unit:
-	$(UV) run --frozen pytest tests/unit
+	$(UV) run --frozen --group automation pytest tests/unit
 
 test-integration:  ## Starts a throw-away PostgreSQL container unless OVLM_TEST_DATABASE_URL is set
-	$(UV) run --frozen pytest tests/integration
+	$(UV) run --frozen --group automation pytest tests/integration
 
 lock:  ## Re-resolve uv.lock and regenerate requirements.lock (used by the Dockerfile)
 	$(UV) lock
