@@ -644,3 +644,22 @@ re-issued as the opening instruction of a new conversation. The old conversation
 
 **Planned next:** E4 readiness, once profiles land; E5-4 renewal strategy steps (Opus), once the write client and
 runner land; E5-5 gates; then the lab.
+
+## PR #4 merged — 2026-11-04 16:41 UTC
+
+[OzarLand/openstack-vm-lifecycle-manager#4](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/4) is
+merged: profiles, policies and deadlines (E3-3), the operator UI first pages (E6-1/E6-2), and the CI Ansible job.
+
+Two CI failures were fixed before the merge:
+- `ansible-core 2.22` requires Python 3.13, but the job pinned 3.12.
+- The Compose smoke test expected the old placeholder page at `/`, which the UI now redirects to `/login`.
+
+**First real run of the reference workload's playbooks** against a container in CI: green. They had only been
+reported passing by the authoring agent until now.
+
+Started: E4 readiness (Agent 4g, Sonnet), https://claude.ai/code/session_016ti9w4bUADuy7e4sVTGzRq.
+
+Waiting for:
+- Security code review of the write client and RBAC (Fable).
+- SRE code review of the engine (Fable).
+- The automation runner (Sonnet).
