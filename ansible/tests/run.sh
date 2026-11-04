@@ -89,7 +89,7 @@ container_run() {
   command -v docker >/dev/null || die "docker not found"
   trap cleanup EXIT
   say "build and start the unprivileged Ubuntu 24.04 SSH target"
-  docker build -q -t ovlm-ci-target "$HERE" >/dev/null
+  docker build -q ${OVLM_TEST_BASE_IMAGE:+--build-arg BASE_IMAGE="$OVLM_TEST_BASE_IMAGE"} -t ovlm-ci-target "$HERE" >/dev/null  # OVLM_TEST_BASE_IMAGE: e.g. a registry mirror when Docker Hub rate-limits (HTTP 429)
   CID="$(docker run -d --rm -p 127.0.0.1::22 ovlm-ci-target)"
   PORT="$(docker port "$CID" 22/tcp | head -1 | sed 's/.*://')"
   KEY="$WORK/ci_key"; rm -f "$KEY" "$KEY.pub"; ssh-keygen -q -t ed25519 -N '' -f "$KEY"

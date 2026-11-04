@@ -1,6 +1,7 @@
 # CI target for the ovlm-counter playbooks: an UNPRIVILEGED Ubuntu 24.04 container reached over SSH.
 # No systemd (that needs privileges), so the playbooks run with ovlm_test_mode=true.
-FROM ubuntu:24.04
+ARG BASE_IMAGE=ubuntu:24.04
+FROM ${BASE_IMAGE}
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       openssh-server sudo python3 python3-apt psmisc e2fsprogs util-linux ca-certificates \

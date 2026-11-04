@@ -22,9 +22,14 @@ dependencies = [
   "cryptography==46.0.3",
   "python-multipart==0.0.20",
   "openstacksdk==4.22.0",
+  "pyyaml==6.0.3",
 ]
 
 [dependency-groups]
+automation = [
+    "ansible-core==2.19.4",
+    "ansible-runner==2.4.2",
+]
 build = ["hatchling==1.27.0"]
 dev = [
   "pytest>=8.3",
@@ -32,6 +37,7 @@ dev = [
   "ruff>=0.8",
   "mypy>=1.13",
   "import-linter>=2.1",
+  "types-pyyaml>=6.0.12.20261103",
 ]
 
 [project.scripts]
