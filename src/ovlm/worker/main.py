@@ -1,12 +1,16 @@
 """Worker entry point: ``ovlm-worker`` (also ``ovlm worker``).
 
-Skeleton: main loop with heartbeat metric, DB ping, graceful shutdown on SIGTERM/SIGINT. It refuses to start
-when the schema is not at head. No engine logic yet.
+Main loop: worker heartbeat metric and row, DB ping, then the workflow engine (signals, admission, scheduler,
+claims into ``worker.slots`` step threads, metrics). Graceful shutdown on SIGTERM/SIGINT: stop claiming, let running
+steps finish within ``worker.shutdown_grace``; anything still running is left to lease expiry and takeover
+(renewal-workflow.md section 5). It refuses to start when the schema is not at head, and when a test crash-point
+plan is set in the environment.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
 import threading
@@ -28,28 +32,97 @@ from ovlm.observability.metrics import (
     heartbeat_age,
     record_heartbeat,
 )
+from ovlm.workflow.crashpoint import ENV_VAR as CRASHPOINT_ENV
+from ovlm.workflow.engine import Claim, EngineConfig, WorkflowEngine
+from ovlm.workflow.registry import Registry
 
 log = logging.getLogger("ovlm.worker")
 
+#: Refresh the workflow gauges every N loop iterations.
+METRICS_EVERY = 6
+
+
+def build_registry(settings: Settings) -> Registry:
+    """Workflow definitions of this release. Strategies register here (E5-4 adds ``bluegreen_fip_v1``)."""
+    return Registry()
+
 
 class Worker:
-    def __init__(self, settings: Settings, engine: Engine) -> None:
+    def __init__(
+        self, settings: Settings, engine: Engine, workflow: WorkflowEngine | None = None
+    ) -> None:
         self.settings = settings
         self.engine = engine
-        self.instance_id = uuid.uuid4().hex  # new at each process start (ADR-0003)
+        self.workflow = workflow
+        # ``lease_owner``: new at each process start (ADR-0003, SRE-R-4).
+        self.instance_id = workflow.worker_id if workflow else uuid.uuid4().hex
         self.stop_event = threading.Event()
+        self._active: set[threading.Thread] = set()
+        self._active_lock = threading.Lock()
+        self._iterations = 0
+        self._started = False
 
     def request_stop(self, reason: str = "requested") -> None:
         if not self.stop_event.is_set():
             log.info("shutdown requested", extra={"reason": reason})
         self.stop_event.set()
+        if self.workflow:
+            self.workflow.stopping.set()
 
     def healthy(self) -> bool:
         age = heartbeat_age()
         return age is not None and age < 3 * self.settings.worker.heartbeat_interval
 
+    def active_steps(self) -> int:
+        with self._active_lock:
+            self._active = {t for t in self._active if t.is_alive()}
+            return len(self._active)
+
+    def _start_workflow(self) -> None:
+        """Once per process: register, then run startup sweepers *before* the first claim (SRE-R-5)."""
+        if self.workflow is None:
+            return
+        self.workflow.register_worker(__version__)
+        for sweeper in self.workflow.registry.sweepers:
+            sweeper()
+        self._started = True
+
+    def _workflow_tick(self) -> None:
+        wf = self.workflow
+        if wf is None:
+            return
+        if not self._started:
+            self._start_workflow()
+        wf.beat_worker(draining=self.stop_event.is_set())
+        wf.process_signals()
+        wf.admit_pending()
+        wf.run_scheduler()
+        if self._iterations % METRICS_EVERY == 0:
+            wf.refresh_metrics()
+        free = self.settings.worker.slots - self.active_steps()
+        if self.stop_event.is_set() or free <= 0:
+            return
+        for claim in wf.claim(free):
+            t = threading.Thread(
+                target=self._run_step,
+                args=(claim,),
+                name=f"ovlm-step-{claim.step.step_key}",
+                daemon=True,
+            )
+            with self._active_lock:
+                self._active.add(t)
+            t.start()
+
+    def _run_step(self, claim: Claim) -> None:
+        if self.workflow is None:
+            return
+        try:
+            self.workflow.execute(claim)
+        except Exception:
+            log.exception("step execution failed outside the step contract")
+
     def tick(self) -> None:
-        """One loop iteration: ping the DB and beat."""
+        """One loop iteration: ping the DB, beat, run the engine."""
         try:
             with self.engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
@@ -59,24 +132,59 @@ class Worker:
             log.warning("database ping failed")
         record_heartbeat()
         WORKER_LOOP.inc()
+        try:
+            self._workflow_tick()
+        except Exception:
+            # DB outage etc.: running steps self-fence; the loop retries next iteration (ADR-0003 "DB outage").
+            log.exception("workflow tick failed")
+        self._iterations += 1
 
     def run(self) -> None:
         log.info("worker started", extra={"worker_instance_id": self.instance_id})
         record_heartbeat()
+        interval = self.settings.worker.heartbeat_interval
         while not self.stop_event.is_set():
             self.tick()
-            self.stop_event.wait(self.settings.worker.heartbeat_interval)
+            self.stop_event.wait(interval)
+        self._drain()
         log.info("worker stopped", extra={"worker_instance_id": self.instance_id})
+
+    def _drain(self) -> None:
+        if self.workflow is None:
+            return
+        try:
+            self.workflow.beat_worker(draining=True)
+        except Exception:  # noqa: BLE001
+            log.warning("could not mark the worker draining")
+        deadline = threading.Event()
+        timer = threading.Timer(self.settings.worker.shutdown_grace, deadline.set)
+        timer.daemon = True
+        timer.start()
+        while self.active_steps() and not deadline.wait(0.1):
+            record_heartbeat()
+        timer.cancel()
+        left = self.active_steps()
+        if left:
+            log.warning(
+                "shutdown grace elapsed with running steps; leases will expire and be taken over",
+                extra={"running_steps": left},
+            )
 
 
 def run(settings: Settings | None = None) -> int:
     settings = settings or Settings(process_role="worker")
     configure_logging("worker", settings.log.level)
+    if os.environ.get(CRASHPOINT_ENV):
+        log.error("refusing to start: %s is a test-only setting", CRASHPOINT_ENV)
+        return 1
     engine = make_engine(settings)
     server: InternalServer | None = None
     try:
         check_schema_at_head(engine, settings.migrations_dir)
-        worker = Worker(settings, engine)
+        workflow = WorkflowEngine(
+            engine, build_registry(settings), EngineConfig.from_settings(settings)
+        )
+        worker = Worker(settings, engine, workflow)
         BUILD_INFO.labels(__version__, "worker").set(1)
         server = InternalServer(
             settings.http.metrics_host, settings.http.metrics_port, worker.healthy

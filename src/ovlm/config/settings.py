@@ -59,6 +59,52 @@ class WorkerSettings(_Section):
     heartbeat_interval: float = Field(default=5.0, gt=0)
     #: Seconds allowed for a graceful stop before the loop gives up waiting.
     shutdown_grace: float = Field(default=30.0, gt=0)
+    #: Concurrent steps per worker process (ADR-0003).
+    slots: int = Field(default=4, ge=1, le=64)
+    #: Seconds a claim or heartbeat extends a step lease (DB time). Must exceed several heartbeats.
+    lease_duration: float = Field(default=60.0, gt=0)
+    #: Seconds subtracted from the lease to form the local fence deadline (ADR-0003, SRE-R-2).
+    fence_margin: float = Field(default=10.0, gt=0)
+    #: Seconds a takeover of a destructive / window / restore step waits before probing (SRE-R-27).
+    #: Must be >= the SDK request timeout + fence_margin; the SDK timeout is checked by the openstack module.
+    takeover_delay: float = Field(default=45.0, ge=0)
+
+    @model_validator(mode="after")
+    def _check_lease(self) -> WorkerSettings:
+        if self.lease_duration < 3 * self.heartbeat_interval:
+            raise ValueError("worker.lease_duration must be >= 3 x worker.heartbeat_interval")
+        if self.fence_margin + self.heartbeat_interval >= self.lease_duration:
+            raise ValueError(
+                "worker.fence_margin + worker.heartbeat_interval must be < worker.lease_duration"
+            )
+        if self.takeover_delay < self.fence_margin:
+            raise ValueError("worker.takeover_delay must be >= worker.fence_margin")
+        return self
+
+
+class PollSettings(_Section):
+    #: Backoff of WAIT re-claims and of signal polling (ADR-0003 "timers").
+    initial_interval: float = Field(default=5.0, gt=0)
+    max_interval: float = Field(default=300.0, gt=0)
+
+
+class RetrySettings(_Section):
+    #: Default bound on retryable failures of one step; ``max_attempts_per_step`` overrides by step_key.
+    max_attempts: int = Field(default=3, ge=1)
+    max_attempts_per_step: dict[str, int] = Field(default_factory=dict)
+    #: Backoff before re-running a step after a retryable failure.
+    backoff_initial: float = Field(default=10.0, gt=0)
+    backoff_max: float = Field(default=300.0, gt=0)
+
+
+class AlertSettings(_Section):
+    #: Seconds before an unadmitted run (SRE-R-25) or an unconsumed signal (SRE-R-24) is flagged in metrics.
+    after: float = Field(default=300.0, gt=0)
+
+
+class RenewalSettings(_Section):
+    #: Global cap on admitted (non-terminal, non-requested) renewal runs (NFR-9). Checked at admission.
+    max_concurrent_runs: int = Field(default=5, ge=1)
 
 
 class Settings(BaseSettings):
@@ -76,6 +122,11 @@ class Settings(BaseSettings):
     http: HttpSettings = HttpSettings()
     log: LogSettings = LogSettings()
     worker: WorkerSettings = WorkerSettings()
+    poll: PollSettings = PollSettings()
+    retry: RetrySettings = RetrySettings()
+    admission: AlertSettings = AlertSettings()
+    signal: AlertSettings = AlertSettings()
+    renewal: RenewalSettings = RenewalSettings()
 
     @model_validator(mode="after")
     def _check(self) -> Settings:
