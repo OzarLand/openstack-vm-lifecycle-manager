@@ -158,6 +158,7 @@ class GuestPort(Protocol):
     def pin_host_key(
         self,
         *,
+        run_id: str,
         target: GuestRef,
         policy: str,
         bootstrap_public: str | None,
@@ -170,7 +171,7 @@ class GuestPort(Protocol):
         ...
 
     def probe(
-        self, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...]
+        self, run_id: str, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...]
     ) -> GuestProbe: ...
 
     def external_probe(

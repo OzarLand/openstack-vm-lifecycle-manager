@@ -257,8 +257,9 @@ class World:
 
 
 def _seed(
-    admin: Engine, cloud: RenewalFake, *, snapshot: bool, policy: dict[str, Any]
-) -> tuple[dict[str, str], dict[str, str]]:
+    admin: Engine, cloud: RenewalFake, *, snapshot: bool, policy: dict[str, Any],
+    blue_fingerprint: str = "SHA256:x",
+) -> tuple[dict[str, str], dict[str, str]]:  # fmt: skip
     ext = cloud.add_network("ext", external=True)
     net = cloud.add_network("net")
     cloud.add_router_path(net, ext)
@@ -349,8 +350,8 @@ def _seed(
                   {"i": svc, "pc": pc})  # fmt: skip
         vm = new_id()
         c.execute(text("INSERT INTO managed_vm (id, service_id, observed_server_id, openstack_server_id, role, "
-                       "registered_at, ssh_host_key_fingerprint) VALUES (:i, :s, :o, :b, 'current', now(), 'SHA256:x')"),
-                  {"i": vm, "s": svc, "o": obs["server"], "b": blue})  # fmt: skip
+                       "registered_at, ssh_host_key_fingerprint) VALUES (:i, :s, :o, :b, 'current', now(), :fp)"),
+                  {"i": vm, "s": svc, "o": obs["server"], "b": blue, "fp": blue_fingerprint})  # fmt: skip
         prof = new_id()
         c.execute(text("INSERT INTO profile (id, service_id, name, latest_version) VALUES (:i, :s, 'p', 1)"),
                   {"i": prof, "s": svc})  # fmt: skip
@@ -387,15 +388,20 @@ def _seed(
 
 
 def build_world(admin_url: URL, db: str, secrets_dir: Path, *, snapshot: bool = False,
-                policy: dict[str, Any] | None = None, g1: bool = True) -> World:  # fmt: skip
+                policy: dict[str, Any] | None = None, g1: bool = True, blue_fingerprint: str = "SHA256:x",
+                cloud: RenewalFake | None = None) -> World:  # fmt: skip
     migrate(admin_url, db, secrets_dir)
     admin = create_engine(admin_url.set(database=db))
     worker = create_engine(
         role_url(admin_url, db, "ovlm_worker", WORKER_PW), pool_size=10, max_overflow=10
     )
     api = create_engine(role_url(admin_url, db, "ovlm_api", API_PW))
-    cloud = RenewalFake(now=datetime.now(UTC), strict_gate=False)  # seeding the cloud; strict after
-    ids, users = _seed(admin, cloud, snapshot=snapshot, policy=policy or {})
+    cloud = cloud or RenewalFake(
+        now=datetime.now(UTC), strict_gate=False
+    )  # seeding the cloud; strict after
+    ids, users = _seed(
+        admin, cloud, snapshot=snapshot, policy=policy or {}, blue_fingerprint=blue_fingerprint
+    )
     port = FakeCloudPort(
         cloud, datetime.now(UTC) + timedelta(days=30), datetime.now(UTC) + timedelta(hours=8)
     )

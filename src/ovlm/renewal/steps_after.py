@@ -435,7 +435,7 @@ class BootOld(RestoreStep):
         obs: dict[str, Any] = {"status": s.status, "task": s.task_state}
         if s.status == "ACTIVE" and s.task_state is None:
             dv = r.get("data_volume") or {}
-            gp = self.d.guest.probe(self.blue_ref(ctx), mount_point=dv.get("mount_point"),
+            gp = self.d.guest.probe(ctx.run.id, self.blue_ref(ctx), mount_point=dv.get("mount_point"),
                                     units=tuple(r["service_units"]))  # fmt: skip
             obs["guest"] = gp.as_json()
         return obs

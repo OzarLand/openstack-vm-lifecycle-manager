@@ -77,7 +77,10 @@ class WindowAnsible(AnsibleStep):
         r = self.resolved(ctx)
         try:
             gp = self.d.guest.probe(
-                self.target(ctx), mount_point=mount_point, units=tuple(r["service_units"])
+                ctx.run.id,
+                self.target(ctx),
+                mount_point=mount_point,
+                units=tuple(r["service_units"]),
             )
             probe = gp.as_json()
         except Exception as exc:  # noqa: BLE001

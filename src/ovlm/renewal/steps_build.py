@@ -367,7 +367,7 @@ class WaitGreenSsh(RStep):
             console = self.wc(ctx).get_console_output(ref.server_id)
         accept = tuple(det.get("pinned") or ())
         res = self.d.guest.pin_host_key(
-            target=ref, policy=intent["policy"], bootstrap_public=det.get("bootstrap_public"), accept=accept,
+            run_id=ctx.run.id, target=ref, policy=intent["policy"], bootstrap_public=det.get("bootstrap_public"), accept=accept,
             console=console, fence=ctx.fence,
         )  # fmt: skip
         self.memo(ctx)["pin"] = res
@@ -556,7 +556,7 @@ class VerifyGreenReady(RStep):
 
     def act(self, ctx: StepContext, intent: Mapping[str, Any]) -> None:
         ref = self.green_ref(ctx)
-        probe = self.d.guest.probe(ref, mount_point=None, units=())
+        probe = self.d.guest.probe(ctx.run.id, ref, mount_point=None, units=())
         self.memo(ctx)["probe"] = probe
         if probe.reachable and self.d.guest.has_phase(ctx.run.id, "preflight"):
             self.memo(ctx)["pre"] = self.d.guest.run_phase(

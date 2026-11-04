@@ -156,7 +156,7 @@ class FakeGuest:
         )
 
     def pin_host_key(
-        self, *, target: GuestRef, policy: str, bootstrap_public: str | None, accept: tuple[str, ...],
+        self, *, run_id: str, target: GuestRef, policy: str, bootstrap_public: str | None, accept: tuple[str, ...],
         console: str | None, fence: FenceLike,
     ) -> HostKeyResult:  # fmt: skip
         self.pin_attempts += 1
@@ -167,7 +167,7 @@ class FakeGuest:
         return HostKeyResult(True, "ok", accept or ("ssh-ed25519 AAAArotated",), "rotated")
 
     def probe(
-        self, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...]
+        self, run_id: str, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...]
     ) -> GuestProbe:
         self.sync()
         if not self._active(target.server_id):
