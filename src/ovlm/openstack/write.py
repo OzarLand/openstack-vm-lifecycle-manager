@@ -25,7 +25,10 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from ovlm.openstack.allowlist import (
     LOCK_REASON_PREFIX,
+    SNAPSHOT_NAME_PREFIX,
     TAG_MANAGED,
+    VOLUME_MARKER_KEY,
+    VOLUME_MARKER_VALUE,
     Gate,
     GateBinding,
 )
@@ -51,6 +54,7 @@ from ovlm.openstack.ownership import (
     run_tag,
 )
 from ovlm.openstack.types import (
+    BlockStorageLimits,
     CreateServerSpec,
     FlavorInfo,
     FloatingIpInfo,
@@ -61,6 +65,7 @@ from ovlm.openstack.types import (
     ServerInfo,
     VolumeAttachmentInfo,
     VolumeInfo,
+    VolumeSnapshotInfo,
     VolumeTypeInfo,
 )
 
@@ -83,6 +88,15 @@ def _gated[F: Callable[..., Any]](fn: F) -> F:
             return fn(self, *args, **kwargs)
 
     return cast(F, wrapper)
+
+
+#: Metadata key carrying the run id on the W4 snapshot (with ``ovlm.managed=true``).
+SNAPSHOT_RUN_KEY = "ovlm.run"
+
+
+def snapshot_name(run_id: str) -> str:
+    """The only snapshot name a run may create: ``ovlm-prehandoff-<run uuid>`` (W4)."""
+    return f"{SNAPSHOT_NAME_PREFIX}{run_id}"
 
 
 #: Kinds of lock OVLM sets on blue: ``ovlm:retained:<run>`` (after cut-over), ``ovlm:restored:<run>`` (rollback).
@@ -229,6 +243,15 @@ class GuardedWriteClient:
 
     def get_server_fault(self, server_id: str) -> str | None:
         return self._backend.get_server_fault(server_id)
+
+    def list_volume_snapshots(self, *, name: str | None = None) -> list[VolumeSnapshotInfo]:
+        return self._backend.list_volume_snapshots(name=name)
+
+    def get_volume_snapshot(self, snapshot_id: str) -> VolumeSnapshotInfo:
+        return self._backend.get_volume_snapshot(snapshot_id)
+
+    def block_storage_limits(self) -> BlockStorageLimits:
+        return self._backend.block_storage_limits()
 
     # --- lookups and build state ---------------------------------------------------------------------------
 
@@ -442,6 +465,41 @@ class GuardedWriteClient:
         except NotFoundError as exc:
             if not is_gone(exc):
                 raise
+
+    # --- W4 pre-handoff snapshot (create only; OVLM has no snapshot delete) ----------------------------------
+
+    @_gated
+    def create_volume_snapshot(
+        self, volume_id: str, name: str, metadata: Mapping[str, str] | None = None
+    ) -> VolumeSnapshotInfo:
+        """Snapshot the registered data volume while it is ``available`` (detached) under this run's one name.
+
+        Rule 1 and 2 on the volume; the name must be exactly :func:`snapshot_name` of this run; a snapshot with
+        that name already present is never duplicated (:class:`DuplicateResourceError`: the step adopts it after
+        its own checks). The metadata is OVLM's marker and run id only. A snapshot cannot change the volume."""
+        if name != snapshot_name(self.run_id):
+            raise WriteNotAllowedError(
+                f"create_volume_snapshot: the name must be {snapshot_name(self.run_id)!r}"
+            )
+        if metadata and any(not k.startswith("ovlm.") for k in metadata):
+            raise WriteNotAllowedError("create_volume_snapshot: only ovlm.* metadata")
+        volume = self._owned_volume(volume_id, "create_volume_snapshot")
+        if volume.status != "available" or volume.attachments:
+            raise WriteNotAllowedError(
+                f"create_volume_snapshot: volume {volume_id} is {volume.status}, not available and detached"
+            )
+        existing = self._backend.list_volume_snapshots(name=name)
+        if existing:
+            raise DuplicateResourceError(
+                f"create_volume_snapshot: {len(existing)} snapshot(s) named {name!r} already exist",
+                matches=tuple(x.openstack_id for x in existing),
+            )
+        md = {
+            **dict(metadata or {}),
+            VOLUME_MARKER_KEY: VOLUME_MARKER_VALUE,
+            SNAPSHOT_RUN_KEY: self.run_id,
+        }
+        return self._backend.create_volume_snapshot(volume_id, name, md)
 
     # --- cutover -------------------------------------------------------------------------------------------
 

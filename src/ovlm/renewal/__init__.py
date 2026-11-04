@@ -4,5 +4,6 @@ gates and evidence re-validation; the closed automatic-restore table with D-1 = 
 Layout: ``config`` (named keys, no invented defaults), ``tables``, ``plans`` (resolution, plan hash, TC),
 ``evidence`` (worker re-validation of G1-G3) - these four are api-safe and import nothing from ``openstack`` or
 ``automation``. Worker only: ``ports``, ``ledger``, ``base``, ``steps_build``, ``steps_window``, ``steps_after``,
-``closed_table``, ``definition``, ``reprobe``, ``metrics``. Importing this package imports nothing.
+``closed_table``, ``definition``, ``reprobe``, ``metrics``, ``production`` (the ports' production adapters,
+wired into the worker by ``ovlm.worker.main.build_registry``). Importing this package imports nothing.
 """

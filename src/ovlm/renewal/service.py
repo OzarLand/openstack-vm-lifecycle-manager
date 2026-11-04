@@ -413,8 +413,22 @@ def run_row(s: Session, run_id: UUID | str, who: Principal) -> tuple[Mapping[Any
     return run, resolved
 
 
+def _snapshot_id(s: Any, run_id: str) -> str | None:
+    """The W4 snapshot of the run, once W4 succeeded (ledger ``present`` and the step ``succeeded``)."""
+    value = s.execute(
+        text("SELECT o.openstack_id FROM owned_resource o JOIN workflow_step w ON w.run_id = o.run_id "
+             "AND w.step_key = 'snapshot_volume' AND w.state = 'succeeded' "
+             "WHERE o.run_id = :r AND o.role = 'snapshot' AND o.state = 'present' LIMIT 1"),
+        {"r": run_id},
+    ).scalar()  # fmt: skip
+    return str(value) if value else None
+
+
 def available_actions(
-    run: Mapping[Any, Any], step: Mapping[Any, Any] | None, resolved: Mapping[str, Any]
+    run: Mapping[Any, Any],
+    step: Mapping[Any, Any] | None,
+    resolved: Mapping[str, Any],
+    snapshot_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Each action with the role it needs and its concrete effect from the current state (SRE-R-9)."""
     state, phase, key = run["state"], run["phase"] or "build", step["step_key"] if step else None
@@ -463,9 +477,11 @@ def available_actions(
             }
         )
     elif phase == "window":
+        # renewal-workflow.md 4.1 (D-1): name the snapshot when one reached ``available`` in W4, else say none exists
         consequence = ("stop green, attach the volume to blue, start blue, move the FIP back to blue; "
-                       + ("blue will start on data the new VM may have changed; no snapshot exists"
-                          if not snap else "the pre-handoff snapshot is kept as a manual way back"))  # fmt: skip
+                       + (f"the pre-handoff snapshot {snapshot_id} is kept as a manual way back (OVLM never "
+                          "deletes it)" if snap and snapshot_id else
+                          "blue will start on data the new VM may have changed; no snapshot exists"))  # fmt: skip
         out.append({"action": "rollback", "role": "operator + TC", "effect": consequence})
         out.append(
             {
@@ -511,7 +527,7 @@ def run_body(s: Session, run_id: UUID | str) -> dict[str, Any]:
         "pending_signals": [_row(p) for p in pending],
         "worst_case_window_seconds": resolved["worst_case_window_seconds"],
         "max_window_duration_seconds": resolved["max_window_duration_seconds"],
-        "available_actions": available_actions(run, step, resolved),
+        "available_actions": available_actions(run, step, resolved, _snapshot_id(s, str(run_id))),
         "last_worker_heartbeat": _iso(hb),
         "links": {"steps": f"/api/v1/runs/{run_id}/steps"},
     }

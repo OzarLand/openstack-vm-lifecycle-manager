@@ -172,6 +172,18 @@ class RenewalSettings(_Section):
     external_verify: RenewalExternalVerify = RenewalExternalVerify()
     retire: RenewalRetire = RenewalRetire()
     approval_validity: RenewalApprovalValidity = RenewalApprovalValidity()
+    #: **Interim, lab only** (until the encrypted credential store of security-model.md 5.1 exists): a worker-only
+    #: directory holding ``<project_connection_id>.json`` (write application credential) and ``<id>.guest_key``
+    #: (OpenSSH private key of the guest ``ovlm`` user), owned by the worker user, mode 0700/0600. Unset (the
+    #: default): no renewal is admitted, because no credential is available.
+    credentials_dir: Path | None = None
+
+    @field_validator("credentials_dir")
+    @classmethod
+    def _absolute(cls, value: Path | None) -> Path | None:
+        if value is not None and not value.is_absolute():
+            raise ValueError("renewal.credentials_dir must be an absolute path")
+        return value
 
 
 class AuthSettings(_Section):

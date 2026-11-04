@@ -188,14 +188,20 @@ def test_the_allowlist_is_exactly_the_strategy_operations() -> None:
     assert {
         "create_server", "delete_server", "stop_server", "start_server", "lock_server", "unlock_server",
         "get_console_output", "add_server_tag", "attach_volume", "detach_volume", "update_floating_ip",
-        "add_floating_ip_tag", "merge_volume_metadata",
+        "add_floating_ip_tag", "merge_volume_metadata", "create_volume_snapshot",
     } == WRITE_OPERATIONS  # fmt: skip
     assert set(SERVER_ACTIONS) == {"os-stop", "os-start", "lock", "unlock", "os-getConsoleOutput"}
-    assert len(RULES) == 9
-    for rule in RULES:  # no rule ever deletes or creates a volume or a FIP
+    assert len(RULES) == 10
+    for (
+        rule
+    ) in RULES:  # no rule ever deletes or creates a volume or a FIP, and no rule deletes a snapshot
         if rule.method in {"DELETE", "POST"}:
             assert "volumes/" not in rule.path.pattern or rule.path.pattern.endswith("/metadata$")
             assert "floatingips" not in rule.path.pattern
+        assert not (rule.method == "DELETE" and "snapshots" in rule.path.pattern)
+    assert [r.operation for r in RULES if "snapshots" in r.path.pattern] == [
+        "create_volume_snapshot"
+    ]
 
 
 # --- level 2: a real keystoneauth session ---------------------------------------------------------------------

@@ -114,7 +114,7 @@ def test_adoption_refused_for_a_server_of_another_user(world: World) -> None:
     )
     w.port.cloud = w.cloud
     w.cloud.create_server = create  # type: ignore[method-assign]
-    w.port.write_user_id = lambda: "00000000-0000-0000-0000-0000000000a1"  # type: ignore[method-assign]
+    w.port.write_user_id = lambda project: "00000000-0000-0000-0000-0000000000a1"  # type: ignore[method-assign]
     w.start()
     w.drive()
     parked(w, "adoption_refused")
@@ -338,7 +338,7 @@ def test_w3_stuck_detaching_is_needs_human(world: World) -> None:
 
 def test_w4_snapshot_failure_auto_restores(world_factory: Any) -> None:
     w = world_factory(snapshot=True)
-    w.port.snaps.fail_create = True
+    w.cloud.snapshot_outcome = "error"
     to_cutover(w)
     w.drive()
     restored(w)
@@ -419,7 +419,9 @@ def test_w7_failure_with_snapshot_restores_and_keeps_snapshot(world_factory: Any
     to_cutover(w)
     w.drive()
     restored(w)
-    assert w.port.snaps.deleted == [] and len(w.port.snaps.snaps) == 1  # kept: a manual way back
+    snaps = w.cloud.snapshot()["snapshots"]
+    assert [x["status"] for x in snaps.values()] == ["available"]  # kept: a manual way back
+    assert "create_volume_snapshot" in w.cloud.calls
 
 
 def test_w8_healthcheck_exhausted_pages(world: World) -> None:

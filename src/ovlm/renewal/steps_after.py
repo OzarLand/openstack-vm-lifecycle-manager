@@ -123,9 +123,11 @@ class AwaitRetirement(RStep):
 
 
 class RetireOld(AnsibleStep):
-    """X1: re-validate G3, prove the whole post-state (SRE-R-10, SEC-R-8, SEC-R-33), unlock and delete blue, delete
-    this run's snapshot. Any mismatch: needs_human and the G3 approval is void. The data volume is never touched;
-    a leftover boot-from-volume root volume is reported, not deleted."""
+    """X1: re-validate G3, prove the whole post-state (SRE-R-10, SEC-R-8, SEC-R-33), unlock and delete blue. Any
+    mismatch: needs_human and the G3 approval is void. The data volume is never touched; a leftover boot-from-volume
+    root volume is reported, not deleted. This run's W4 snapshot is **kept and reported** for manual release: OVLM
+    has no snapshot delete (the allowlist refuses it; maintainer brief for E5-4, which overrides the "deleted at X1"
+    sentence of renewal-workflow.md 4, reported)."""
 
     key = "retire_old"
     destructive = True
@@ -204,17 +206,16 @@ class RetireOld(AnsibleStep):
         wc.delete_server(
             blue
         )  # guard rule 3: no registered volume, delete_on_termination exactly false
-        with ctx.read() as c:
-            snap = snapshot_row(c, ctx.run.id)
-        port = self.d.cloud.snapshots()
-        if snap is not None and snap["openstack_id"] and port is not None:
-            port.delete_snapshot(snap["openstack_id"], ctx.gate)
 
     def verify(self, ctx: StepContext, intent: Mapping[str, Any]) -> Outcome:
         if _gone(self.wc(ctx).get_server, self.resolved(ctx)["blue"]["server_id"]) is None:
-            return Done(
-                {"blue": "deleted", "leftover_root_volumes": intent["leftover_root_volumes"]}
-            )
+            with ctx.read() as c:
+                snap = snapshot_row(c, ctx.run.id)
+            kept = snap["openstack_id"] if snap is not None and snap["openstack_id"] else None
+            return Done({"blue": "deleted", "leftover_root_volumes": intent["leftover_root_volumes"],
+                         "snapshot_kept": kept,
+                         **({"snapshot_note": "pre-handoff snapshot kept: OVLM never deletes snapshots; "
+                             "release it manually"} if kept else {})})  # fmt: skip
         return Wait(poll_after=None)
 
 
@@ -434,7 +435,7 @@ class BootOld(RestoreStep):
         obs: dict[str, Any] = {"status": s.status, "task": s.task_state}
         if s.status == "ACTIVE" and s.task_state is None:
             dv = r.get("data_volume") or {}
-            gp = self.d.guest.probe(self.blue_ref(ctx), mount_point=dv.get("mount_point"),
+            gp = self.d.guest.probe(ctx.run.id, self.blue_ref(ctx), mount_point=dv.get("mount_point"),
                                     units=tuple(r["service_units"]))  # fmt: skip
             obs["guest"] = gp.as_json()
         return obs

@@ -1,14 +1,13 @@
 """What the renewal steps need from the outside world, as narrow protocols (worker only).
 
 * :class:`CloudPort` builds the per-attempt :class:`~ovlm.openstack.write.GuardedWriteClient` (ownership guard +
-  allowlist + fence gate) for a run, and reports credential/token expiry for the W1 claim checks.
+  allowlist + fence gate) for a run's project, and reports credential/token expiry for the W1 claim checks. The W4
+  pre-handoff snapshot is a method of that write client (create only; OVLM never deletes a snapshot).
 * :class:`GuestPort` is the guest side: the automation runner phases (contract section 3), the B5 host-key
   bootstrap (ADR-0006), the fixed OVLM-owned read-only probe command list (SEC-R-36) and the external HTTP probe.
-* :class:`SnapshotPort` is the Cinder snapshot of W4. **The write client of this release has no snapshot
-  operation** (allowlist and backends); ``CloudPort.snapshots()`` returns ``None`` in production, and B1 refuses a
-  plan with ``snapshot_before_handoff`` instead of failing inside the outage (reported).
 
-Production adapters: ``ovlm.renewal.production``. Tests: ``tests/renewal_doubles.py``.
+Every cloud method takes ``project`` (the plan's ``service.project_connection_id``): credentials are per project.
+Production adapters: :mod:`ovlm.renewal.production`. Tests: ``tests/integration/renewal/doubles.py``.
 """
 
 from __future__ import annotations
@@ -31,39 +30,26 @@ class FenceLike(Protocol):
 
 
 class CloudPort(Protocol):
-    def write_client(self, registry: OwnershipRegistry, gate: Gate) -> GuardedWriteClient: ...
+    def unavailable_reason(self, project: str) -> str | None:
+        """Why this project cannot be renewed now (no write credential, no guest key), or ``None``. Checked at
+        admission, so a run without credentials is rejected before it takes a lock."""
+        ...
 
-    def write_credential_expires_at(self) -> datetime | None:
+    def write_client(
+        self, registry: OwnershipRegistry, gate: Gate, *, project: str
+    ) -> GuardedWriteClient: ...
+
+    def write_credential_expires_at(self, project: str) -> datetime | None:
         """``expires_at`` of the write application credential (entered by the admin); ``None`` if unknown."""
         ...
 
-    def write_user_id(self) -> str | None:
+    def write_user_id(self, project: str) -> str | None:
         """Keystone user of the write credential (B3 adoption: ``user_id`` must match, SEC-R-23)."""
         ...
 
-    def token_expires_at(self) -> datetime | None:
+    def token_expires_at(self, project: str) -> datetime | None:
         """Expiry of a Keystone token obtained now (pre-warmed before the W1 claim transaction, SRE-R-28 b)."""
         ...
-
-    def snapshots(self) -> SnapshotPort | None: ...
-
-
-@dataclass(frozen=True)
-class SnapshotInfo:
-    openstack_id: str
-    name: str
-    status: str
-    volume_id: str
-
-
-class SnapshotPort(Protocol):
-    def find_snapshot(self, name: str) -> SnapshotInfo | None: ...
-
-    def get_snapshot(self, snapshot_id: str) -> SnapshotInfo | None: ...
-
-    def create_snapshot(self, volume_id: str, name: str, gate: Gate) -> SnapshotInfo: ...
-
-    def delete_snapshot(self, snapshot_id: str, gate: Gate) -> None: ...
 
 
 Role = Literal["old", "new"]
@@ -172,6 +158,7 @@ class GuestPort(Protocol):
     def pin_host_key(
         self,
         *,
+        run_id: str,
         target: GuestRef,
         policy: str,
         bootstrap_public: str | None,
@@ -184,7 +171,13 @@ class GuestPort(Protocol):
         ...
 
     def probe(
-        self, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...]
+        self, run_id: str, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...]
     ) -> GuestProbe: ...
 
-    def external_probe(self, address: str, check: Mapping[str, Any]) -> ExternalResult: ...
+    def external_probe(
+        self, address: str, check: Mapping[str, Any], candidates: Mapping[str, str | None]
+    ) -> ExternalResult:
+        """HTTP probe of ``health_check.external`` at ``address`` from the worker. ``candidates`` maps the server
+        ids that may answer (blue, green) to their names; ``identity`` is the id of the one the response proves it
+        came from, or ``None``."""
+        ...
