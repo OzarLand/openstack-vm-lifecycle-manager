@@ -130,6 +130,7 @@ def test_readyz_503_when_database_unreachable(secrets_dir: Path) -> None:
 
     s = Settings(
         process_role="api",
+        development_mode=True,
         db={
             "host": "127.0.0.1",
             "port": 1,

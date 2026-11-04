@@ -32,6 +32,9 @@ def _run_api() -> int:
         log_config=None,
         access_log=False,
         server_header=False,
+        # The client address is resolved by OVLM from http.trusted_proxies (ovlm.auth.clientaddr); uvicorn must
+        # not rewrite the peer from X-Forwarded-For with its own, separately configured trust list.
+        proxy_headers=False,
     )
     return 0
 

@@ -74,7 +74,7 @@ def test_uuid7_is_time_ordered_valid_v7() -> None:
 
 def test_unauthenticated_requests_are_refused_with_401() -> None:
     """Every route needs a session or token: no credentials means problem+json 401, never data."""
-    client = TestClient(create_app(Settings(), probe=_Probe(), start_metrics_server=False))
+    client = TestClient(create_app(Settings(development_mode=True), probe=_Probe(), start_metrics_server=False))
     for method, path in (
         ("GET", "/api/v1/servers"),
         ("GET", "/api/v1/services"),

@@ -15,7 +15,7 @@ HTMX_SHA256 = "e209dda5c8235479f3166defc7750e1dbcd5a5c1808b7792fc2e6733768fb447"
 
 
 def test_pages_need_a_session_and_static_assets_do_not() -> None:
-    c = TestClient(create_app(Settings(), probe=FakeProbe(True), start_metrics_server=False))
+    c = TestClient(create_app(Settings(development_mode=True), probe=FakeProbe(True), start_metrics_server=False))
     for path in ("/", "/inventory", "/services", "/renewals", "/audit", "/account/stepup"):
         r = c.get(path, follow_redirects=False)
         assert r.status_code == 303 and r.headers["location"] == "/login", path
