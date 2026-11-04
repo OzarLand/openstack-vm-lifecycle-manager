@@ -32,9 +32,11 @@ from ovlm.observability.metrics import (
     heartbeat_age,
     record_heartbeat,
 )
+from ovlm.readiness.job import ReadinessDefinition
 from ovlm.workflow.crashpoint import ENV_VAR as CRASHPOINT_ENV
 from ovlm.workflow.engine import Claim, EngineConfig, WorkflowEngine
 from ovlm.workflow.registry import Registry
+from ovlm.workflow.workers import SWEEP_AFTER_BEATS
 
 log = logging.getLogger("ovlm.worker")
 
@@ -42,9 +44,14 @@ log = logging.getLogger("ovlm.worker")
 METRICS_EVERY = 6
 
 
-def build_registry(settings: Settings) -> Registry:
-    """Workflow definitions of this release. Strategies register here (E5-4 adds ``bluegreen_fip_v1``)."""
-    return Registry()
+def build_registry(settings: Settings, engine: Engine | None = None) -> Registry:
+    """Workflow definitions of this release. Strategies register here (E5-4 adds ``bluegreen_fip_v1``).
+
+    ``readiness`` (E4-1) reads the database only and needs the engine to store its assessment."""
+    registry = Registry()
+    if engine is not None:
+        registry.register(ReadinessDefinition(engine))
+    return registry
 
 
 class Worker:
@@ -98,6 +105,7 @@ class Worker:
         wf.admit_pending()
         wf.run_scheduler()
         if self._iterations % METRICS_EVERY == 0:
+            wf.sweep_worker_rows(SWEEP_AFTER_BEATS * self.settings.worker.heartbeat_interval)
             wf.refresh_metrics()
         free = self.settings.worker.slots - self.active_steps()
         if self.stop_event.is_set() or free <= 0:
@@ -182,7 +190,7 @@ def run(settings: Settings | None = None) -> int:
     try:
         check_schema_at_head(engine, settings.migrations_dir)
         workflow = WorkflowEngine(
-            engine, build_registry(settings), EngineConfig.from_settings(settings)
+            engine, build_registry(settings, engine), EngineConfig.from_settings(settings)
         )
         worker = Worker(settings, engine, workflow)
         BUILD_INFO.labels(__version__, "worker").set(1)

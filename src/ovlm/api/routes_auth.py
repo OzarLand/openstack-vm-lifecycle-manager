@@ -2,7 +2,7 @@
 
 Human pages: ``/login``, ``/logout``, ``/enrol/{link}``, ``/account/totp``.
 JSON (api-design.md 3.8): ``/api/v1/session`` (+ ``/totp/enrol``, ``/totp/confirm``, ``/reauth``), ``/api/v1/tokens``,
-``/api/v1/users`` (admin), ``/api/v1/role-bindings`` (admin). Nobody ever submits a password for someone else:
+``/api/v1/users`` (admin), ``/api/v1/role-bindings`` (admin), ``/api/v1/settings/auth`` (admin). Nobody ever submits a password for someone else:
 the only password inputs are the user's own login, re-authentication and enrolment.
 """
 
@@ -24,8 +24,9 @@ from sqlalchemy.orm import Session
 from ovlm import __version__, audit
 from ovlm.auth import csrf as csrf_mod
 from ovlm.auth import events as _events  # noqa: F401  (registers the audit allowlists)
+from ovlm.auth import installation, passwords, sod, tokens, users
 from ovlm.auth import login as login_svc
-from ovlm.auth import passwords, tokens, users
+from ovlm.auth.authz import Action
 from ovlm.auth.deps import (
     client_ip,
     current_principal,
@@ -33,11 +34,13 @@ from ovlm.auth.deps import (
     get_hasher,
     get_settings,
     get_vault,
+    require_action,
     require_role,
 )
 from ovlm.auth.errors import ProblemError, ProblemRoute, forbidden
-from ovlm.auth.principal import GLOBAL, Principal
+from ovlm.auth.principal import GLOBAL, Principal, canonical_scope
 from ovlm.auth.sessions import create_session, delete_session, delete_user_sessions
+from ovlm.auth.stepup import consume_stepup
 from ovlm.auth.totp import TotpUnavailableError, TotpVault
 from ovlm.config import Settings
 from ovlm.ui import TEMPLATE_DIR
@@ -51,7 +54,8 @@ Cfg = Annotated[Settings, Depends(get_settings)]
 Hasher = Annotated[PasswordHasher, Depends(get_hasher)]
 Vault = Annotated[TotpVault | None, Depends(get_vault)]
 Me = Annotated[Principal, Depends(current_principal)]
-HumanAdmin = Annotated[Principal, Depends(require_role("admin", human_only=True))]
+HumanAdmin = Annotated[Principal, Depends(require_action(Action.USER_MANAGE, GLOBAL))]
+SettingsAdmin = Annotated[Principal, Depends(require_action(Action.SETTINGS_MANAGE, GLOBAL))]
 GENERIC_LOGIN_ERROR = "Invalid username, password or code."
 
 
@@ -542,9 +546,9 @@ def api_token_create(
     who: Annotated[Principal, Depends(require_role("viewer", human_only=True))],
 ) -> dict[str, Any]:
     try:
-        users.check_scope(body.project_scope)
+        project_scope = users.check_scope(body.project_scope)  # canonical form (SEC-C-8)
         tokens.validate_request(
-            sorted(who.grants), body.scopes, body.project_scope, body.expires_in_days
+            sorted(who.grants), body.scopes, project_scope, body.expires_in_days
         )
     except ValueError as exc:
         raise ProblemError(422, "token-scope-exceeded", "Token not allowed", str(exc)) from None
@@ -553,7 +557,7 @@ def api_token_create(
         user_id=who.user_id,
         name=body.name,
         scopes=body.scopes,
-        project_scope=body.project_scope,
+        project_scope=project_scope,
         days=body.expires_in_days,
     )
     _audit(
@@ -565,7 +569,7 @@ def api_token_create(
         after={
             "name": body.name,
             "scopes": body.scopes,
-            "project_scope": body.project_scope,
+            "project_scope": project_scope,
             "expires_at": expires_at,
             "owner_id": str(who.user_id),
         },
@@ -667,6 +671,12 @@ def _issue_link_response(
 
 @router.post("/api/v1/users", status_code=201)
 def api_user_create(body: UserBody, db: Db, settings: Cfg, who: HumanAdmin) -> dict[str, Any]:
+    held: list[tuple[str, str]] = []
+    for (
+        r
+    ) in body.roles:  # operator + approver in one scope is refused here too (security-model.md 3.2)
+        sod.check_binding_sod(db, held, r.role, r.scope)
+        held.append((r.role, r.scope))
     try:
         user_id = users.create_user(
             db,
@@ -676,6 +686,11 @@ def api_user_create(body: UserBody, db: Db, settings: Cfg, who: HumanAdmin) -> d
             created_via="admin",
             bindings=[(r.role, r.scope) for r in body.roles],
         )
+    except users.ScopeNotFoundError:
+        db.rollback()
+        raise ProblemError(
+            404, "not-found", "Project not found", "No such project connection."
+        ) from None
     except users.UserError as exc:
         db.rollback()
         raise ProblemError(422, "invalid-user", "User not created", str(exc)) from None
@@ -690,7 +705,7 @@ def api_user_create(body: UserBody, db: Db, settings: Cfg, who: HumanAdmin) -> d
             "display_name": body.display_name,
             "state": "pending_enrolment",
             "created_via": "admin",
-            "roles": [f"{r.role}@{r.scope}" for r in body.roles],
+            "roles": [f"{r.role}@{canonical_scope(r.scope)}" for r in body.roles],
         },
     )
     result = _issue_link_response(db, settings, who, user_id, "enrol")
@@ -756,29 +771,121 @@ class BindingBody(_Body):
     scope: str = GLOBAL
 
 
+def _user_state(db: Session, user_id: UUID) -> str | None:
+    state: str | None = db.execute(
+        text("SELECT state FROM app_user WHERE id = :u"), {"u": user_id}
+    ).scalar_one_or_none()
+    return state
+
+
+def _guard_own_bindings(db: Session, who: Principal, user_id: UUID) -> bool:
+    """An admin may not change their own bindings unless they are the only admin (security-model.md 3.1).
+    Returns True when it is such an allowed self-change (the audit row then says so)."""
+    if user_id != who.user_id:
+        return False
+    others = db.execute(
+        text(
+            """
+            SELECT count(DISTINCT b.user_id) FROM role_binding b JOIN app_user u ON u.id = b.user_id
+            WHERE b.role = 'admin' AND b.scope = 'global' AND b.revoked_at IS NULL
+              AND u.state = 'active' AND b.user_id <> :me
+            """
+        ),
+        {"me": who.user_id},
+    ).scalar_one()
+    if others:
+        raise forbidden(
+            "own-bindings",
+            "Admins cannot change their own role bindings while another admin exists; ask another admin.",
+        )
+    return True
+
+
 @router.post("/api/v1/role-bindings", status_code=201)
-def api_binding_create(body: BindingBody, db: Db, who: HumanAdmin) -> dict[str, str]:
+def api_binding_create(
+    body: BindingBody, db: Db, who: HumanAdmin, response: Response
+) -> dict[str, Any]:
+    if _user_state(db, body.user_id) in (None, "disabled"):
+        raise ProblemError(404, "not-found", "User not found", "No such active user.")
+    own = _guard_own_bindings(db, who, body.user_id)
     try:
-        binding_id = users.add_binding(
-            db, user_id=body.user_id, role=body.role, scope=body.scope, created_by=who.user_id
+        scope = users.check_scope(body.scope)  # UUID project scopes in canonical form (SEC-C-8)
+        users.check_project_exists(db, scope)
+    except users.ScopeNotFoundError:
+        raise ProblemError(
+            404, "not-found", "Project not found", "No such project connection."
+        ) from None
+    except users.UserError as exc:
+        raise ProblemError(422, "invalid-binding", "Binding not created", str(exc)) from None
+    sod.check_binding_sod(db, users.load_bindings(db, body.user_id), body.role, scope)
+    try:
+        result = users.add_binding(
+            db, user_id=body.user_id, role=body.role, scope=scope, created_by=who.user_id
         )
     except users.UserError as exc:
         raise ProblemError(422, "invalid-binding", "Binding not created", str(exc)) from None
+    if (
+        not result.created
+    ):  # an identical active binding exists: nothing changed, nothing audited (SEC-C-9)
+        db.rollback()
+        response.status_code = 200
+        return {"id": str(result.id), "created": False}
     _audit(
         db,
         who,
-        "role_binding.create",
+        "role_binding.create.own" if own else "role_binding.create",
         "role_binding",
-        str(binding_id),
-        after={"user_id": str(body.user_id), "role": body.role, "scope": body.scope},
+        str(result.id),
+        after={"user_id": str(body.user_id), "role": body.role, "scope": result.scope},
     )
     delete_user_sessions(db, body.user_id)  # privilege change: new session id at next login
     db.commit()
-    return {"id": str(binding_id)}
+    return {"id": str(result.id), "created": True}
+
+
+@router.get("/api/v1/role-bindings")
+def api_binding_list(
+    db: Db, who: HumanAdmin, user_id: UUID | None = None, include_revoked: bool = False
+) -> dict[str, Any]:
+    rows = db.execute(
+        text(
+            """
+            SELECT b.id, b.user_id, u.username, b.role, b.scope, b.created_by, b.created_at,
+                   b.revoked_by, b.revoked_at
+            FROM role_binding b JOIN app_user u ON u.id = b.user_id
+            WHERE (CAST(:u AS uuid) IS NULL OR b.user_id = :u) AND (:all OR b.revoked_at IS NULL)
+            ORDER BY u.username, b.created_at
+            """
+        ),
+        {"u": user_id, "all": include_revoked},
+    ).all()
+    return {
+        "items": [
+            {
+                "id": str(r.id),
+                "user_id": str(r.user_id),
+                "username": r.username,
+                "role": r.role,
+                "scope": r.scope,
+                "created_by": str(r.created_by) if r.created_by else None,
+                "created_at": r.created_at.isoformat(),
+                "revoked_by": str(r.revoked_by) if r.revoked_by else None,
+                "revoked_at": r.revoked_at.isoformat() if r.revoked_at else None,
+            }
+            for r in rows
+        ]
+    }
 
 
 @router.delete("/api/v1/role-bindings/{binding_id}", status_code=204)
 def api_binding_revoke(binding_id: UUID, db: Db, who: HumanAdmin) -> Response:
+    owner = db.execute(
+        text("SELECT user_id FROM role_binding WHERE id = :id AND revoked_at IS NULL"),
+        {"id": binding_id},
+    ).scalar_one_or_none()
+    if owner is None:
+        raise ProblemError(404, "not-found", "Binding not found", "No such active binding.")
+    own = _guard_own_bindings(db, who, owner)
     gone = users.revoke_binding(db, binding_id, revoked_by=who.user_id)
     if gone is None:
         raise ProblemError(404, "not-found", "Binding not found", "No such active binding.")
@@ -786,7 +893,7 @@ def api_binding_revoke(binding_id: UUID, db: Db, who: HumanAdmin) -> Response:
     _audit(
         db,
         who,
-        "role_binding.revoke",
+        "role_binding.revoke.own" if own else "role_binding.revoke",
         "role_binding",
         str(binding_id),
         before={"user_id": str(user_id), "role": role, "scope": scope},
@@ -794,3 +901,89 @@ def api_binding_revoke(binding_id: UUID, db: Db, who: HumanAdmin) -> Response:
     delete_user_sessions(db, user_id)
     db.commit()
     return Response(status_code=204)
+
+
+@router.get("/api/v1/users/{user_id}")
+def api_user_get(user_id: UUID, db: Db, who: HumanAdmin) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            "SELECT id, username, display_name, state, (totp_confirmed_at IS NOT NULL) AS totp "
+            "FROM app_user WHERE id = :u"
+        ),
+        {"u": user_id},
+    ).first()
+    if row is None:
+        raise ProblemError(404, "not-found", "User not found", "No such user.")
+    return {
+        "id": str(row.id),
+        "username": row.username,
+        "display_name": row.display_name,
+        "state": row.state,
+        "totp_enrolled": row.totp,
+        "roles": [{"role": r, "scope": s} for r, s in sorted(users.load_bindings(db, user_id))],
+        "provenance": sod.account_provenance(db, user_id),
+    }
+
+
+# --- JSON: installation settings (admin, human session, TOTP step-up, typed confirmation) -------------------
+
+SETTING_STEPUP_ACTION = "settings.auth.update"
+
+
+class AuthSettingsBody(_Body):
+    allow_operator_approver: bool
+    stepup_id: UUID
+    #: Must read ``allow_operator_approver=true`` or ``allow_operator_approver=false``, matching the value.
+    typed_confirmation: str = Field(max_length=100)
+    reason: str = Field(default="", max_length=500)
+
+
+@router.get("/api/v1/settings/auth")
+def api_settings_auth_get(db: Db, who: SettingsAdmin) -> dict[str, Any]:
+    return {
+        "allow_operator_approver": installation.allow_operator_approver(db),
+        "history": installation.setting_history(db, installation.ALLOW_OPERATOR_APPROVER),
+        "stepup": {
+            "action": SETTING_STEPUP_ACTION,
+            "target_id": installation.ALLOW_OPERATOR_APPROVER,
+        },
+        "note": "When true, one person may hold operator and approver in a scope; their plan and cutover "
+        "approvals are flagged self-approved. Retirement never allows self-approval.",
+    }
+
+
+@router.put("/api/v1/settings/auth")
+def api_settings_auth_put(body: AuthSettingsBody, db: Db, who: SettingsAdmin) -> dict[str, Any]:
+    value = body.allow_operator_approver
+    expected = f"allow_operator_approver={'true' if value else 'false'}"
+    if " ".join(body.typed_confirmation.split()).lower() != expected:
+        raise ProblemError(
+            422,
+            "confirmation-mismatch",
+            "Typed confirmation does not match",
+            f"Type exactly '{expected}' to confirm.",
+        )
+    before = installation.allow_operator_approver(db)
+    stepup_id = consume_stepup(
+        db, who, body.stepup_id, action=SETTING_STEPUP_ACTION,
+        target_id=installation.ALLOW_OPERATOR_APPROVER,
+    )  # fmt: skip
+    changed_at = installation.set_setting(
+        db,
+        installation.ALLOW_OPERATOR_APPROVER,
+        value,
+        changed_by=who.user_id,
+        stepup_id=stepup_id,
+        reason=body.reason,
+    )
+    _audit(
+        db,
+        who,
+        "settings.auth.update",
+        "installation_setting",
+        installation.ALLOW_OPERATOR_APPROVER,
+        before={"value": before},
+        after={"value": value, "stepup_id": str(stepup_id), "reason": body.reason},
+    )
+    db.commit()
+    return {"allow_operator_approver": value, "changed_at": changed_at.isoformat()}

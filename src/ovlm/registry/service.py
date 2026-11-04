@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 
 from ovlm.inventory import service as inventory
 from ovlm.inventory.ids import uuid7
-from ovlm.inventory.service import Page, clamp_limit, decode_cursor, encode_cursor
+from ovlm.inventory.service import Page, Projects, clamp_limit, decode_cursor, encode_cursor, scoped
 from ovlm.registry.errors import DomainError, conflict, not_found
 from ovlm.registry.tables import managed_vm, service, service_group
 
@@ -130,8 +130,14 @@ def create_service(
     return _service_dict(row)
 
 
-def get_service(session: Session, service_id: UUID) -> dict[str, Any] | None:
-    row = session.execute(select(service).where(service.c.id == service_id)).first()
+def get_service(
+    session: Session, service_id: UUID, *, projects: Projects = None
+) -> dict[str, Any] | None:
+    """``None`` when absent or outside ``projects`` (project scoping, security-model.md 3.3)."""
+    stmt = scoped(
+        select(service).where(service.c.id == service_id), service.c.project_connection_id, projects
+    )
+    row = session.execute(stmt).first()
     return _service_dict(row) if row else None
 
 
@@ -141,9 +147,10 @@ def list_services(
     project: UUID | None = None,
     limit: int | None = None,
     cursor: str | None = None,
+    projects: Projects = None,
 ) -> Page:
     n = clamp_limit(limit)
-    stmt = select(service)
+    stmt = scoped(select(service), service.c.project_connection_id, projects)
     if project is not None:
         stmt = stmt.where(service.c.project_connection_id == project)
     if cursor:
@@ -213,13 +220,19 @@ def delete_service(session: Session, service_id: UUID, expected_version: int) ->
 
 
 def register_managed_vm(
-    session: Session, service_id: UUID, observed_server_id: UUID, *, actor_id: UUID | None = None
+    session: Session,
+    service_id: UUID,
+    observed_server_id: UUID,
+    *,
+    actor_id: UUID | None = None,
+    projects: Projects = None,
 ) -> dict[str, Any]:
-    """Register an observed server as the ``current`` VM of a service."""
-    svc = get_service(session, service_id)
+    """Register an observed server as the ``current`` VM of a service. An observed server outside ``projects``
+    (the caller's visible projects) is reported as not found, never as "in another project"."""
+    svc = get_service(session, service_id, projects=projects)
     if svc is None:
         raise not_found("service-not-found", "Service")
-    ref = inventory.get_server_ref(session, observed_server_id)
+    ref = inventory.get_server_ref(session, observed_server_id, projects=projects)
     if ref is None:
         raise not_found("observed-server-not-found", "Observed server")
     if str(ref.project_connection_id) != svc["project_connection_id"]:
@@ -260,9 +273,13 @@ def list_managed_vms(
     service_id: UUID | None = None,
     limit: int | None = None,
     cursor: str | None = None,
+    projects: Projects = None,
 ) -> Page:
     n = clamp_limit(limit)
     stmt = select(managed_vm)
+    if projects is not None:  # a managed VM's project is its service's project
+        in_scope = scoped(select(service.c.id), service.c.project_connection_id, projects)
+        stmt = stmt.where(managed_vm.c.service_id.in_(in_scope))
     if service_id is not None:
         stmt = stmt.where(managed_vm.c.service_id == service_id)
     if cursor:
@@ -279,20 +296,36 @@ def list_managed_vms(
     )
 
 
-def get_managed_vm(session: Session, vm_id: UUID) -> dict[str, Any] | None:
+def managed_vm_project(session: Session, vm_id: UUID) -> UUID | None:
+    """The project connection of a managed VM (through its service), or ``None`` if there is no such VM."""
+    value: UUID | None = session.execute(
+        select(service.c.project_connection_id)
+        .join(managed_vm, managed_vm.c.service_id == service.c.id)
+        .where(managed_vm.c.id == vm_id)
+    ).scalar_one_or_none()
+    return value
+
+
+def get_managed_vm(
+    session: Session, vm_id: UUID, *, projects: Projects = None
+) -> dict[str, Any] | None:
     """The managed VM with separate ``desired`` and ``observed`` blocks (FR-REG-4). ``desired`` carries the
-    service's profile id only; profile versions arrive with the profiles module. Drift is V1."""
+    service's profile id only; profile versions arrive with the profiles module. Drift is V1.
+    ``None`` when absent or outside ``projects``."""
     row = session.execute(select(managed_vm).where(managed_vm.c.id == vm_id)).first()
     if row is None:
         return None
+    svc = get_service(session, row.service_id, projects=projects)
+    if svc is None:
+        return None
     out = _vm_dict(row)
-    svc = get_service(session, row.service_id)
+    out["project_connection_id"] = svc["project_connection_id"]
     out["desired"] = {
-        "profile_id": svc["current_profile_id"] if svc else None,
+        "profile_id": svc["current_profile_id"],
         "profile_version": None,
     }
     out["observed"] = inventory.get_servers_by_openstack_ids(
-        session, [row.openstack_server_id]
+        session, [row.openstack_server_id], projects=[UUID(svc["project_connection_id"])]
     ).get(row.openstack_server_id)
     return out
 

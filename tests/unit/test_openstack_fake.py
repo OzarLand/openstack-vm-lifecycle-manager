@@ -13,21 +13,21 @@ from ovlm.openstack.types import CreateServerSpec
 
 
 def test_fake_implements_both_protocols() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     assert isinstance(fake, ReadClient) and isinstance(fake, WriteClient)
 
 
 def test_microversion_floor_and_report() -> None:
-    assert FakeOpenStack().negotiated_versions().compute_used == (2, 100)
+    assert FakeOpenStack(strict_gate=False).negotiated_versions().compute_used == (2, 100)
     with pytest.raises(errors.UnsupportedCloudError):
-        FakeOpenStack(compute_max=(2, 40)).negotiated_versions()
+        FakeOpenStack(compute_max=(2, 40), strict_gate=False).negotiated_versions()
 
 
 # --- servers: listing gotchas -----------------------------------------------------------------------------------
 
 
 def test_metadata_filter_is_ignored_for_non_admins_and_returns_every_server() -> None:
-    fake = FakeOpenStack(role="member")
+    fake = FakeOpenStack(role="member", strict_gate=False)
     mine = fake.add_server("mine", metadata={"ovlm": "exp01"})
     fake.add_server("foreign", metadata={"other": "x"})
     result = fake.list_servers(metadata={"ovlm": "exp01"})
@@ -35,14 +35,14 @@ def test_metadata_filter_is_ignored_for_non_admins_and_returns_every_server() ->
 
 
 def test_metadata_filter_works_for_admin() -> None:
-    fake = FakeOpenStack(role="admin")
+    fake = FakeOpenStack(role="admin", strict_gate=False)
     mine = fake.add_server("mine", metadata={"ovlm": "exp01"})
     fake.add_server("foreign")
     assert [s.openstack_id for s in fake.list_servers(metadata={"ovlm": "exp01"})] == [mine]
 
 
 def test_tag_filters_work() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     a = fake.add_server("a", tags=["ovlm:managed", "ovlm:run:1"])
     fake.add_server("b", tags=["ovlm:managed"])
     fake.add_server("c")
@@ -52,14 +52,14 @@ def test_tag_filters_work() -> None:
 
 
 def test_names_are_not_unique() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     fake.add_server("dup")
     fake.add_server("dup")
     assert len(fake.list_servers(name="dup")) == 2
 
 
 def test_changes_since_returns_tombstones_and_plain_listing_does_not() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     sid = fake.add_server("gone-soon")
     fake.add_server("stays")
     fake.tick(60)
@@ -73,7 +73,7 @@ def test_changes_since_returns_tombstones_and_plain_listing_does_not() -> None:
 
 
 def test_minimal_construct_for_unreachable_cell() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     fake.add_server("hidden", minimal=True)
     (s,) = fake.list_servers()
     assert (
@@ -97,7 +97,7 @@ def _spec(fake: FakeOpenStack, **kw: object) -> CreateServerSpec:
 
 
 def test_create_sets_tags_atomically_and_builds_asynchronously() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     s = fake.create_server(_spec(fake, tags=("ovlm:managed", "ovlm:run:abc")))
     assert s.status == "BUILD" and s.tags == ("ovlm:managed", "ovlm:run:abc")
     # listable by tag while still BUILD: a crashed worker never creates a second one (OSI s.3)
@@ -107,18 +107,18 @@ def test_create_sets_tags_atomically_and_builds_asynchronously() -> None:
 
 
 def test_tags_at_create_need_2_52() -> None:
-    fake = FakeOpenStack(compute_max=(2, 40))
+    fake = FakeOpenStack(compute_max=(2, 40), strict_gate=False)
     with pytest.raises(errors.BadRequestError):
         fake.create_server(_spec(fake, tags=("x",)))
 
 
 def test_over_quota_is_403_and_no_valid_host_is_an_error_server() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     fake.quota_instances = 1
     fake.create_server(_spec(fake, name="one"))
     with pytest.raises(errors.QuotaExceededError):
         fake.create_server(_spec(fake, name="two"))
-    fake2 = FakeOpenStack()
+    fake2 = FakeOpenStack(strict_gate=False)
     fake2.force_no_valid_host = True
     s = fake2.create_server(_spec(fake2))
     fake2.tick(fake2.build_delay)
@@ -126,7 +126,7 @@ def test_over_quota_is_403_and_no_valid_host_is_an_error_server() -> None:
 
 
 def test_create_whose_response_is_lost_is_found_by_tag() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     fake.fail("create_server", errors.OpenStackError("timeout"), when="after_apply")
     with pytest.raises(errors.OpenStackError):
         fake.create_server(_spec(fake, tags=("ovlm:run:r1",)))
@@ -139,7 +139,7 @@ def test_create_whose_response_is_lost_is_found_by_tag() -> None:
 
 
 def _attached_pair() -> tuple[FakeOpenStack, str, str]:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     srv = fake.add_server("blue")
     vol = fake.add_volume("data")
     fake.attach_volume(srv, vol)
@@ -148,7 +148,7 @@ def _attached_pair() -> tuple[FakeOpenStack, str, str]:
 
 
 def test_attach_goes_reserved_attaching_in_use_with_the_clock() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     srv, vol = fake.add_server("blue"), fake.add_volume("data")
     fake.attach_volume(srv, vol)
     assert fake.get_volume(vol).status == "reserved"
@@ -174,7 +174,7 @@ def test_detach_goes_detaching_then_available() -> None:
 
 
 def test_refused_detach_rolls_back_to_in_use_after_the_timeout() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     srv = fake.add_server("blue", guest_refuses_detach=True)
     vol = fake.add_volume("data")
     fake.attach_volume(srv, vol)
@@ -194,7 +194,7 @@ def test_attach_of_in_use_volume_is_400() -> None:
 
 
 def test_failed_attach_leaves_the_volume_attaching_with_error_attachment() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     srv, vol = fake.add_server("x"), fake.add_volume("v", attach_fails=True)
     fake.attach_volume(srv, vol)
     fake.tick(100)
@@ -205,7 +205,7 @@ def test_failed_attach_leaves_the_volume_attaching_with_error_attachment() -> No
 
 @pytest.mark.parametrize("op", ["stop_server", "start_server", "delete_server"])
 def test_locked_server_refuses_state_changes_with_409(op: str) -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     srv = fake.add_server(
         "blue", status="SHUTOFF" if op == "start_server" else "ACTIVE", locked=True
     )
@@ -225,7 +225,7 @@ def test_locked_server_refuses_attach_and_detach() -> None:
 
 
 def test_admin_lock_cannot_be_unlocked_by_a_member() -> None:
-    fake = FakeOpenStack(role="member")
+    fake = FakeOpenStack(role="member", strict_gate=False)
     srv = fake.add_server("blue", locked=True, locked_by="admin")
     with pytest.raises(errors.ForbiddenError):
         fake.unlock_server(srv)
@@ -239,7 +239,7 @@ def test_detach_refused_when_the_compute_host_is_down() -> None:
 
 
 def test_server_with_a_task_in_progress_refuses_operations() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     srv = fake.add_server("blue")
     fake.stop_server(srv)
     with pytest.raises(errors.ConflictError):
@@ -265,7 +265,7 @@ def test_delete_on_termination_only_flagged_volumes_die_with_the_server() -> Non
 
 
 def _fip_world() -> tuple[FakeOpenStack, str, str, str]:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     net, ext = fake.add_network("tenant"), fake.add_network("ext", external=True)
     port = fake.add_port(net)
     fip = fake.add_floating_ip(ext)
@@ -304,7 +304,7 @@ def test_port_with_another_floating_ip_on_the_same_network_is_409() -> None:
 
 
 def test_empty_floating_ip_pool_is_400_although_quota_is_free() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     ext = fake.add_network("ext", external=True)
     with pytest.raises(errors.NoFloatingIpAvailableError):
         fake.allocate_floating_ip(ext)
@@ -313,7 +313,7 @@ def test_empty_floating_ip_pool_is_400_although_quota_is_free() -> None:
 
 
 def test_missing_default_volume_type() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     fake.add_volume_type("NVMe")
     assert [t.is_default for t in fake.list_volume_types()] == [False]
     with pytest.raises(errors.ServerError, match="__DEFAULT__"):
@@ -324,7 +324,7 @@ def test_missing_default_volume_type() -> None:
 
 
 def test_console_output_is_empty_by_default() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     srv = fake.add_server("x")
     assert fake.get_console_output(srv) == ""  # HTTP 200 with an empty body (LAB-OBSERVED)
     fake.set_console(srv, "a\nb\nc")
@@ -335,7 +335,7 @@ def test_console_output_is_empty_by_default() -> None:
 
 
 def test_reader_cannot_mutate_but_can_read() -> None:
-    fake = FakeOpenStack(role="reader")
+    fake = FakeOpenStack(role="reader", strict_gate=False)
     srv = fake.add_server("x")
     assert len(fake.list_servers()) == 1
     with pytest.raises(errors.ForbiddenError):
@@ -347,7 +347,7 @@ def test_reader_cannot_mutate_but_can_read() -> None:
 
 
 def test_fail_before_applies_nothing_and_nth_counts_calls() -> None:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)
     srv = fake.add_server("x")
     fake.fail("lock_server", errors.ConflictError("boom"), nth=2)
     fake.lock_server(srv)  # first call fine
@@ -360,3 +360,113 @@ def test_snapshot_shows_plain_state() -> None:
     fake, srv, vol = _attached_pair()
     snap = fake.snapshot()
     assert snap["volumes"][vol] == {"status": "in-use", "attached_to": [srv]}
+
+
+# --- E5-2 additions: claim forms, faults, gate boundary --------------------------------------------------------
+
+
+def test_fip_tag_add_keeps_other_tags_and_has_a_limit() -> None:
+    fake = FakeOpenStack(strict_gate=False)
+    fip = fake.add_floating_ip(fake.add_network("ext", external=True), tags=["dns:web"])
+    fake.add_floating_ip_tag(fip, "ovlm:managed")
+    fake.add_floating_ip_tag(fip, "ovlm:managed")  # set semantics
+    assert fake.get_floating_ip(fip).tags == ("dns:web", "ovlm:managed")
+    full = fake.add_floating_ip(
+        fake.add_network("ext2", external=True), tags=[f"t{i}" for i in range(50)]
+    )
+    with pytest.raises(errors.BadRequestError):
+        fake.add_floating_ip_tag(full, "ovlm:managed")
+
+
+def test_volume_metadata_merge_keeps_foreign_keys() -> None:
+    fake = FakeOpenStack(strict_gate=False)
+    vol = fake.add_volume("v", metadata={"owner": "team"})
+    fake.merge_volume_metadata(vol, {"ovlm.managed": "true"})
+    assert fake.get_volume(vol).metadata == {"owner": "team", "ovlm.managed": "true"}
+
+
+def test_server_tag_limit_is_50() -> None:
+    fake = FakeOpenStack(strict_gate=False)
+    srv = fake.add_server("x", tags=[f"t{i}" for i in range(50)])
+    with pytest.raises(errors.BadRequestError, match="limit"):
+        fake.add_server_tag(srv, "ovlm:managed")
+
+
+def test_no_valid_host_exposes_the_fault_message() -> None:
+    fake = FakeOpenStack(strict_gate=False)
+    fake.force_no_valid_host = True
+    created = fake.create_server(
+        CreateServerSpec("g", fake.add_image(), fake.add_flavor(), network_id="n", tags=("a",))
+    )
+    assert fake.get_server_fault(created.openstack_id) is None  # still BUILD
+    fake.tick(60)
+    assert fake.get_server(created.openstack_id).status == "ERROR"
+    assert fake.get_server_fault(created.openstack_id) == "No valid host was found."
+
+
+def test_fip_on_a_port_with_several_fixed_ips_needs_the_address() -> None:
+    fake = FakeOpenStack(strict_gate=False)
+    net, ext = fake.add_network("n"), fake.add_network("e", external=True)
+    fake.add_router_path(net, ext)
+    port = fake.add_port(net, device_id="d")
+    p = fake._ports[port]
+    fake._ports[port] = type(p)(
+        **{**p.__dict__, "fixed_ips": (("10.0.0.5", "s"), ("10.0.0.6", "s"))}
+    )
+    fip = fake.add_floating_ip(ext)
+    with pytest.raises(errors.BadRequestError, match="multiple fixed"):
+        fake.update_floating_ip(fip, port)
+    assert fake.update_floating_ip(fip, port, "10.0.0.6").fixed_ip_address == "10.0.0.6"
+
+
+def test_same_server_second_attach_is_typed_already_attached() -> None:
+    fake, srv, vol = _attached_pair()
+    with pytest.raises(errors.VolumeAlreadyAttachedError):
+        fake.attach_volume(srv, vol)
+
+
+def test_gate_runs_before_the_fake_applies_or_injects_anything() -> None:
+    fake = FakeOpenStack(strict_gate=False)
+    srv = fake.add_server("x")
+    fake.fail("stop_server", errors.ServerError("boom", status=500))
+    seen: list[str] = []
+
+    def gate(action: str) -> None:
+        seen.append(action)
+        raise RuntimeError("gate refused")
+
+    with fake.gate_binding.bind(gate), pytest.raises(RuntimeError):
+        fake.stop_server(srv)
+    assert seen == ["openstack:stop_server"]
+    assert (
+        "stop_server" not in fake.calls
+    )  # refused before the cloud saw it; the injected fault is unused
+    with pytest.raises(errors.ServerError):
+        fake.stop_server(srv)  # no gate bound and not strict: the fault fires now
+
+
+def test_strict_fake_refuses_writes_without_a_gate_but_not_reads() -> None:
+    fake = FakeOpenStack(strict_gate=False)
+    srv = fake.add_server("x")
+    fake.strict_gate = True
+    fake.get_server(srv)
+    with pytest.raises(errors.WriteNotAllowedError):
+        fake.lock_server(srv, "ovlm:x")
+    fake.create_volume(
+        1, volume_type="ssd"
+    )  # fake-only cloud setup is outside the OVLM write boundary
+
+
+def test_the_fake_is_strict_by_default() -> None:
+    """SEC-C-7: like the real transport, a write with no fence gate bound is refused unless a test opts out."""
+    fake = FakeOpenStack()
+    assert fake.strict_gate
+    srv = fake.add_server("x")  # fake-only set-up is outside the OVLM write boundary
+    with pytest.raises(errors.WriteNotAllowedError, match="no fence gate bound"):
+        fake.stop_server(srv)
+    with pytest.raises(errors.WriteNotAllowedError, match="no fence gate bound"):
+        fake.lock_server(srv, "ovlm:x")
+    with pytest.raises(errors.WriteNotAllowedError, match="no fence gate bound"):
+        fake.delete_server(srv)
+    assert fake.calls == []
+    fake.get_server(srv)  # reads are not gated

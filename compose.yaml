@@ -50,6 +50,9 @@ services:
       OVLM_DB__PASSWORD_FILE: /run/secrets/db_api_password
       OVLM_HTTP__HOST: 0.0.0.0        # container-internal; published on loopback only below
       OVLM_HTTP__METRICS_HOST: 0.0.0.0 # reachable on the Compose network only, never published
+      # Development stack: no TLS proxy and no external_url. A real installation sets OVLM_EXTERNAL_URL and
+      # OVLM_HTTP__TRUSTED_PROXIES (the proxy's address) instead, and never development mode.
+      OVLM_DEVELOPMENT_MODE: "true"
     secrets: [db_api_password]
     ports:
       - "127.0.0.1:8000:8000"

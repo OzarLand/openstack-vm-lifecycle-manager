@@ -72,4 +72,5 @@
     {% if server.floating_ips %}<ul class="plain">{% for f in server.floating_ips %}<li><span class="mono">{{ f.data.floating_ip_address }}</span></li>{% endfor %}</ul>{% else %}<p class="muted">None.</p>{% endif %}
   </section>
 </div>
+{% if managed and readiness %}{% include "inventory/_readiness.html" %}{% endif %}
 {% endblock %}

@@ -129,6 +129,7 @@ def settings_for(role: str, admin_url: URL, db: str, secrets_dir: Path) -> Setti
     fname = {"migrate": "owner", "api": "api", "worker": "worker"}[role]
     return Settings(
         process_role=role,
+        development_mode=True,  # test installation (no external_url unless a test sets it)
         db={
             "host": admin_url.host,
             "port": admin_url.port,

@@ -21,13 +21,16 @@ from ovlm.auth.principal import Principal
 from ovlm.inventory import service as inventory
 from ovlm.registry import service as registry
 from ovlm.registry.errors import DomainError
+from ovlm.ui.readiness_view import readiness_context
 from ovlm.ui.routes_account import router as account_router
+from ovlm.ui.routes_readiness import router as readiness_router
 from ovlm.ui.support import UiRoute, error_page, render
 
 router = APIRouter(route_class=UiRoute, include_in_schema=False)
 router.include_router(
     account_router
 )  # step-up page; one include_router line in api/app.py serves the whole UI
+router.include_router(readiness_router)  # POST /inventory/servers/{id}/assess
 
 Db = Annotated[Session, Depends(get_db)]
 VIEWER = Depends(require_role("viewer"))
@@ -40,6 +43,7 @@ STATUS_CHOICES = ("present", "gone", "unknown", "ACTIVE", "SHUTOFF", "ERROR", "B
 NOTICES = {
     "registered": "The server is now a managed VM.",
     "service-created": "Service created.",
+    "assessment-requested": "Readiness assessment requested. The worker will store the result.",
 }
 
 
@@ -204,6 +208,7 @@ def _detail_context(db: Session, server_id: UUID) -> dict[str, Any] | None:
     return {
         "server": server, "managed": managed, "desired": desired, "service": service,
         "services": services, "can_register": can_register,
+        "readiness": readiness_context(db, UUID(managed["id"])) if managed else None,
     }  # fmt: skip
 
 

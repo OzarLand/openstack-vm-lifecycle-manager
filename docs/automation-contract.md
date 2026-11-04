@@ -244,3 +244,23 @@ Verdict values: `credible` (all automatic checks green + valid attestation), `pa
 | Ownership / maintainability | Profile requires a named owner; pinned dependencies; Ansible repo versioned. Control-debt risk: a profile with only its author able to explain it is flagged by the human attestation step. |
 
 Open limits: none of this has been executed. The first lab run (test-environment.md) is the validation.
+
+
+## 11. Implementation notes (E5-3, `src/ovlm/automation/`)
+
+Status: implemented and tested as listed in the E5-3 hand-off; nothing here is "lab validated". Where the code makes a
+choice the contract left open, or is stricter than the text, it is recorded here.
+
+| Topic | What the code does |
+|---|---|
+| Data-phase classification | Any failure of `quiesce`, `data_attach` or `rollback_hooks` is `needs_human`, even when the playbook reports `retryable` or `fatal` (the reported value stays in the evidence as `reported_classification`). This resolves the tension between 3.3 rule 2 ("fail retryable if the device is absent") and section 6 (never auto-retry a data phase without reading the real state): the engine re-runs only after the probe. |
+| `start_service` timeout | `retryable` (idempotent, `state: started`); the engine bounds the retries. Section 6 does not name it. |
+| Healthcheck | `result.json` is authoritative; the exit code is used only when the result is missing or invalid. `accept_degraded` turns a `retryable` result with `facts.health_state == "degraded"` into ok. |
+| Private key file | Written as `env/guest_key` (0600), not `env/ssh_key`: ansible-runner loads `env/ssh_key` into its own ssh-agent and keeps a copy in `artifacts/`. The key is used by file only (`IdentitiesOnly`, `ForwardAgent no`). |
+| Connection variables | `ansible_host/port/user/ssh_*` are inventory host vars only, never extra-vars: as extra-vars they also apply to `delegate_to: localhost` tasks (the result writer) and would send them to the guest. The lint refuses these names in plays, tasks, `add_host` and `group_vars`/`host_vars`. |
+| Lint vs the reference workload | `check_mode: false` on the read-only probes of the reference roles is flagged (`check_mode_forced`) and needs an audited waiver (`roles/*/tasks/*.yml`). The only exempt pattern is the controller-side task that writes `ovlm_result_path` (`delegate_to: localhost`). |
+| Pin check | `requirements.yml` is checked (exact versions; git roles need a SHA) and every pinned collection must already be present at that version in `collections_paths` or in the repo's `collections/`. Nothing is downloaded. |
+| Fence | `Fence.check("automation:spawn:<phase>")` immediately before the spawn; the revoke callback stops the process tree at once. `lease_needed(timeout)` gives the lease a step must cover. |
+| Signalling another OS user | The worker can signal `ovlm-ansible` processes only with privilege; `signal_prefix` (e.g. `sudo -n -u ovlm-ansible`) is prepended to `kill`. The runner's own job/idle timeouts need no cross-user signal. Deployment must provide one of the two. |
+| Run dir ownership | Worker root (or CAP_CHOWN): run dir chowned to `ovlm-ansible`, 0700/0600. Otherwise group `ovlm-ansible` with 0770/0660 and ancestors 0710; the KEK stays 0400 and owned by the worker user either way. |
+| Artefacts | Table `automation_run` (migration `automation_0001`). Restricted columns `log`, `events`, `diff`; `diff` only with `store_diffs` (also a table CHECK); purge sets the restricted columns to NULL after `artifact_expires_at`; no DELETE grant. |

@@ -69,12 +69,18 @@ def _backoff(failures: int, threshold: int) -> int:
 
 
 def check_rate_limit(db: Session, settings: Settings, username: str, source_ip: str | None) -> None:
-    """Raise :class:`RateLimitedError` while the backoff after recent failures is running.
+    """Raise :class:`RateLimitedError` while a backoff after recent failures is running.
 
-    Counts failures since the last success of that account within the window. The delay doubles per further
-    failure up to 15 minutes, so approvers are slowed, never locked out for good.
+    * Per account: failures since the last success of that account within the window. The delay doubles per
+      further failure up to 15 minutes, so approvers are slowed, never locked out for good. This is the only
+      limiter that escalates.
+    * Per source address (``source_ip``, the client resolved through the trusted proxies, ``None`` when unknown):
+      once the threshold is reached, a **fixed** ``login_ip_delay_seconds`` after the latest failure. It slows a
+      password spray from one address, but whoever shares that address with an attacker (or every user, if the
+      proxy is not configured as trusted) is held back by seconds only, never by the escalating delay (SEC-C-1).
     """
-    window = settings.auth.login_window_minutes
+    auth = settings.auth
+    window = auth.login_window_minutes
     by_user = db.execute(
         text(
             """
@@ -86,7 +92,7 @@ def check_rate_limit(db: Session, settings: Settings, username: str, source_ip: 
         ),
         {"u": username, "w": window},
     ).one()
-    waits = [(_backoff(by_user.n, settings.auth.login_failure_threshold), by_user.age)]
+    waits = [(_backoff(by_user.n, auth.login_failure_threshold), by_user.age)]
     if source_ip:
         by_ip = db.execute(
             text(
@@ -97,7 +103,8 @@ def check_rate_limit(db: Session, settings: Settings, username: str, source_ip: 
             ),
             {"ip": source_ip, "w": window},
         ).one()
-        waits.append((_backoff(by_ip.n, settings.auth.login_ip_failure_threshold), by_ip.age))
+        if by_ip.n >= auth.login_ip_failure_threshold:
+            waits.append((auth.login_ip_delay_seconds, by_ip.age))
     for delay, age in waits:
         if delay and age is not None and float(age) < delay:
             raise RateLimitedError(max(1, math.ceil(delay - float(age))))

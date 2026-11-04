@@ -101,7 +101,7 @@ def test_only_the_owner_can_submit_a_password_structural() -> None:
     from ovlm.api.app import create_app
     from ovlm.config import Settings
 
-    app = create_app(Settings(), start_metrics_server=False, probe=None)
+    app = create_app(Settings(development_mode=True), start_metrics_server=False, probe=None)
     found: set[tuple[str, str]] = set()
     for route in iter_api_routes(app):
         names = {p.name for p in route.dependant.body_params} | {

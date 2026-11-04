@@ -101,7 +101,7 @@ def env(auth_env: AuthEnv, admin_url: URL, fresh_db: str, secrets_dir: Path) -> 
     worker = make_engine(settings_for("worker", admin_url, fresh_db, secrets_dir))
     api = make_engine(settings_for("api", admin_url, fresh_db, secrets_dir))
 
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)  # cloud set-up and out-of-band changes, not OVLM writes
     ext, net = fake.add_network("ext", external=True), fake.add_network("tenant")
     fake.add_image("ubuntu")
     fake.add_flavor("m1.small")

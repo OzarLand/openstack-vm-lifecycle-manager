@@ -644,3 +644,86 @@ re-issued as the opening instruction of a new conversation. The old conversation
 
 **Planned next:** E4 readiness, once profiles land; E5-4 renewal strategy steps (Opus), once the write client and
 runner land; E5-5 gates; then the lab.
+
+## PR #4 merged — 2026-11-04 16:41 UTC
+
+[OzarLand/openstack-vm-lifecycle-manager#4](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/4) is
+merged: profiles, policies and deadlines (E3-3), the operator UI first pages (E6-1/E6-2), and the CI Ansible job.
+
+Two CI failures were fixed before the merge:
+- `ansible-core 2.22` requires Python 3.13, but the job pinned 3.12.
+- The Compose smoke test expected the old placeholder page at `/`, which the UI now redirects to `/login`.
+
+**First real run of the reference workload's playbooks** against a container in CI: green. They had only been
+reported passing by the authoring agent until now.
+
+Started: E4 readiness (Agent 4g, Sonnet), https://claude.ai/code/session_016ti9w4bUADuy7e4sVTGzRq.
+
+Waiting for:
+- Security code review of the write client and RBAC (Fable).
+- SRE code review of the engine (Fable).
+- The automation runner (Sonnet).
+
+## Wave 3 results, fix round, renewal engine — 2026-11-04 17:15 UTC
+
+**Finished and integrated into the working branch** (not yet in `main`):
+- write client and ownership guard (E5-2, Opus);
+- RBAC, separation of duties and scoping (E3-2, Opus);
+- automation runner (E5-3, Sonnet);
+- readiness (E4, Sonnet: 566 tests on its branch).
+
+Agent 1 added the merge migration `0005_merge`. **Verified by Agent 1:** lint clean, 952 unit tests pass (4 runs out of
+5; the first run had 2 failures that did not reproduce, so it is watched as possibly flaky), 271 integration tests
+pass. The 8 automation-container tests cannot run in this sandbox (no `ssh`, Docker Hub limited); CI runs them.
+
+**Independent code reviews (Fable):**
+- **SRE, engine (E5-1):** accept with required changes. Three mediums (SRE-C-1 signal/lock atomicity, SRE-C-2
+  `mark_resolved` without re-probe, SRE-C-3 deadline not checked at claim) and seven lows. No veto.
+- **Security, wave 3:** the write client and RBAC are accepted, with two highs to fix:
+  - SEC-C-1: the login rate limit is keyed on the proxy's address, so one client can lock out everyone.
+  - SEC-C-2: at DEBUG level, keystoneauth would log request bodies, including the injected bootstrap host key.
+
+  Plus two mediums (in-memory write credential, TLS verify enforced) and seven lows.
+
+**Fix round (Opus, disjoint modules):**
+- Engine fixes: https://claude.ai/code/session_016ti9w3k3JuQ6ezbbbb1req (`claude/ovlm-fix-engine`).
+- Security fixes: https://claude.ai/code/session_016ti9vzbPq7VgEgMRtnjjWV (`claude/ovlm-fix-security`).
+
+**Renewal strategy E5-4/E5-5 (Opus):** https://claude.ai/code/session_016ti9w2W4u5bRegw53P7dqM (`claude/ovlm-renewal`).
+
+**Cost observation:** the Fable reviewers' sessions have reached $25 (SRE) and $43 (Security), list-price estimates
+reported by the platform. Long-lived review sessions re-read a growing context, and that accumulates. From now on
+**fix verification** uses short, fresh Opus sessions. Fable is kept for the first independent review of each critical
+component (the renewal strategy next).
+
+The working branch goes to `main` once both fix rounds are merged and CI is green.
+
+## ⏸️ PAUSED — 2026-11-04 ~17:20 UTC
+
+The maintainer asked for a README and a pause of all work until "reprends", saving progress first. Actions taken:
+- The three active agents (engine fixes, security fixes, renewal strategy) were told to push their work in progress
+  and stop.
+- The branch watcher is stopped.
+- `README.md` was written.
+- The resume plan is in [HANDOFF.md](HANDOFF.md).
+
+No other work runs until the maintainer resumes.
+
+## Decision during the pause — 2026-11-04
+
+The maintainer decided **not to use quick-lab: the lab is Felcloud itself**, the real OpenStack cloud of the
+`ozar-lab` entry ([ADR-0007](decisions/ADR-0007-lab-on-felcloud.md), which supersedes ADR-0001).
+- E1-8 and the upstream quick-lab proposal are dropped.
+- Asked in a popup, the maintainer chose the **current project** (not a dedicated one) and accepts the residual risk.
+- Lab runs add a before/after snapshot proving that no non-`ovlm-*` resource changed.
+
+## ▶️ Resumed — 2026-11-04
+
+The maintainer said "reprends". Per [HANDOFF.md](HANDOFF.md):
+- engine fixes (SRE-C-1..10) and security fixes (SEC-C-1..11; SEC-C-8 partial) merged into the working branch, with
+  both review files;
+- **verified by Agent 1:** lint clean, 1035 unit and 295 integration tests pass (the automation-container tests run in
+  CI only);
+- PR #7 opened;
+- a short, fresh Opus session verifies the fixes against the findings before the merge;
+- the renewal-strategy agent resumes.

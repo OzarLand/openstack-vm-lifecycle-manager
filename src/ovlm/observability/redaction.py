@@ -18,15 +18,17 @@ from ovlm.config.secrets import known_secrets
 REDACTED = "[REDACTED]"
 
 _SENSITIVE_KEY = re.compile(
-    r"(pass(word|wd)?|secret|token|api[_-]?key|authorization|credential|private[_-]?key|cookie)",
+    r"(pass(word|wd)?|secret|token|api[_-]?key|authorization|credential|private[_-]?key|cookie|user[_-]?data)",
     re.I,
 )
 _URL_USERINFO = re.compile(
     r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?P<user>[^/\s:@]*):(?P<pw>[^/\s@]+)@"
 )
 _BEARER = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}")
+# ``key=value``, ``key: value`` and the JSON form ``"key": "value"`` (``"adminPass": "..."``, SEC-C-2).
 _KEY_VALUE = re.compile(
-    r"(?i)\b(?P<k>[\w.-]*(?:pass(?:word|wd)?|secret|token|api[_-]?key)[\w.-]*)(?P<sep>\s*[=:]\s*)(?P<v>[^\s,;&\"']+)"
+    r"(?i)\b(?P<k>[\w.-]*(?:pass(?:word|wd)?|secret|token|api[_-]?key|user[_-]?data)[\w.-]*)"
+    r"(?P<sep>[\"']?\s*[=:]\s*[\"']?)(?P<v>[^\s,;&\"'}]+)"
 )
 _STANDARD = set(vars(logging.LogRecord("x", 0, "", 0, "", (), None))) | {
     "message",
