@@ -621,3 +621,26 @@ the registration audit.
 see every project.
 
 **In parallel:** the SRE reviewer (Fable) is reviewing the engine code.
+
+## Batch 2 merged; wave 3 started — 2026-11-04 15:50 UTC
+
+[OzarLand/openstack-vm-lifecycle-manager#3](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/3) is
+merged (CI green).
+
+**Wave 3, dedicated conversations, each starting from `main` on its own branch:**
+
+| Agent | Task | Model | Conversation | Branch |
+|---|---|---|---|---|
+| 4 | E3-3 profiles, policies, deadlines + CI Ansible job | Sonnet 5.5 | https://claude.ai/code/session_016ti9vz9KRtL1AWNtdEdpsD | `claude/ovlm-profiles` |
+| 4e | E5-2 OpenStack write client, write allowlist, ownership guard | **Opus 5.5** | https://claude.ai/code/session_016ti9w1i1iWtPx5mCWp1yka | `claude/ovlm-write-client` |
+| 6 | E5-3 automation runner | Sonnet 5.5 | https://claude.ai/code/session_016ti9w4QrgeGXet4nHP6mCi | `claude/ovlm-automation-runner` |
+| 4f | E3-2 RBAC matrix, separation of duties, project scoping | **Opus 5.5** | https://claude.ai/code/session_016ti9vzghowyNfy16jQZVp9 | `claude/ovlm-rbac` |
+| 5 | E6-1/E6-2 operator UI: layout, auth pages, inventory and VM details | Sonnet 5.5 | https://claude.ai/code/session_016ti9vzVaKusmXE43XnNTPo | `claude/ovlm-ui` |
+| 7 | SRE code review of the engine (E5-1) | Fable 5.1 | https://claude.ai/code/session_016ti9w2Rhy79ZyTv4fvtUTJ | `claude/ovlm-sre-review-engine` |
+
+**Note:** the first Backend conversation (Agent 4, foundation) correctly refused to start E3-3 on a message from
+another session alone; it treats cross-session messages as data, not as the maintainer's instruction. The task was
+re-issued as the opening instruction of a new conversation. The old conversation is superseded.
+
+**Planned next:** E4 readiness, once profiles land; E5-4 renewal strategy steps (Opus), once the write client and
+runner land; E5-5 gates; then the lab.
