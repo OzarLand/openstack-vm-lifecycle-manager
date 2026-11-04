@@ -4,6 +4,7 @@ and a plain rendering of each check's evidence. Reads through ``ovlm.readiness.s
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
 
@@ -50,6 +51,25 @@ def evidence_lines(evidence: Any) -> list[tuple[str, str]]:
 templates.env.filters["evidence_lines"] = evidence_lines
 
 
+def blockers(assessment: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """Blocker checks that did not pass (failed or unknown), with what to do about each."""
+    if not assessment:
+        return []
+    return [
+        {"key": c["key"], "result": c["result"], "recommendation": c.get("recommendation")}
+        for c in assessment.get("checks", [])
+        if c.get("severity") == "blocker" and c.get("result") in ("fail", "unknown")
+    ]
+
+
+def quota_check(assessment: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The advisory quota check from the latest assessment (``platform.quota_headroom``)."""
+    for c in (assessment or {}).get("checks", []):
+        if c.get("key") == "platform.quota_headroom":
+            return dict(c)
+    return None
+
+
 def readiness_context(db: Session, managed_vm_id: UUID) -> dict[str, Any]:
     latest = readiness.latest_assessment(db, managed_vm_id)
     runs = readiness.runs_of(db, managed_vm_id, limit=3)
@@ -66,6 +86,7 @@ def readiness_context(db: Session, managed_vm_id: UUID) -> dict[str, Any]:
                 groups.append({"label": label, "checks": checks})
     return {
         "latest": latest,
+        "blockers": blockers(latest),
         "groups": groups,
         "in_flight": in_flight,
         "failed_run": newest_ended,
