@@ -111,3 +111,41 @@ for `ovlm-*` resources on `ozar-lab`.
 | 4 | Run the full window three times. Run 1: blue → green, with every state change timestamped (unmount, SHUTOFF, available, in-use, mount, service listening, floating IP updated, first successful probe through the floating IP). Run 2: back to blue (as a revert). Run 3: blue → green again. | ⚠️ |
 | 5 | Report per run: the API time of the floating-IP update; the time from the update to the first good probe; and the **total outage seen by the probe**. Note where the probe ran from. | read-only |
 | 6 | 🛑 Delete all `ovlm-exp01b-*` resources, handle the floating IP as in step 1, and prove nothing is left. | 🛑 own resources only |
+
+### EXP-01b results — lab-observed on Felcloud, 2026-11-04
+
+**Setup:** run by `ozar-dev`. Flavor `G0.basic.1c1g`, Ubuntu 24.04, `NVMe` 1 GB ext4 volume mounted by UUID, marker
+served over HTTP from the volume. The pool had no free floating IP, so the maintainer's set-aside address was used,
+then returned unassociated and unchanged. **Probe:** HTTP through the floating IP every 0.5 s, from the dev VM on the
+same project network and router (a hairpin through the router's floating-IP translation, not from the internet).
+
+| Run | Window | Floating-IP update (API time) | Update → first good probe | Total outage seen by the probe |
+|---|---|---|---|---|
+| R1 | blue → green | 1.26 s | ≤ 0.6 s | **40.6 s** |
+| R2 | green → blue (revert) | 1.06 s | ≤ 0.3 s | **46.1 s** |
+| R3 | blue → green | 1.10 s | ≤ 0.3 s | 94.9 s (target guest not yet reachable at T0: +55 s) |
+
+**Where the outage goes (R1, about 40 s):**
+- stop to SHUTOFF: about 11–12 s
+- detach: about 3 s
+- attach: about 5 s
+- service start on 1 vCPU: about 10 s
+- gaps between steps: 6–8 s, mostly CLI start-up time
+- floating-IP move: about 3% of the window
+
+There was no flapping: exactly one failure streak per run.
+
+**Findings:**
+1. **Q4 answered:** the floating-IP move is fast (about 1.1–1.3 s) and takes effect at once. No settle delay is needed
+   after it.
+2. **"ACTIVE" is not "ready".** Nova reported ACTIVE about 15 s after start, but SSH answered only about 85 s later
+   (R3). **The workflow must prove the target guest is reachable before T0 (quiesce of the old VM)**, otherwise the
+   outage doubles.
+3. **The console log is not reliable.** Nova returned an empty console output for both servers (HTTP 200,
+   `output: ""`), still empty 14 minutes after boot. This changes the EXP-01 Q1 result: console-log host keys are
+   **lab-observed as sometimes unavailable** on this cloud. ADR-0006 needs a fallback; trust-on-first-use was used for
+   these test VMs.
+4. Confirmed again: the default volume type fails, and the floating IP pool can be empty while the quota is unlimited.
+
+**Cleanup:** 0 `ovlm-*` resources left. The set-aside floating IP is unassociated and unchanged, and `ozar-dev`'s
+floating IP was not touched.

@@ -17,7 +17,7 @@ what needs the maintainer. Agent 1 (PM/EM) updates it after every handoff. Agent
 | 8 | Security Engineer | Opus 5.5 (author) → Fable 5.1 (review) | Authoring **done**: 115,807 tokens, 11 tool calls, 4 min 34 s. Fable review **done**: accept with required changes (both parts; 6 high in total). $7.17 | `security-model.md` |
 | 9 | QA / Test Automation | Sonnet 5.5 | **Done**: `testing-strategy.md`, 20 engine crash scenarios. $1.03 | `testing-strategy.md` on `claude/ovlm-qa` |
 | 10 | Documentation Engineer | — | Not activated (Agent 1 writes the README) | — |
-| — | **Dev VM session** `ozar-dev` (maintainer's machine) | Opus 5.5 (local) | EXP-01 done (7/8). **EXP-01b running and BLOCKED on a permission prompt the maintainer must approve in that session.** $1.81 so far. Standing approval for `ovlm-*` on `ozar-lab` saved there by the maintainer | https://claude.ai/code/session_016ti9w2xkWinTeHFRq3zgS3 |
+| — | **Dev VM session** `ozar-dev` (maintainer's machine) | Opus 5.5 (local) | EXP-01 and EXP-01b done: the floating-IP move takes 1.1–1.3 s, best-case outage about 40 s, ACTIVE ≠ ready, and the console log is unreliable. $4.40 in total. Standing approval for `ovlm-*` on `ozar-lab` saved there by the maintainer | https://claude.ai/code/session_016ti9w2xkWinTeHFRq3zgS3 |
 
 ## ✅ Standing authorization (maintainer, 2026-11-04)
 
@@ -74,8 +74,13 @@ reports are below. Backend, Frontend and Docs get their conversations when they 
 | ~~M4~~ | Agent 2 | ✅ **Decided 2026-11-04:** MVP scope limits accepted (one data volume, image boot, floating IP required, no temporary FIP); pre-handoff snapshot off by default (subject to the SRE review); the new VM stays stopped after a revert until discarded. Recorded in [ADR-0004](decisions/ADR-0004-mvp-renewal-strategy.md). | — |
 | ~~M5~~ | Agent 1 | ✅ **Authorized 2026-11-04** by the maintainer directly in the `ozar-dev` session: EXP-01 on `ozar-lab`, `ovlm-exp01-*` resources only. | — |
 | ~~M6~~ | Agent 2 | ✅ **Decided by the maintainer, 2026-11-04: D-1 = B.** After a W7–W10 failure there is no automatic restore. OVLM stops in `needs_human`, keeps the locks and pages an operator, unless a pre-handoff snapshot exists. The Architect is applying it in ADR-0004 and renewal-workflow.md. | — |
-| M7 | `ozar-dev` | **Approve the pending Bash prompt in `ozar-dev`** for EXP-01b. | Floating-IP cutover measurement |
+| ~~M7~~ | `ozar-dev` | ✅ Approved; EXP-01b done. | — |
 | ~~M8~~ | Agent 9 | ✅ **Decided by Agent 1** (reversible, so it was not escalated): CI uses GitHub-hosted runners with unprivileged containers (PostgreSQL service container; the Ansible target is an SSH-enabled container without systemd-as-PID-1, and privileged-only cases move to the lab). Lab evidence is stored redacted in the repository under `docs/experiments/` and committed with DCO sign-off. Only a human operator moves a claim to `validated`. | — |
+| ~~M9~~ | Agent 8 | ✅ **Decided by the maintainer, 2026-11-04 (security posture):**
+- SEC-R-2: operator+approver in the same scope is forbidden by default; an admin can allow it per installation, with each such approval audited and flagged "self-approved"; retirement still needs a second person.
+- SEC-R-3: Ansible output goes to a restricted store (operators and admins of the project only, own retention, never exported); diffs opt-in; blocking `no_log` lint.
+- SEC-R-10: **TOTP for approvers and admins in the MVP**.
+- SEC-R-28: readiness never runs repo code on the live VM by default; doing so is an explicit operator action with typed confirmation and audit. | — |
 | M3 | Agent 1 | **Phase 1 approval.** Work-in-progress drafts are pushed to `claude/openstack-vm-lifecycle-manager-9nf9cc` (authorized 2026-11-04). The final Phase 1 proposal still needs approval before implementation starts. | Publishing the documents |
 
 ## Wave 1 — 2026-11-04 (parallel, independent)
@@ -516,3 +521,19 @@ Also in this revision:
 The edits needed in files owned by other agents (security model, automation contract, test strategy, OpenStack notes)
 were handed to a documentation-sync agent (Sonnet 5.5). **One maintainer decision: D-1** (see "Needs the
 maintainer"). Next: a re-review by the SRE and Security reviewers of the changes only.
+
+## Wave 5 — 2026-11-04: delta reviews and EXP-01b
+
+- **SRE delta review (Fable): Accept, no veto.** 17 of 18 findings are resolved and 1 is partly resolved. New:
+  - SRE-R-23 (medium): a failed evidence re-check inside the window;
+  - SRE-R-24 (medium): an operator signal consumed with no effect after a crash;
+  - 7 low findings.
+- **Security delta review (Fable): accept with required changes.** 24 of 36 findings are resolved, including all
+  three high ones. Still required before implementation: SEC-R-10, -11, -13, -28, -34, -35. The four posture questions
+  were decided by the maintainer (M9).
+- **EXP-01b:**
+  - the floating-IP move takes 1.1–1.3 s; the best-case outage is about 40 s;
+  - ACTIVE ≠ ready, so readiness must be proven before T0;
+  - **the console log is unreliable**, so ADR-0006 needs a fallback.
+
+**Next:** Architect round 2 for these items, then a short check by the reviewers of their own items only.
