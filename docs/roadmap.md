@@ -53,19 +53,19 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 
 | ID | Task | Owner | Model | Depends on | Status | Acceptance / tests |
 |---|---|---|---|---|---|---|
-| E2-1 | OpenStack adapter interface; read client (GET/HEAD-only guard) and a hand-written fake | 3 → 4 | Sonnet | E1 | In progress | Fake models async states and the observed gotchas |
-| E2-2 | Inventory sync job (worker), snapshots, `gone` handling, Nova changes-since | 4 | Sonnet | E2-1 | In progress | Unit tests with the fake |
-| E2-3 | Managed VM registration and services | 4 | Haiku | E2-2 | In progress | API tests |
+| E2-1 | OpenStack adapter interface; read client (GET/HEAD-only guard) and a hand-written fake | 3 → 4 | Sonnet | E1 | Integration tested (PR #3) | Fake models async states and the observed gotchas |
+| E2-2 | Inventory sync job (worker), snapshots, `gone` handling, Nova changes-since | 4 | Sonnet | E2-1 | Integration tested (PR #3) | Unit tests with the fake |
+| E2-3 | Managed VM registration and services | 4 | Haiku | E2-2 | Integration tested (PR #3) | API tests |
 | E2-4 | Read-only inventory against Felcloud (lab) | ozar-dev | — | E2-2 | To do | Evidence stored |
 
 ### E3 — Lifecycle (Phase 4)
 
 | ID | Task | Owner | Model | Depends on | Status | Acceptance / tests |
 |---|---|---|---|---|---|---|
-| E3-1 | Auth: local users (argon2id), sessions, CSRF, API tokens, **TOTP for approver/admin**, step-up | 4 | Sonnet | E1 | In progress | Security tests from security-model §10 |
+| E3-1 | Auth: local users (argon2id), sessions, CSRF, API tokens, **TOTP for approver/admin**, step-up | 4 | Sonnet | E1 | Integration tested (PR #3) | Security tests from security-model §10 |
 | E3-2 | RBAC with project scope, requester sets, separation of duties, "self-approved" flag | 4 | Opus | E3-1 | To do | Matrix tests; review by 8 |
 | E3-3 | Profiles + immutable versions; policies + bindings + exceptions; deadlines | 4 | Sonnet | E1 | In progress | API + unit tests |
-| E3-4 | Append-only audit (grants + trigger), mirror to the log stream | 4 | Sonnet | E1-3 | In progress | DB-level tests: UPDATE/DELETE refused |
+| E3-4 | Append-only audit (grants + trigger), mirror to the log stream | 4 | Sonnet | E1-3 | Integration tested (PR #3) | DB-level tests: UPDATE/DELETE refused |
 | E3-5 | Renewal planning: upcoming list, advisory quota check, same-service lock | 4 | Sonnet | E3-3, E2 | To do | Unit tests |
 
 ### E4 — Readiness (Phase 5)
@@ -79,7 +79,7 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 
 | ID | Task | Owner | Model | Depends on | Status | Acceptance / tests |
 |---|---|---|---|---|---|---|
-| E5-1 | Workflow engine core: runs/steps, SKIP LOCKED claims, leases, fencing (local deadline), resource locks, signals, timers | 4 | **Opus** | E1 | In progress | WF-01..WF-20 crash-injection suite; review by 7 |
+| E5-1 | Workflow engine core: runs/steps, SKIP LOCKED claims, leases, fencing (local deadline), resource locks, signals, timers | 4 | **Opus** | E1 | Integration tested (PR #3); SRE code review in progress | WF-01..WF-20 crash-injection suite; review by 7 |
 | E5-2 | OpenStack write client with ownership guard and write allowlist | 4 | Opus | E2-1, E5-1 | To do | Tests: untagged/unregistered target refused; review by 8 |
 | E5-3 | Automation runner (ansible-runner subprocess, per-run dir, `ovlm.result/1`, redaction, restricted artefact store, lint) | 6 | Sonnet | E1-7, E5-1 | To do | Integration test against a local container |
 | E5-4 | `bluegreen_fip_v1` steps B1–X1, W1–W10, S1–S10 per renewal-workflow.md | 4 | Opus | E5-1..3 | To do | Unit tests with the fake per step and per failure row; reviews by 7 and 8 |
