@@ -191,10 +191,12 @@ class SdkWriteBackend:
 
     # --- writes --------------------------------------------------------------------------------------------
 
-    def _compute(self, method: str, path: str, body: Any = None) -> Any:
+    def _compute(self, method: str, path: str, body: Any = None, *, log_http: bool = True) -> Any:
         self._require_compute()
         call: Callable[..., Any] = getattr(self._conn.compute, method)
         kwargs: dict[str, Any] = {"microversion": COMPUTE_WRITE_MICROVERSION}
+        if not log_http:
+            kwargs["log"] = False  # keystoneauth: neither the request nor the response is logged, at any level
         if body is not None:
             kwargs["json"] = body
         with translated():
@@ -222,7 +224,9 @@ class SdkWriteBackend:
             server["key_name"] = spec.key_name
         if spec.user_data is not None:
             server["user_data"] = base64.b64encode(spec.user_data.encode()).decode()
-        resp = self._compute("post", "/servers", {"server": server})
+        # The body carries user_data (the bootstrap host key, ADR-0006) and the response adminPass: this request
+        # is never logged by keystoneauth, even with log.openstack_http_debug in development (SEC-C-2).
+        resp = self._compute("post", "/servers", {"server": server}, log_http=False)
         created = resp.json().get("server") or {}  # carries adminPass: never logged, never returned
         server_id = str(created.get("id") or "")
         if not server_id:

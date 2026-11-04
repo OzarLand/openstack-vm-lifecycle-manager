@@ -23,7 +23,9 @@ def _run_api() -> int:
     from ovlm.api.app import create_app
 
     settings = Settings(process_role="api")
-    configure_logging("api", settings.log.level)
+    configure_logging(
+        "api", settings.log.level, openstack_http_debug=settings.log.openstack_http_debug
+    )
     # One uvicorn worker: /metrics is per process (no multiprocess mode yet).
     uvicorn.run(
         create_app(settings),

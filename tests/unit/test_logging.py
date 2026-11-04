@@ -50,7 +50,7 @@ def test_secret_value_never_reaches_log_output(stream: io.StringIO, tmp_path: Pa
     secret = 'Tr0ub4dor&3"quoted\\back'
     pw = tmp_path / "db_password"
     pw.write_text(secret + "\n")
-    settings = Settings(process_role="api", db={"password_file": pw})
+    settings = Settings(process_role="api", development_mode=True, db={"password_file": pw})
     url = settings.db_url()  # reads and registers the secret
     assert read_secret_file(pw) == secret
 
