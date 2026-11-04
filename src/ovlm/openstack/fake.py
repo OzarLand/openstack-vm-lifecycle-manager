@@ -23,6 +23,14 @@ where the lab tag says otherwise:
 | No default volume type: ``create_volume`` without a type is a 500 (``__DEFAULT__`` not found) | LAB-OBSERVED (EXP-01) |
 | Console output may be empty (HTTP 200, ``""``) | LAB-OBSERVED (EXP-01b) |
 | Tags at create need compute >= 2.52; a ``reader`` credential cannot mutate (403) | OSI s.2, s.8 (SV) |
+| At most 50 tags per server / floating IP: 400 beyond | OSI s.2 (SV) |
+| Cinder metadata ``POST`` merges (keys not in the request stay) | AS (verb semantics, SEC-R-24: lab with foreign metadata) |
+| Server in ``ERROR`` exposes ``fault.message`` (e.g. ``No valid host was found.``) | OSI s.7 (SV) |
+
+Write boundary (E5-2): every operation in ``allowlist.WRITE_OPERATIONS`` calls the fence gate bound on
+``gate_binding`` **before** it touches state, like the SDK session hook does before sending. With no gate bound the
+call proceeds unless ``strict_gate`` is set (direct fake tests); ``GuardedWriteClient`` always binds one. Fault
+rules (``fail``) apply after the gate, so a refused gate never consumes an injected fault.
 
 Extensions beyond the Protocols (cloud-side operations OVLM itself never performs, needed to model the cloud):
 ``list_servers(metadata=...)``, ``create_volume``, ``allocate_floating_ip``.
@@ -30,14 +38,16 @@ Extensions beyond the Protocols (cloud-side operations OVLM itself never perform
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
+from ovlm.openstack.allowlist import WRITE_OPERATIONS, GateBinding
 from ovlm.openstack.errors import (
     BadRequestError,
     ConflictError,
@@ -51,6 +61,8 @@ from ovlm.openstack.errors import (
     QuotaExceededError,
     ServerError,
     UnsupportedCloudError,
+    VolumeAlreadyAttachedError,
+    WriteNotAllowedError,
 )
 from ovlm.openstack.types import (
     COMPUTE_TAGS_AT_CREATE,
@@ -75,7 +87,7 @@ _MUTATING = frozenset(
     {
         "create_server", "delete_server", "stop_server", "start_server", "lock_server", "unlock_server",
         "add_server_tag", "attach_volume", "detach_volume", "update_floating_ip", "get_console_output",
-        "create_volume", "allocate_floating_ip",
+        "add_floating_ip_tag", "merge_volume_metadata", "create_volume", "allocate_floating_ip",
     }
 )  # fmt: skip
 _ATTACHABLE_VM_STATES = frozenset(
@@ -180,6 +192,9 @@ class FakeOpenStack:
         )
         self.force_no_valid_host = False
         self.calls: list[str] = []
+        #: Fence gate binding (see the module docstring); ``strict_gate`` refuses writes with no gate bound.
+        self.gate_binding = GateBinding()
+        self.strict_gate = False
         self._servers: dict[str, _Server] = {}
         self._volumes: dict[str, _Volume] = {}
         self._volume_types: dict[str, str] = {}
@@ -236,6 +251,13 @@ class FakeOpenStack:
 
     @contextmanager
     def _call(self, op: str) -> Iterator[None]:
+        if (
+            op in WRITE_OPERATIONS
+        ):  # the transport boundary: allowlisted op, gate before anything happens
+            if self.gate_binding.bound:
+                self.gate_binding.check(op)
+            elif self.strict_gate:
+                raise WriteNotAllowedError(f"refused {op}: no fence gate bound")
         self.calls.append(op)
         self._counts[op] += 1
         if op in _MUTATING and self.role == "reader":
@@ -299,10 +321,12 @@ class FakeOpenStack:
         )  # fmt: skip
         return i
 
-    def add_floating_ip(self, external_network_id: str, *, address: str = "192.0.2.10") -> str:
+    def add_floating_ip(
+        self, external_network_id: str, *, address: str = "192.0.2.10", tags: Iterable[str] = ()
+    ) -> str:
         i = self._new_id()
         self._fips[i] = FloatingIpInfo(
-            i, address, None, None, None, external_network_id, "DOWN", ()
+            i, address, None, None, None, external_network_id, "DOWN", tuple(tags)
         )
         return i
 
@@ -352,6 +376,7 @@ class FakeOpenStack:
         volume_type: str | None = "ssd",
         attach_fails: bool = False,
         multiattach: bool = False,
+        metadata: dict[str, str] | None = None,
     ) -> str:
         vid = self._new_id()
         self._volumes[vid] = _Volume(
@@ -362,6 +387,7 @@ class FakeOpenStack:
             volume_type=volume_type,
             attach_fails=attach_fails,
             multiattach=multiattach,
+            metadata=dict(metadata or {}),
         )
         return vid
 
@@ -697,6 +723,10 @@ class FakeOpenStack:
             s = self._live_server(server_id)
             if not tag or len(tag) > 60 or "," in tag or "/" in tag:
                 raise BadRequestError("Invalid tag", status=400)
+            if tag not in s.tags and len(s.tags) >= 50:
+                raise BadRequestError(
+                    "The number of tags exceeded the per-server limit 50", status=400
+                )
             if tag not in s.tags:
                 s.tags.append(tag)
                 s.updated = self.now
@@ -707,8 +737,8 @@ class FakeOpenStack:
             v = self._volume_raw(volume_id)
             self._require_unlocked(s)
             self._require_idle(s, _ATTACHABLE_VM_STATES)
-            if volume_id in s.attached:
-                raise BadRequestError(
+            if volume_id in s.attached or (server_id in v.attachments and not v.multiattach):
+                raise VolumeAlreadyAttachedError(
                     f"volume {volume_id} is already attached to instance {server_id}", status=400
                 )
             if v.status != "available":
@@ -765,7 +795,10 @@ class FakeOpenStack:
                 detached,
             )
 
-    def update_floating_ip(self, floating_ip_id: str, port_id: str | None) -> FloatingIpInfo:
+    def update_floating_ip(
+        self, floating_ip_id: str, port_id: str | None, fixed_ip_address: str | None = None
+    ) -> FloatingIpInfo:
+        """``port_id=None`` (disassociate) is modelled because the cloud allows it; OVLM never sends it."""
         with self._call("update_floating_ip"):
             fip = self._fips.get(floating_ip_id)
             if fip is None:
@@ -805,9 +838,20 @@ class FakeOpenStack:
                         f"Cannot associate floating IP with port {port_id}: FloatingIPPortAlreadyAssociated",
                         status=409,
                     )
+            if fixed_ip_address is None and len(port.fixed_ips) > 1:
+                raise BadRequestError(
+                    f"Port {port_id} has multiple fixed IPv4 addresses", status=400
+                )
+            if fixed_ip_address is not None and fixed_ip_address not in [
+                ip for ip, _ in port.fixed_ips
+            ]:
+                raise BadRequestError(
+                    f"Port {port_id} does not have fixed ip {fixed_ip_address}", status=400
+                )
             router_id = "router-1"
+            fixed = fixed_ip_address or (port.fixed_ips[0][0] if port.fixed_ips else None)
             new = FloatingIpInfo(
-                fip.openstack_id, fip.floating_ip_address, port_id, port.fixed_ips[0][0] if port.fixed_ips else None,
+                fip.openstack_id, fip.floating_ip_address, port_id, fixed,
                 router_id, ext, "DOWN", fip.tags,
             )  # fmt: skip
             self._fips[fip.openstack_id] = new
@@ -827,6 +871,58 @@ class FakeOpenStack:
         with self._call("get_console_output"):
             text = self._live_server(server_id).console
             return text if length is None else "\n".join(text.splitlines()[-length:])
+
+    def add_floating_ip_tag(self, floating_ip_id: str, tag: str) -> None:
+        with self._call("add_floating_ip_tag"):
+            fip = self._fip_raw(floating_ip_id)
+            if not tag or len(tag) > 255:
+                raise BadRequestError("Invalid tag", status=400)
+            if tag in fip.tags:
+                return
+            if len(fip.tags) >= 50:
+                raise BadRequestError("Tag limit 50 exceeded", status=400)
+            self._fips[floating_ip_id] = dataclasses.replace(fip, tags=(*fip.tags, tag))
+
+    def merge_volume_metadata(self, volume_id: str, items: Mapping[str, str]) -> None:
+        """Cinder ``POST /volumes/{id}/metadata``: keys in ``items`` are set, every other key stays."""
+        with self._call("merge_volume_metadata"):
+            v = self._volume_raw(volume_id)
+            v.metadata.update({str(k): str(val) for k, val in items.items()})
+
+    def get_floating_ip(self, floating_ip_id: str) -> FloatingIpInfo:
+        with self._call("get_floating_ip"):
+            return self._fip_raw(floating_ip_id)
+
+    def get_port(self, port_id: str) -> PortInfo:
+        with self._call("get_port"):
+            port = self._ports.get(port_id)
+            if port is None:
+                raise NotFoundError(f"Port {port_id} could not be found.", status=404)
+            return port
+
+    def get_server_fault(self, server_id: str) -> str | None:
+        with self._call("get_server_fault"):
+            s = self._live_server(server_id)
+            return s.fault if s.status == "ERROR" else None
+
+    def write_microversions(self) -> dict[str, str | None]:
+        if self.compute_max < (2, 79):
+            raise UnsupportedCloudError(
+                f"compute microversion {self.compute_max[0]}.{self.compute_max[1]} is below 2.79"
+            )
+        return {
+            "compute_write": "2.79",
+            "compute_max": f"{self.compute_max[0]}.{self.compute_max[1]}",
+            "block_storage_write": "3.0",
+            "block_storage_max": f"{self.block_storage_max[0]}.{self.block_storage_max[1]}",
+            "network": None,
+        }
+
+    def _fip_raw(self, floating_ip_id: str) -> FloatingIpInfo:
+        fip = self._fips.get(floating_ip_id)
+        if fip is None:
+            raise NotFoundError(f"Floating IP {floating_ip_id} could not be found", status=404)
+        return fip
 
     # --- fake-only cloud operations (OVLM never performs these; they model the cloud) -----------------------
 
