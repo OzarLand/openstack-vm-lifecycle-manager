@@ -9,9 +9,10 @@
 Inputs: [functional-requirements.md](functional-requirements.md), [automation-contract.md](automation-contract.md),
 [test-environment.md](test-environment.md), [security-model.md](security-model.md) §10,
 [openstack-integration.md](openstack-integration.md), [ADR-0001](decisions/ADR-0001-test-environment.md).
-Tags: **[ALIGN]** = depends on architecture documents not yet written (`architecture.md`, `data-model.md`,
-`api-design.md`, `renewal-workflow.md`); to align with `renewal-workflow.md` when it lands. **ASSUMPTION** = mine,
-unverified.
+Aligned with [architecture.md](architecture.md), [renewal-workflow.md](renewal-workflow.md) (step keys B1–X1, W1–W10, S1–S9,
+gates G1–G3), [ADR-0003](decisions/ADR-0003-workflow-engine.md) (leases, fencing token, resource locks),
+[ADR-0005](decisions/ADR-0005-ownership-and-idempotency.md) and [data-model.md](data-model.md). **[ALIGN]** = still open
+against a document that has not fixed the detail (list in §10). **ASSUMPTION** = mine, unverified.
 
 ## 1. Principles
 
@@ -23,7 +24,6 @@ unverified.
 4. No test touches a real cloud unless it is in the lab suite (§7). CI never holds OpenStack credentials. A failure we cannot reproduce deterministically is a bug in the test or the design (§9.4).
 
 ## 2. Test pyramid and status mapping
-
 | Level | Runs where | Real components | Faked | Proves | Does NOT prove | Status granted |
 |---|---|---|---|---|---|---|
 | L0 Static | CI, every push | none | — | Lint, types, schema/format, `ansible-lint`, `yamllint`, `--syntax-check`, lock-file hashes, SAST/dep scan | Behaviour | none (gate only) |
@@ -48,7 +48,7 @@ record. No agent, test or script may write "validated" for L3/L4; only a human r
 ### 3.2 Recommendation: one fake, one contract suite
 
 - OVLM code (workflow steps, inventory sync, readiness) depends only on an OVLM-owned **adapter interface** (`Protocol`;
-  names **[ALIGN]** with `architecture.md`). Nothing outside the adapter imports `openstack`. A lint (import-linter)
+  architecture.md §10 already calls for a fake OpenStack adapter; method names **[ALIGN]** with the code). Nothing outside the adapter imports `openstack`. A lint (import-linter)
   enforces this in L0.
 - `FakeOpenStack` implements the interface as an in-memory state machine (servers, volumes, attachments, ports, FIPs,
   routers, quotas, tags). It is a **test double owned by QA**, versioned with the adapter.
@@ -101,64 +101,69 @@ state) and for redaction (no secret substring in output).
 
 ## 4. Workflow-engine tests
 
-Applies FR-REN-3, NFR-2/3 and automation-contract §8. Lease, fencing and lock names are **[ALIGN]** with
-`renewal-workflow.md`; the properties below must hold whatever the mechanism.
+Applies FR-REN-3, NFR-2/3, ADR-0003 and renewal-workflow.md §5. Every handler is `probe → decide → act → verify`, so the
+tests target exactly those seams.
 
 ### 4.1 Crash-point injection harness
 
 Deterministic, no sleeps, no random kills.
 
-1. **Named crash points** are inserted by the engine through one call: `crashpoint("<step>.<phase>")`. Phases:
-   `before_claim`, `after_claim`, `before_effect`, `after_effect_before_commit` (OpenStack/Ansible changed, DB not),
-   `after_commit_before_next`, plus engine-level points (`lease.renew`, `lease.release`). In production the call is a
-   constant-time no-op (disabled unless `OVLM_TEST_CRASHPOINT` is set, rejected in non-test builds by a unit test).
-2. **Enumeration run:** one uninterrupted renewal on the fake records the ordered list of crash points actually hit
-   (N points, including repeated ones with an occurrence index). Adding a step automatically adds scenarios; a step
-   with no crash points fails a coverage test (every step must expose ≥ `before_effect` and `after_effect_before_commit`).
-3. **Matrix run:** for each point *i* of N, run the renewal, kill at point *i*, restart, run to completion. Parametrized
-   (`pytest.mark.parametrize` over the recorded list), so each point is a separate named test.
-4. **Two kill modes:** (L1) in-process: `crashpoint` raises `SimulatedCrash(BaseException)`; the engine must not catch
-   `BaseException` and no `finally` may commit state (a test asserts this). (L2) real: `crashpoint` calls `os._exit(137)`
-   in a worker subprocess, plus an external `SIGKILL` smoke test for "mid-step" kills with no cooperating hook.
-5. **Mid-step = response lost:** combine crashpoints with `fake.fail(…, when="after_apply")` for every mutating adapter
-   call, so "effect applied, worker died before recording it" is covered at each call, not only at step boundaries.
-6. **Oracle (checked after every resumed run):**
+1. **Named crash points** are inserted by the engine through one call: `crashpoint("<step_key>.<phase>")`, with the real
+   step keys (`create_green`, `detach_volume`, `move_fip`, …). Phases follow the ADR-0003 contract: `after_claim`
+   (claim committed, nothing done), `after_probe`, `after_intent` (intent/ledger row persisted), `after_act` (OpenStack or
+   Ansible changed, nothing recorded), `after_verify_before_commit`, `after_commit` (next step not yet claimed); plus
+   engine points `lease.heartbeat`, `lease.release`, `run.create` (locks acquired). In production the call is a no-op
+   unless `OVLM_TEST_CRASHPOINT` is set; a unit test rejects that variable in release builds.
+2. **Enumeration run:** one uninterrupted renewal on the fake records the ordered list of crash points hit (N points,
+   with occurrence index; restore steps S1–S9 are enumerated by a second run that forces a restore). A new step adds
+   scenarios automatically; a step lacking `after_intent` and `after_act` fails a coverage test.
+3. **Matrix run:** for each point *i* of N, kill at *i*, restart, run to completion. One `pytest` parameter per point.
+4. **Two kill modes:** (L1) in-process: `SimulatedCrash(BaseException)`; the engine must not catch `BaseException` and no
+   `finally` may commit state. (L2) real: `os._exit(137)` in a worker subprocess, plus an external `SIGKILL` smoke test
+   with no cooperating hook (mid-step).
+5. **Mid-step = response lost:** combine with `fake.fail(…, when="after_apply")` on every mutating adapter call.
+6. **Oracle after every resumed run:**
 
 | Invariant | Check |
 |---|---|
 | Same final state as the uninterrupted run | `fake.snapshot()` equal modulo ids/timestamps |
-| No duplicate VM / port / FIP / attachment | count by tag `ovlm:run:<id>`; data volume has ≤ 1 attachment at every observed instant (fake records history) |
-| No double-applied step | each step has exactly one committed success row; attempts numbered, none lost |
-| Data safe | volume never attached to two servers; `data_attach` never ran `mkfs` on a volume with `first_use=false` |
-| Resume used real state | with the DB claiming "step done" but fake state contradicting (and vice versa), the engine follows the probed state (see 4.3) |
-| Audit complete | every attempt, crash recovery and decision has an audit event |
-| Run ends in a defined state | `succeeded`, `rolled_back` or `needs_human`; never `running` after resume completes |
+| No duplicate green / port / attachment | count by tag `ovlm:run:<id>` and `owned_resource` ledger; data volume has ≤ 1 attachment at every instant (fake records history) |
+| No double-applied step | one committed success per step; `attempt` increments, none lost |
+| Data safe | volume never on two servers; no `mkfs` on `first_use=false`; **crash in a data phase (W1, W6, S2) → `needs_human` with probe evidence** unless the probe proves state (AC §6) |
+| Resume follows probed state | DB and fake disagree in both directions → the fake wins |
+| Resource locks | held by the run across crash, `NeedsHuman` and restart; released only in the terminal transaction |
+| Audit complete | every attempt, takeover and decision has an audit event |
+| Defined end state | `Completed`, `RolledBack`, `Restored`/`NeedsHuman` awaiting an operator; never stuck `running` |
 
 ### 4.2 Scenario list
 | ID | Scenario | Level | Assertion |
 |---|---|---|---|
-| WF-01 | Crash at every step boundary (matrix, §4.1.3) | L1 + L2 | Oracle |
-| WF-02 | Crash mid-step (`after_apply`, every mutating call) | L1 | Oracle; adopt-by-tag instead of second create |
-| WF-03 | Kill -9 worker during real `ansible-runner` | L2 | Orphan process group and run dir swept at startup; secret files gone; step re-evaluated from state, `data_attach`/`quiesce` → needs_human unless probe proves state (contract §6) |
-| WF-04 | Lease expiry and takeover: worker A stops heartbeat (injectable clock jumps past TTL), B claims | L1 + L2 | B resumes exactly once; A's later actions rejected |
-| WF-05 | **Fencing:** A is paused at `after_effect_before_commit`, lease expires, B takes over and commits, A resumes and tries to commit | L2 (real DB) | A's write affects 0 rows / raises `LeaseLost`; DB state is B's; A makes no further mutating adapter call (adapter asserts the fencing token) |
-| WF-06 | DB restart (stop/start container) mid-step and while idle | L2 | Worker reconnects with backoff, no lost/double step; heartbeat failure past TTL makes the worker stop acting (self-fence), not continue |
-| WF-07 | Duplicate delivery: same run claimed twice (two workers race on one row), same step event processed twice, duplicate approval POST | L2 | One claimant wins (row lock/`SKIP LOCKED` semantics); second is a no-op; one audit event per effect |
-| WF-08 | Concurrent renewals of the same service (API start ×2, two workers) | L2 | Exactly one run active; second rejected with a clear error (FR-PLN-3 MVP); lock released on all terminal states and after crash |
-| WF-09 | Concurrent renewals of different services, same quota | L1 | Capacity pre-check advisory; second may hit `OverQuota` and fails cleanly, first unaffected |
-| WF-10 | Resume decided by probed real state: DB says "detach requested", cloud shows volume `available` / `detaching` / `in-use` / attached to green | L1 | Each of the four cases picks the correct next action (table-driven, expected action per cloud state) |
-| WF-11 | Approval expired or hash changed while run was down | L1 | Destructive step refuses to run after resume (security-model §7.1) |
-| WF-12 | Abort/rollback requested at every step; abort during rollback | L1 + L2 | Rollback itself is crash-safe (the matrix of 4.1 is also run with `abort` injected at point *i*) |
-| WF-13 | Retention / revert: unlock before revert, lock only after handoff | L1 | FR-REN-7 order enforced; revert against a fake with admin-set lock → needs_human |
-| WF-14 | Poll loops: hard deadline reached, backoff capped, no unbounded loop | L1 (fake clock) | Deadline error is classified; attach not retried until volume `available` |
-| WF-15 | Clock safety: lease logic uses DB time or a monotonic source, not worker wall clock | L2 | Skewed worker clock does not extend its lease **[ALIGN]** |
+| WF-01 | Crash at every crash point (matrix) | L1 + L2 | Oracle |
+| WF-02 | Response lost after every mutating call | L1 | Oracle; `create_green` adopts by ledger + tag (0→create, 1→adopt, >1→`needs_human`, never auto-delete) |
+| WF-03 | `kill -9` worker during real `ansible-runner` | L2 | Orphan process group and run dir swept; secret files gone; non-data phases rerun; data phases `needs_human` |
+| WF-04 | Lease expiry and takeover: heartbeat stops, injectable clock passes `lease_expires_at` | L1 + L2 | New claim with attempt+1 and a new `fencing_token`; resumes once |
+| WF-05 | **Fencing:** A paused at `after_act`, lease expires, B claims and commits, A resumes and commits | L2 (real DB) | A's fenced write matches 0 rows and A discards its result; DB holds B's state |
+| WF-06 | **Limit of fencing** (ADR-0003): A's in-flight OpenStack call lands after B's takeover | L1 (fake delays the call) | B's probe sees the effect and skips or verifies; no duplicate effect; duplicate attach is rejected by the fake as in Nova |
+| WF-07 | **Self-fencing:** heartbeat fails (0 rows / DB down) until `lease_expires_at − fence_margin` | L2 | Worker makes no further adapter call, kills its Ansible process group; data-phase subprocess runs to its timeout instead (renewal-workflow §5) |
+| WF-08 | **Ansible lease rule:** lease = phase timeout + kill grace + `fence_margin` | L2 | Kill worker mid-playbook with an orphan still running: no second Ansible run starts on that VM before the orphan is dead |
+| WF-09 | DB restart (container stop/start) mid-step, mid-wait and idle | L2 | Reconnect with backoff; no lost/double step; fenced commit succeeds only with a current token |
+| WF-10 | Duplicate delivery: two workers race one `ready` step; duplicate approval POST; duplicate abort | L2 | `SKIP LOCKED`: one claimant; partial unique index allows one `running` step per run; one audit event per effect |
+| WF-11 | Concurrent renewals of the same service, or same blue/volume/FIP | L2 | `resource_lock` acquired all-or-nothing in sorted order at run creation; second start gets a clear conflict; no deadlock with crossed lock sets; locks survive crash |
+| WF-12 | Different services, same quota; `renewal.max_concurrent_runs` (5) | L1/L2 | Cap enforced at start; quota failure of the second leaves the first unaffected |
+| WF-13 | Resume from probed state at each stuck-prone step (W3, W5, S4, S5): volume `available` / `detaching` / `in-use` on blue / attached to green / `reserved` | L1 | Table-driven expected action per state; `detaching`→wait; `reserved`/`attaching` past deadline→`needs_human` |
+| WF-14 | Waiting steps: `WAIT(poll_after)` frees the lease; backoff `poll.initial_interval`→`poll.max_interval`; `deadline_at` reached | L1 (fake clock) | Deadline → `needs_human` (state unknown), never `fatal`; no thread blocks |
+| WF-15 | Approvals: G2 expired or plan hash changed while down; W1 claimed outside the policy window | L1 | W1 not claimed; re-checked at claim; G3 approver ≠ requester ≠ plan approver |
+| WF-16 | Abort at every step boundary, during restore, during a data phase | L1 + L2 | Build: SIGTERM `configure` → Discarding; window: step finishes then restore; after W10 refused; matrix of 4.1 re-run with abort injected |
+| WF-17 | Auto-restore (S1–S9) only when every resource state is known; otherwise `needs_human`; restore skips satisfied steps; lock set only at R1, unlocked at S1 | L1 | Restore sequence is convergent: crash matrix on S1–S9 reaches blue serving, FIP on blue, green `SHUTOFF` |
+| WF-18 | Error classes: `OverQuota` → **fatal** (no retry); `NoValidHost`/`ERROR` green → fatal for the attempt, green **kept** until operator rollback (TC), never auto-deleted; retryable exhaustion → `needs_human` | L1 | Exact class per case (renewal-workflow §2.1, §7) |
+| WF-19 | Upgrade: `running` steps drained; `waiting`/`ready` steps of N-1 resume on N; unknown `strategy_version` refuses start with a listing | L2 | architecture.md §9 |
+| WF-20 | Clock safety: lease and `not_before` use DB time, not worker clock | L2 | Skewed worker clock cannot extend its lease |
 
 ## 5. Integration tests in CI (L2)
-
 | Component | Setup | What is tested |
 |---|---|---|
 | PostgreSQL | Container (`postgres:<pinned digest>`) via compose/Testcontainers; fresh database per test module, template-DB clone for speed | Real locks, leases, `SKIP LOCKED`, serialisation errors, connection loss; roles `ovlm_owner`/`ovlm_app` as in security-model §9 |
-| Alembic | `upgrade head` on empty DB; `downgrade base`; `upgrade head` again; model-vs-migration diff (`alembic check`, no drift); each revision upgraded **with data** from the previous revision (seeded fixtures); one-head check | Migrations are reversible where promised (irreversible ones are marked and tested for the marker), no auto-generated drift, app role privileges survive upgrade (audit table grants, test 14 below) |
+| Alembic | `upgrade head` on empty DB; `alembic check` (model vs migration, no drift); one-head check; upgrade **N-1 → N with seeded data**, including in-flight `waiting` runs (expand/contract rule); app refuses to start if schema is not at head. Downgrade is **not** a supported path (architecture.md §9: restore backup), so: any revision that does ship a `downgrade()` gets an up/down/up test, and a **backup → restore → resume run** test covers NFR-7 | No drift, no data loss on upgrade, in-flight runs resume, app-role privileges survive upgrade (audit grants, S-14) |
 | ansible-runner | Real `ansible-runner` subprocess, pinned versions, isolated run dir, OVLM-generated one-host inventory | Event capture, timeouts (SIGTERM→SIGKILL), exit-code classification (contract §6), result.json parsing (missing/oversized/malformed → class), secrets files created 0600 and removed, `ANSIBLE_*` env hygiene, `--list-hosts` scope check |
 | Target | Ubuntu 24.04 container with sshd + Python; systemd image (privileged) or `service`-stub for units; throwaway SSH key | SSH path, host-key policy (pinned fingerprint, TOFU opt-in), no root disk writes |
 | `ovlm-counter` role | The reference workload of test-environment §4 | `configure` run twice → second `changed=0`; `healthcheck` ok / fails when data mount missing (503); `quiesce` refuses with a held mount; `start_service` idempotent; `--check` honoured |
@@ -199,7 +204,7 @@ marked flaky; a failing one blocks merge.
 
 Environment: quick-lab with Cinder LVM (ADR-0001), OVLM on the lab VM, guests under TCG with generous configurable
 timeouts. Every scenario below is **Designed**; none has run. Expected behaviours are from test-environment §5 and
-the contracts, to be confirmed against `renewal-workflow.md` **[ALIGN]**. Common preconditions (**CP**): CP1 lab
+renewal-workflow.md §7 (two architect decisions applied: insufficient capacity is fatal with no retry; a failed green is deleted only by operator rollback). Common preconditions (**CP**): CP1 lab
 healthy (`openstack volume service list`, 1 GB test volume attach/detach on CirrOS passes); CP2 dedicated project,
 quotas set; CP3 `ovlm-counter` v1 running on blue with data volume mounted, counter ≥ 10, marker recorded; CP4 profile
 approved; CP5 evidence directory created (§7.3). Common evidence set (**CE**): audit trail export, DB dump of workflow
@@ -207,22 +212,21 @@ tables, `server/volume/floating ip list --long` before and after, ansible run re
 `docker ps` and `dmesg` tail, worker log.
 
 ### 7.1 Primary acceptance scenario (12 steps)
-
 | Step | Action | Pass criterion (evidence) |
 |---|---|---|
 | 1 | Configure read-only credential; sync inventory | Blue, volume, FIP, image, flavor visible; zero write calls (request log) |
 | 2 | Register blue; create service and profile | Profile version 1 stored; observed vs desired shown separately |
 | 3 | Readiness assessment | `ready`, each check with evidence; negative control run earlier (`not-ready` with unpinned ref) |
 | 4 | Set policy; plan shows deadline and window | Deadline = launch + max age adjusted to window |
-| 5 | Plan renewal; capacity pre-check; approver (≠ requester) approves | Approval bound to hash; self-approval rejected |
-| 6 | Provision green (tagged, in volume's AZ) | Exactly one new server with `ovlm:run` tag; blue untouched |
-| 7 | `configure` on green; second run `changed=0` | result.json ok; idempotence recorded |
-| 8 | Cutover approval; typed confirmation (name + last 6 of ID); `quiesce` blue; stop blue; detach; attach to green; `data_attach`; `start_service` | Volume attached to exactly one server at all sampled instants; no mkfs; marker SHA equal |
-| 9 | `healthcheck` green | `/health` ok, `fs_uuid` and `marker_sha256` equal to recorded, `counter ≥ recorded`, VM id differs from blue |
-| 10 | FIP moved to green | `floating ip show` = green port; external probe answers from green; downtime measured |
-| 11 | Retention: blue stopped, locked after handoff; audit reviewed | Lock set only after step 8; audit has every step attempt |
-| 12 | Retirement approval (different approver than plan), typed confirmation, delete blue | `delete_on_termination=false` re-checked; data volume survives on green; blue gone; final health ok |
-Also run **revert** (after step 10, before 12) and verify FIP/volume return to blue and data is intact.
+| 5 | Plan renewal; capacity pre-check; G1 approved by approver ≠ requester; run starts (`B1 preflight`, `B2 claim_resources`) | Approval bound to hash; self-approval rejected; markers on blue, FIP, volume |
+| 6 | `B3 create_green`, `B4 wait_green_active`, `B5 wait_green_ssh` (host key pinned, ADR-0006) | One server tagged `ovlm:managed` + `ovlm:run:<id>`, in the volume's AZ; ledger row `present`; blue untouched |
+| 7 | `B6`–`B8` (`green_preflight`, `configure_green`, `verify_cutover_preconditions`); second `configure` run `changed=0` | `ovlm.result/1` ok; external baseline of blue recorded |
+| 8 | G2 approved inside a policy window (typed confirmation: name + last 6 of ID); `W1 quiesce_old` → `W2 stop_old` → `W3 detach_volume` → (`W4` snapshot optional) → `W5 attach_volume_green` → `W6 data_attach_green` → `W7 start_service_green` | Volume attached to exactly one server at all sampled instants; no mkfs; marker SHA equal |
+| 9 | `W8 healthcheck_green` | `/health` ok, `fs_uuid` and `marker_sha256` equal to recorded, `counter ≥ recorded`, VM id differs from blue |
+| 10 | `W9 move_fip`, `W10 verify_external` | FIP `port_id` = green port; probe answered by green; OVLM-measured downtime recorded and compared with the external probe timeline |
+| 11 | `R1 retain_old`, `R2 await_retention` | Blue `SHUTOFF`, locked (`locked_reason=ovlm:retained:<run>`) only after W3; audit has every step attempt |
+| 12 | G3 (approver ≠ requester ≠ plan approver), typed confirmation, `X1 retire_old` | `delete_on_termination=false` re-checked; data volume survives on green; blue gone; final health ok |
+Also run **revert** (after W10, before G3): restore sequence S1–S9; FIP and volume return to blue, data written by green is still present (restore carries data forward).
 
 ### 7.2 Failure scenarios
 
@@ -232,18 +236,18 @@ evidence, nothing not tagged by OVLM is modified.
 
 | ID | Preconditions | Injection | Expected OVLM behaviour | Evidence (beyond CE) | Pass criteria |
 |---|---|---|---|---|---|
-| LAB-01a–e Interrupted workflow | CP1–CP4; run started | `kill -9` worker at: (a) green provisioning wait, (b) `configure`, (c) `quiesce`, (d) volume detach/attach, (e) before cutover | Worker restarts; run resumes from persisted state and probed OpenStack/guest state; (c) and (d) go to needs-human if state ambiguous | Step rows before/after; stray `ansible` processes; orphan run dirs; server/volume lists | One green VM; ≤ 1 attachment; no orphans after sweeper; data intact |
-| LAB-02 Insufficient capacity | CP1–CP4 | `openstack quota set --cores 0` (or `instances 1`) on the project; and separately `NoValidHost` via oversize flavor if admin can set up | Pre-check warns (advisory); provisioning fails with clear class; blue untouched; volume unchanged | Nova fault text, run state, blue `/health` 200 | Failure surfaced with next action; no volume operation executed |
-| LAB-03 Failed provisioning | CP1–CP4 | Profile with nonexistent image id / flavor too small for image | Step fails; green in `ERROR` cleaned only if tagged as its own | `server show` fault; resource diff before/after | Cleanup limited to tagged resources; blue/volume untouched |
-| LAB-04 Failed Ansible configuration | CP1–CP4 | Pinned ref with deliberate error (bad package/template var) | `configure` classified fatal/retryable per contract, bounded retries; blue untouched; volume still on blue | redacted run log, result.json, exit code, attachment unchanged | No data-phase step started |
-| LAB-05 Failed health check | Run reaches `start_service` | Stop app on green or wrong port after `start_service` | Bounded repeats then rollback: volume back to blue, blue service restarted, FIP never moved | healthcheck history, attachments, FIP association, blue `/health` | Blue serving again; marker equal |
-| LAB-06 Failed cutover | Run reaches FIP step | Remove router external gateway (maps to the misleading 404) / policy denying `update_floatingip` | FIP step fails; error mapped to "no router path"; FIP stays on blue or restored; rollback or needs-human; downtime recorded | `floating ip show` before/after, Neutron error body, timeline | FIP on a working VM; mapping message correct |
-| LAB-07 DB restart | Run in `configure` and again in volume handoff | Stop PostgreSQL 30 s | Worker backs off, reconnects, no lost/double step; self-fences if TTL passes | DB log, step table | Same as LAB-01 pass |
+| LAB-01a–e Interrupted workflow | CP1–CP4; run started | `kill -9` worker during: (a) `B4`, (b) `B7`, (c) `W1`, (d) `W3`/`W5`, (e) `G2` wait | Lease expires, takeover with new fencing token; probes real state; (c) is `needs_human` with probe evidence, (d) resumes or `needs_human` per state; (a),(b),(e) resume | Step rows before/after; stray `ansible` processes; orphan run dirs; server/volume lists | One green VM; ≤ 1 attachment; no orphans after sweeper; data intact |
+| LAB-02 Insufficient capacity | CP1–CP4 | (a) quota `cores 0` / `instances 1` → `OverQuota`; (b) `NoValidHost` (oversize flavor) | (a) `B1` refuses early (advisory) or `B3` fails **fatal, no retry**; (b) `B4` fatal for the attempt, green kept in `ERROR`; both → `BuildFailed`, blue untouched, no volume operation | Nova error/fault text, retry counter = 0, blue `/health` 200 | Fatal class, clear next action; green deleted only after operator rollback (LAB-03) |
+| LAB-03 Failed provisioning | CP1–CP4 | Nonexistent image id / flavor too small for image | `B3`/`B4` fatal → `BuildFailed` with fault evidence; green **kept**; operator rollback (TC) then deletes it, only if tagged `ovlm:run:<this run>` | `server show` fault; resource diff before/after rollback | Green not deleted automatically; deleted only after TC; blue/volume untouched |
+| LAB-04 Failed Ansible configuration | CP1–CP4 | Pinned ref with deliberate error (bad package/template var) | `B7` per AC §6: bounded retries or fatal → `BuildFailed`; blue untouched; volume never leaves blue | redacted run log, result.json, exit code, attachment unchanged | No data-phase step (`W1`+) started |
+| LAB-05 Failed health check | Run at `W8` | Stop app on green or wrong port after `W7` | `healthcheck.max_attempts` exhausted → auto restore S2–S9 (FIP never moved); downtime includes restore | healthcheck history, attachments, FIP association, blue `/health` | Blue serving again; marker equal; run `Restored` |
+| LAB-06 Failed cutover | Run at `W9` | Remove router external gateway (misleading 404) / policy denying `update_floatingip` | `W9` fails, FIP unchanged → auto restore S2–S9; error mapped to "no router path"; unknown FIP state → `needs_human` | `floating ip show` before/after, Neutron error body, timeline | FIP on working VM; message correct; downtime recorded |
+| LAB-07 DB restart | Run in `B7`, again in `W3`–`W6` | Stop PostgreSQL 30 s | Non-data steps self-fence before lease end; data subprocess runs to completion; fenced commit if token current, else discarded and re-probed | DB log, step table, fencing tokens | No lost/double step; same as LAB-01 |
 | LAB-08 Worker restart | as LAB-01 | SIGTERM and SIGKILL separately | SIGTERM: subprocess ended, step marked interrupted; SIGKILL: sweeper cleanup | as LAB-01 | as LAB-01 |
 | LAB-09 Detach refused | Blue active, volume mounted | Hold the mount (`sleep` in `/srv/data`) | `quiesce` fails needs-human; volume not detached | quiesce result, Cinder `in-use` | No detach attempted |
 | LAB-10 Data-safety negative | Blank extra volume | `first_use=false` with blank volume | `data_attach` needs-human, no mkfs | blkid before/after | Volume unchanged |
 | LAB-11 Device naming | Attach a second volume first | Data volume not `/dev/vdb` | Correct device via by-id | device path, marker md5 | Marker equal |
-| LAB-12 Locked blue | After handoff, admin locks blue | Admin-set lock, then revert | Revert stops with needs-human (member cannot unlock) | 409 body | No partial revert |
+| LAB-12 Locked blue | After handoff, admin locks blue | Admin-set lock, then revert | `S1 unlock_old` cannot unlock → `needs_human` | 409 body | No partial revert; locks retained |
 | LAB-13 Stuck volume | Fault during detach | Kill nova-compute during detach | Detects `detaching`/error state, stops, reports; does not call admin-only APIs | volume/attachment states, instance actions | Operator action named in message |
 | LAB-14 Ownership guard | Foreign VM tagged `ovlm:managed` | Try to act on unregistered tagged VM | Refused, audit event | audit export | Zero mutating calls on it |
 
@@ -269,7 +273,6 @@ states TCG vs KVM and the single-node/LVM limits. A later change to the affected
 re-run (the bundle's commit is compared by CI to the touched paths; ASSUMPTION: path-to-scenario map maintained by QA).
 
 ## 8. What cannot be tested without a real cloud
-
 | Item | Why | Where it is addressed |
 |---|---|---|
 | OSI open questions 1–13 (policy defaults, microversion maxima, DVR/OVN FIP behaviour, access rules end to end, down-cell servers, Octavia/Designate) | Behaviour of a specific deployment | Lab only partly (single-node quick-lab has no Octavia/Designate/HA); remaining = production validation |
@@ -327,7 +330,6 @@ split by marker, never by dropping tests. Actions pinned by SHA (security-model 
 - Coverage from the fake is never cited as evidence of OpenStack behaviour.
 
 ### 9.4 Flaky-test policy
-
 | Rule | Detail |
 |---|---|
 | Zero tolerance for sleeps | Use fake clock, `tick()`, polling with deadlines, container health checks; no `time.sleep` in tests except in documented real-process tests (lint-flagged) |
@@ -339,11 +341,10 @@ split by marker, never by dropping tests. Actions pinned by SHA (security-model 
 | Lab | Lab failures are never "flaky": rerun creates a second evidence bundle and both are kept; a pass after a fail is `inconclusive` until the cause is understood |
 
 ## 10. Open items
-
 | # | Item | Needs |
 |---|---|---|
-| 1 | Adapter interface names, lease/fencing mechanism, step list, crash-point names | `architecture.md`, `renewal-workflow.md` **[ALIGN]** |
-| 2 | Route table export for RBAC/CSRF parametrization | `api-design.md` **[ALIGN]** |
-| 3 | Migration naming, DB roles, reversible-migration policy | `data-model.md` **[ALIGN]** |
+| 1 | Adapter interface method names; crash-point phase names (§4.1.1 are proposals mapped to ADR-0003) | Implementation **[ALIGN]** |
+| 2 | `renewal-workflow.md` §7 says `NoValidHost` green is deleted and `B3` retried, but §8 row 16 and the PM say operator-rollback only and fatal; tests follow the latter | Architect to fix §7 |
+| 3 | RBAC/CSRF tests parametrize over FastAPI's generated OpenAPI route table (api-design.md) | Confirm no routes outside it |
 | 4 | Are privileged containers available in CI (loopback `data_attach` tests)? | Maintainer / CI choice |
 | 5 | Evidence bundle storage and who signs `REVIEW.md` | Maintainer |
