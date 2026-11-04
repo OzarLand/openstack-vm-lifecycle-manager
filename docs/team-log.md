@@ -826,3 +826,17 @@ the REN-1 paths passing ([verification-renewal-fixes.md](reviews/verification-re
 
 **Remaining before the Felcloud acceptance campaign:** the encrypted credential store. Its agent has been blocked since
 22:21 UTC on a permission prompt that only the maintainer can approve.
+
+## PR #9 merged; good first issues opened — 2026-11-04 23:55 UTC
+
+[OzarLand/openstack-vm-lifecycle-manager#9](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/9) is
+merged, with CI green: `CONTRIBUTING.md`, `docs/install-guide.md`, the GitHub issue and PR templates, and
+`docs/good-first-issues.md`.
+
+The eight beginner issues are open on GitHub with the label `good first contribution`:
+[#10](https://github.com/OzarLand/openstack-vm-lifecycle-manager/issues/10) to
+[#17](https://github.com/OzarLand/openstack-vm-lifecycle-manager/issues/17).
+
+**Still blocked:** the encrypted credential store agent, on a permission prompt since 22:21 UTC. It needs the
+maintainer's approval in https://claude.ai/code/session_016ti9vzvtr3eKwtKW8Zsf9r. It is the last blocker before the
+Felcloud acceptance campaign.
