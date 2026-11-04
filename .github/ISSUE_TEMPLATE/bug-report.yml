@@ -1,0 +1,80 @@
+name: Bug report
+description: OVLM does something wrong, or a test or document is wrong.
+labels: ["kind/bug", "status/open"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you. OVLM is **pre-alpha**, so bugs are expected. A good report says what you ran, what you expected
+        and what happened.
+        **Never paste secrets, real hostnames, IP addresses, tokens or unredacted logs.** For a vulnerability, do
+        not use this form: use private vulnerability reporting.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands. Redact addresses and names.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: OVLM version or commit
+      description: "`ovlm --version`, or the commit SHA."
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How you run OVLM
+      options:
+        - Docker Compose (make up)
+        - From a source checkout (uv)
+        - Tests only (make test)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Install / Compose / Makefile
+        - Authentication / TOTP / enrolment
+        - Inventory / OpenStack read client
+        - Readiness / policies / profiles
+        - Renewal workflow / worker
+        - OpenStack write client / guards
+        - Automation (Ansible)
+        - Operator UI
+        - Documentation
+        - I do not know
+  - type: input
+    id: cloud
+    attributes:
+      label: OpenStack release and deployment method (if it involves a cloud)
+      placeholder: "2025.1, Kolla-Ansible"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines (redacted)
+      render: shell
+  - type: textarea
+    id: tested
+    attributes:
+      label: What you already checked
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction
+      options:
+        - label: This issue contains no secrets, tokens, real hostnames, IP addresses, or customer or person names.
+          required: true

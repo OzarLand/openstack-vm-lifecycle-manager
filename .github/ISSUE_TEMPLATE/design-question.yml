@@ -1,0 +1,54 @@
+name: Design question
+description: Question or challenge about the design, the renewal workflow, the security model or a decision.
+labels: ["kind/design", "status/open"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The design is reviewed but not proven on a real cloud. Challenges are welcome. For an open-ended
+        conversation, an [OzarLand discussion](https://github.com/OzarLand/ozarland/discussions) may fit better.
+        **Never paste secrets, real hostnames, IP addresses or unredacted logs.**
+  - type: input
+    id: document
+    attributes:
+      label: Document and section
+      description: Which page and section you are asking about.
+      placeholder: "docs/renewal-workflow.md, section on rollback"
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Question or concern
+      description: What looks wrong, unclear or risky? What would you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: scenario
+    attributes:
+      label: A concrete scenario
+      description: Where it matters. A failure, an unusual cloud, an operator habit.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of concern
+      options:
+        - Safety (data loss, downtime, wrong resource touched)
+        - Security (credentials, approval, audit)
+        - Operations (day-two, monitoring, backup, upgrade)
+        - Compatibility (another cloud, release or backend)
+        - Usability
+        - Scope (should OVLM do this at all?)
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would propose (optional)
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction
+      options:
+        - label: This issue contains no secrets, real hostnames, IP addresses, or customer or person names.
+          required: true
