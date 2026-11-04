@@ -14,8 +14,20 @@ from sqlalchemy import Connection, text
 
 from ovlm.workflow.ids import new_id
 
+#: ``approve`` (E5-5): an approval decision was recorded; the strategy wakes its gate step, which re-reads and
+#: re-validates the approval itself (the signal carries no authority).
 SIGNAL_KINDS = frozenset(
-    {"admit", "abort", "rollback", "revert", "retry_step", "mark_resolved", "probe", "discard"}
+    {
+        "admit",
+        "abort",
+        "rollback",
+        "revert",
+        "retry_step",
+        "mark_resolved",
+        "probe",
+        "discard",
+        "approve",
+    }
 )
 
 
