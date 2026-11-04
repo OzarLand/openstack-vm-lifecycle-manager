@@ -716,3 +716,14 @@ The maintainer decided **not to use quick-lab: the lab is Felcloud itself**, the
 - E1-8 and the upstream quick-lab proposal are dropped.
 - Asked in a popup, the maintainer chose the **current project** (not a dedicated one) and accepts the residual risk.
 - Lab runs add a before/after snapshot proving that no non-`ovlm-*` resource changed.
+
+## ▶️ Resumed — 2026-11-04
+
+The maintainer said "reprends". Per [HANDOFF.md](HANDOFF.md):
+- engine fixes (SRE-C-1..10) and security fixes (SEC-C-1..11; SEC-C-8 partial) merged into the working branch, with
+  both review files;
+- **verified by Agent 1:** lint clean, 1035 unit and 295 integration tests pass (the automation-container tests run in
+  CI only);
+- PR #7 opened;
+- a short, fresh Opus session verifies the fixes against the findings before the merge;
+- the renewal-strategy agent resumes.

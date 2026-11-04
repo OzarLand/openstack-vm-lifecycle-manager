@@ -63,7 +63,7 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | ID | Task | Owner | Model | Depends on | Status | Acceptance / tests |
 |---|---|---|---|---|---|---|
 | E3-1 | Auth: local users (argon2id), sessions, CSRF, API tokens, **TOTP for approver/admin**, step-up | 4 | Sonnet | E1 | Integration tested (PR #3) | Security tests from security-model §10 |
-| E3-2 | RBAC with project scope, requester sets, separation of duties, "self-approved" flag | 4 | Opus | E3-1 | Implemented, awaiting security code review | Matrix tests; review by 8 |
+| E3-2 | RBAC with project scope, requester sets, separation of duties, "self-approved" flag | 4 | Opus | E3-1 | Integration tested; security review fixes merged (PR #7) | Matrix tests; review by 8 |
 | E3-3 | Profiles + immutable versions; policies + bindings + exceptions; deadlines | 4 | Sonnet | E1 | Integration tested (PR #4); automation lint job, waivers and repo allowlist still to do | API + unit tests |
 | E3-4 | Append-only audit (grants + trigger), mirror to the log stream | 4 | Sonnet | E1-3 | Integration tested (PR #3) | DB-level tests: UPDATE/DELETE refused |
 | E3-5 | Renewal planning: upcoming list, advisory quota check, same-service lock | 4 | Sonnet | E3-3, E2 | To do | Unit tests |
@@ -72,17 +72,17 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 
 | ID | Task | Owner | Model | Depends on | Status | Acceptance / tests |
 |---|---|---|---|---|---|---|
-| E4-1 | Check framework (versioned checks, pass/fail/unknown/n-a, severity, evidence, recommendation) and level rules | 4 | Sonnet | E3-3 | To do | Unit tests per rule |
-| E4-2 | MVP checks: data separation, automation pinned, strategy applicability (FIP, single volume, image boot), health check defined, volume type explicit | 4 | Sonnet | E4-1 | To do | Unit tests |
+| E4-1 | Check framework (versioned checks, pass/fail/unknown/n-a, severity, evidence, recommendation) and level rules | 4 | Sonnet | E3-3 | Integration tested (PR #7) | Unit tests per rule |
+| E4-2 | MVP checks: data separation, automation pinned, strategy applicability (FIP, single volume, image boot), health check defined, volume type explicit | 4 | Sonnet | E4-1 | Integration tested (PR #7) | Unit tests |
 
 ### E5 — Renewal engine (Phase 6)
 
 | ID | Task | Owner | Model | Depends on | Status | Acceptance / tests |
 |---|---|---|---|---|---|---|
-| E5-1 | Workflow engine core: runs/steps, SKIP LOCKED claims, leases, fencing (local deadline), resource locks, signals, timers | 4 | **Opus** | E1 | Integration tested (PR #3); SRE code review in progress | WF-01..WF-20 crash-injection suite; review by 7 |
-| E5-2 | OpenStack write client with ownership guard and write allowlist | 4 | Opus | E2-1, E5-1 | Implemented, awaiting security code review | Tests: untagged/unregistered target refused; review by 8 |
-| E5-3 | Automation runner (ansible-runner subprocess, per-run dir, `ovlm.result/1`, redaction, restricted artefact store, lint) | 6 | Sonnet | E1-7, E5-1 | In progress | Integration test against a local container |
-| E5-4 | `bluegreen_fip_v1` steps B1–X1, W1–W10, S1–S10 per renewal-workflow.md | 4 | Opus | E5-1..3 | To do | Unit tests with the fake per step and per failure row; reviews by 7 and 8 |
+| E5-1 | Workflow engine core: runs/steps, SKIP LOCKED claims, leases, fencing (local deadline), resource locks, signals, timers | 4 | **Opus** | E1 | Integration tested; SRE review fixes merged (PR #7) | WF-01..WF-20 crash-injection suite; review by 7 |
+| E5-2 | OpenStack write client with ownership guard and write allowlist | 4 | Opus | E2-1, E5-1 | Integration tested; security review fixes merged (PR #7) | Tests: untagged/unregistered target refused; review by 8 |
+| E5-3 | Automation runner (ansible-runner subprocess, per-run dir, `ovlm.result/1`, redaction, restricted artefact store, lint) | 6 | Sonnet | E1-7, E5-1 | Integration tested (PR #7) | Integration test against a local container |
+| E5-4 | `bluegreen_fip_v1` steps B1–X1, W1–W10, S1–S10 per renewal-workflow.md | 4 | Opus | E5-1..3 | In progress (WIP on claude/ovlm-renewal) | Unit tests with the fake per step and per failure row; reviews by 7 and 8 |
 | E5-5 | Gates G1–G3, approval evidence re-validation, typed confirmation | 4 | Opus | E3-2, E5-4 | To do | Security tests |
 | E5-6 | Acceptance scenario + failure scenarios on Felcloud (ADR-0007) | 9 + ozar-dev | Sonnet | E5-4 | To do | Evidence stored; status "lab validated" |
 
