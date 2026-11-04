@@ -1,0 +1,4 @@
+body { font: 16px/1.5 system-ui, sans-serif; margin: 0; color: #1b1f23; }
+header, footer { padding: .75rem 1.5rem; background: #f3f4f6; }
+main { padding: 1.5rem; max-width: 60rem; }
+.muted { color: #6b7280; }

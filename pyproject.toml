@@ -1,0 +1,79 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ovlm"
+version = "0.0.1"
+description = "OpenStack VM Lifecycle Manager (OVLM) - foundation skeleton"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.32",
+  "sqlalchemy>=2.0.36",
+  "psycopg[binary]>=3.2",
+  "alembic>=1.14",
+  "pydantic-settings>=2.6",
+  "prometheus-client>=0.21",
+  "jinja2>=3.1.4",
+]
+
+[dependency-groups]
+build = ["hatchling==1.27.0"]
+dev = [
+  "pytest>=8.3",
+  "httpx>=0.28",
+  "ruff>=0.8",
+  "mypy>=1.13",
+  "import-linter>=2.1",
+]
+
+[project.scripts]
+ovlm = "ovlm.cli:main"
+ovlm-worker = "ovlm.worker.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ovlm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = ["integration: needs a real PostgreSQL (OVLM_TEST_DATABASE_URL)"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["ansible"]  # workload code, linted by ansible/tests/run.sh
+
+[tool.ruff.lint]
+ignore = ["E501"]
+select = ["E", "F", "I", "UP", "B", "S", "SIM", "T20"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S603", "S607"]
+"migrations/**" = ["S608"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+plugins = ["pydantic.mypy"]
+
+[tool.importlinter]
+root_package = "ovlm"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "api and ui never import outbound adapters (architecture.md section 3)"
+type = "forbidden"
+source_modules = ["ovlm.api", "ovlm.ui"]
+forbidden_modules = ["ovlm.openstack", "ovlm.automation", "ovlm.worker", "openstack", "ansible_runner"]
+allow_indirect_imports = false
+
+[[tool.importlinter.contracts]]
+name = "config imports no other ovlm module"
+type = "forbidden"
+source_modules = ["ovlm.config"]
+forbidden_modules = ["ovlm.db", "ovlm.observability", "ovlm.api", "ovlm.ui", "ovlm.worker", "ovlm.workflow"]

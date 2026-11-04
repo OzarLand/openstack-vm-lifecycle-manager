@@ -1,0 +1,87 @@
+---
+# healthcheck: READ-ONLY, safe to repeat and in --check mode. Contract 3.6. OVLM does the repetition.
+# No task here changes the target. Required checks: service responds, data mount by fs UUID, marker checksum.
+
+- name: Ask the service for /health (read-only)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ ovlm_app_port }}/health"
+    status_code: [200, 503]
+    timeout: 10
+    return_content: true
+  register: hc_resp
+  failed_when: false
+  check_mode: false
+
+- name: Independent view of the mount from the host (read-only; real mode only)
+  ansible.builtin.command: findmnt -n -o SOURCE,FSTYPE,UUID --mountpoint {{ ovlm_mount_point | quote }}
+  register: hc_findmnt
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: not ovlm_test_mode | bool
+
+- name: Marker checksum computed by Ansible, independent of the service (read-only)
+  ansible.builtin.stat:
+    path: "{{ ovlm_mount_point }}/{{ ovlm_data_marker }}"
+    checksum_algorithm: sha256
+  register: hc_marker
+  check_mode: false
+
+- name: Evaluate the checks
+  ansible.builtin.set_fact:
+    hc_body: "{{ hc_resp.json | default({}) }}"
+    hc_host_uuid: "{{ (hc_findmnt.stdout.split()[2] if (hc_findmnt.rc | default(1) == 0 and hc_findmnt.stdout.split() | length >= 3) else '') if not ovlm_test_mode | bool else ovlm_test_fs_uuid }}"
+    hc_want_uuid: "{{ ovlm_expected_fs_uuid if ovlm_expected_fs_uuid != '' else (ovlm_test_fs_uuid if ovlm_test_mode | bool else '') }}"
+
+- name: Build the check list
+  ansible.builtin.set_fact:
+    ovlm_checks:
+      - name: service_responds
+        ok: "{{ (hc_resp.status | default(-1)) in [200, 503] and hc_body | length > 0 }}"
+        detail: "GET /health on port {{ ovlm_app_port }} -> HTTP {{ hc_resp.status | default('no answer') }}"
+        observed: "{{ hc_resp.status | default(-1) }}"
+        expected: 200
+      - name: data_mount
+        ok: >-
+          {{ hc_body.mounted | default(false) and hc_body.ok | default(false)
+             and (hc_body.simulated | default(false) | bool) == (ovlm_test_mode | bool)
+             and hc_body.fs_uuid | default('') != ''
+             and (hc_host_uuid == '' or hc_body.fs_uuid | default('') == hc_host_uuid)
+             and (hc_want_uuid == '' or hc_body.fs_uuid | default('') == hc_want_uuid) }}
+        detail: "{{ 'SIMULATED mount (test mode). ' if hc_body.simulated | default(false) else '' }}mounted={{ hc_body.mounted | default('n/a') }} reason={{ hc_body.reason | default('none') }}"
+        observed: "{{ hc_body.fs_uuid | default('none') }}"
+        expected: "{{ hc_want_uuid if hc_want_uuid != '' else (hc_host_uuid if hc_host_uuid != '' else 'any, consistent with the host view') }}"
+      - name: marker_checksum
+        ok: >-
+          {{ (hc_body.marker_sha256 | default(none)) == (hc_marker.stat.checksum | default(none))
+             and (ovlm_expected_marker == '' or hc_body.marker_sha256 | default('') == ovlm_expected_marker) }}
+        detail: "{{ 'compared with the expected checksum from quiesce' if ovlm_expected_marker != '' else 'no expected checksum passed; service view compared with the host view only' }}"
+        observed: "{{ hc_body.marker_sha256 | default('none') }}"
+        expected: "{{ ovlm_expected_marker if ovlm_expected_marker != '' else (hc_marker.stat.checksum | default('none')) }}"
+    ovlm_facts:
+      fs_uuid: "{{ hc_body.fs_uuid | default(none) }}"
+      marker_sha256: "{{ hc_body.marker_sha256 | default(none) }}"
+      counter: "{{ hc_body.counter | default(none) }}"
+      generation: "{{ hc_body.generation | default(none) }}"
+      service_hostname: "{{ hc_body.hostname | default(none) }}"
+      health_state: "{{ 'healthy' if (hc_resp.status | default(-1)) == 200 else 'unhealthy' }}"
+
+- name: Name the failed checks
+  ansible.builtin.set_fact:
+    hc_failed: "{{ ovlm_checks | rejectattr('ok') | map(attribute='name') | list }}"
+    ovlm_changed: false
+
+- name: Mark the result unhealthy, retryable (OVLM repeats with backoff)
+  ansible.builtin.set_fact:
+    ovlm_class: retryable
+    ovlm_facts: "{{ ovlm_facts | combine({'health_state': 'unhealthy'}) }}"
+  when: hc_failed | length > 0
+
+- name: Fail the play when unhealthy (ansible-playbook exits 2)
+  ansible.builtin.fail:
+    msg: "unhealthy: failed checks {{ hc_failed | join(', ') }}"
+  when: hc_failed | length > 0
+
+- name: Healthy
+  ansible.builtin.set_fact:
+    ovlm_message: "healthy: counter {{ hc_body.counter | default('n/a') }}"

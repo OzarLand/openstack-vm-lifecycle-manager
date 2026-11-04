@@ -1,0 +1,11 @@
+---
+# base: OS packages for the reference workload. STATE-CHANGING on the target VM (configure phase).
+- name: Install packages (STATE-CHANGING; pinned when a version is set in ovlm_packages)
+  ansible.builtin.apt:
+    name: "{{ item.key ~ ('=' ~ item.value if item.value else '') }}"
+    state: present
+    update_cache: false   # no network refresh in the downtime window; the image/mirror is prepared before
+  register: base_pkgs
+  loop: "{{ ovlm_packages | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"

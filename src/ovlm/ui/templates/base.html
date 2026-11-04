@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="htmx-config" content='{"includeIndicatorStyles": false}'>
+  <title>{% block title %}OVLM{% endblock %} - OpenStack VM Lifecycle Manager</title>
+  <link rel="stylesheet" href="/static/ovlm.css">
+  <script src="/static/htmx.min.js"></script>
+</head>
+<body>
+  <header><strong>OVLM</strong> <span class="muted">OpenStack VM Lifecycle Manager</span></header>
+  <main>{% block content %}{% endblock %}</main>
+  <footer class="muted">OVLM {{ version }}</footer>
+</body>
+</html>

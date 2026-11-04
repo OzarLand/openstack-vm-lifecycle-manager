@@ -1,0 +1,13 @@
+---
+extends: default
+ignore: |
+  tests/work/
+rules:
+  line-length: {max: 260, level: warning}
+  truthy: {allowed-values: ["true", "false"]}
+  comments: {min-spaces-from-content: 1}
+  comments-indentation: disable
+  document-start: {present: true}
+  braces: {max-spaces-inside: 1}
+  indentation: {spaces: 2, indent-sequences: consistent}
+  octal-values: {forbid-implicit-octal: true, forbid-explicit-octal: true}

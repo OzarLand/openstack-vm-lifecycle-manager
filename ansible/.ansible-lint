@@ -1,0 +1,10 @@
+---
+profile: production
+exclude_paths:
+  - tests/work/
+  - .git/
+# Collections are installed outside the repo (CI: ANSIBLE_COLLECTIONS_PATH in tests/run.sh).
+skip_list:
+  # Roles share the contract's `ovlm_*` result variables (ovlm_facts, ovlm_checks, ovlm_class, ...) by
+  # design, and keep short registered names; a per-role prefix would break the shared result protocol.
+  - var-naming[no-role-prefix]

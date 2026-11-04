@@ -1,0 +1,138 @@
+---
+# data_attach (NEW VM, after OVLM attached the Cinder volume). Contract 3.3.
+# Never: wipe, reformat, repartition. Locates by /dev/disk/by-id prefix, never /dev/vdb.
+# Read-only: device wait, blkid, read-only fsck, marker read. STATE-CHANGING: only the fstab entry + mount.
+
+- name: Find the volume by its virtio by-id link, prefix match on the first 20 characters (read-only)
+  ansible.builtin.find:
+    paths: /dev/disk/by-id
+    patterns: "virtio-{{ ovlm_expected_serial[:20] }}*"
+    file_type: link
+  register: dv_find
+  until: (dv_find.files | rejectattr('path', 'search', '-part[0-9]+$') | list | length) >= 1
+  retries: "{{ (ovlm_device_wait_seconds | int / 5) | round(0, 'ceil') | int }}"
+  delay: 5
+  failed_when: false
+  check_mode: false
+
+- name: Bound check on the device search
+  ansible.builtin.set_fact:
+    dv_links: "{{ dv_find.files | default([]) | rejectattr('path', 'search', '-part[0-9]+$') | map(attribute='path') | list }}"
+
+- name: Fail (retryable) when the device did not appear in time
+  ansible.builtin.set_fact:
+    ovlm_class: retryable
+  when: dv_links | length == 0
+
+- name: Stop - device absent (never falls back to "the only extra disk")
+  ansible.builtin.fail:
+    msg: "no /dev/disk/by-id/virtio-{{ ovlm_expected_serial[:20] }}* after {{ ovlm_device_wait_seconds }} s"
+  when: dv_links | length == 0
+
+- name: Fail when the prefix matches more than one device
+  ansible.builtin.set_fact:
+    ovlm_class: needs_human
+  when: dv_links | length > 1
+
+- name: Stop - ambiguous device match
+  ansible.builtin.fail:
+    msg: "by-id prefix matched {{ dv_links | length }} devices; not guessing"
+  when: dv_links | length > 1
+
+- name: Resolve the real device (read-only)
+  ansible.builtin.command: readlink -f {{ dv_links[0] | quote }}
+  register: dv_realpath
+  changed_when: false
+  check_mode: false
+
+- name: Inspect the signature with low-level probing (read-only)
+  ansible.builtin.command: blkid -o export -p {{ dv_realpath.stdout | quote }}
+  register: dv_blkid
+  changed_when: false
+  failed_when: dv_blkid.rc not in [0, 2]   # 2 = nothing found, a case the decision table handles
+  check_mode: false
+
+- name: Decide
+  ansible.builtin.include_tasks: decide.yml
+  vars:
+    dv_blkid_rc: "{{ dv_blkid.rc }}"
+    dv_blkid_out: "{{ dv_blkid.stdout }}"
+
+- name: Record the observation
+  ansible.builtin.set_fact:
+    ovlm_facts:
+      device: "{{ dv_links[0] }}"
+      real_device: "{{ dv_realpath.stdout }}"
+      fs_type: "{{ dv_props.TYPE | default(none) }}"
+      fs_uuid: "{{ dv_props.UUID | default(none) }}"
+      fs_label: "{{ dv_props.LABEL | default(none) }}"
+      decision: "{{ dv_decision.action }}"
+    ovlm_checks: "{{ ovlm_checks | default([]) + [{'name': 'signature', 'ok': dv_decision.action == 'mount', 'detail': dv_decision.message, 'observed': dv_props.TYPE | default('none'), 'expected': ovlm_fs_type}] }}"
+
+- name: Set the failure class from the decision
+  ansible.builtin.set_fact:
+    ovlm_class: "{{ dv_decision.classification }}"
+  when: dv_decision.action != 'mount'
+
+- name: Stop on the decision table
+  ansible.builtin.fail:
+    msg: "{{ dv_decision.message }}"
+  when: dv_decision.action != 'mount'
+
+- name: Read-only filesystem check, ext2/3/4 (e2fsck -n never repairs)
+  ansible.builtin.command: e2fsck -n {{ dv_realpath.stdout | quote }}
+  register: dv_fsck
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: dv_props.TYPE in ['ext2', 'ext3', 'ext4']
+
+- name: Stop when the read-only check is not clean, or no read-only check exists for this fs type
+  ansible.builtin.set_fact:
+    ovlm_class: needs_human
+  when: (dv_props.TYPE in ['ext2', 'ext3', 'ext4'] and dv_fsck.rc != 0) or dv_props.TYPE not in ['ext2', 'ext3', 'ext4']
+
+- name: Fail on fsck
+  ansible.builtin.fail:
+    msg: "read-only filesystem check not clean (rc={{ dv_fsck.rc | default('n/a') }}) or unsupported fs type {{ dv_props.TYPE }}"
+  when: (dv_props.TYPE in ['ext2', 'ext3', 'ext4'] and dv_fsck.rc != 0) or dv_props.TYPE not in ['ext2', 'ext3', 'ext4']
+
+- name: Mount by filesystem UUID and write the fstab entry by UUID (STATE-CHANGING on the NEW VM)
+  ansible.posix.mount:
+    src: "UUID={{ dv_props.UUID }}"
+    path: "{{ ovlm_mount_point }}"
+    fstype: "{{ ovlm_fs_type }}"
+    opts: defaults,nofail
+    state: mounted
+  register: dv_mount
+
+- name: Verify the mount (read-only)
+  ansible.builtin.command: findmnt -n -o SOURCE,UUID --mountpoint {{ ovlm_mount_point | quote }}
+  register: dv_findmnt
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Fail when the mount is not what we asked for
+  ansible.builtin.set_fact:
+    ovlm_class: needs_human
+  when: not ansible_check_mode and (dv_findmnt.rc != 0 or dv_props.UUID not in dv_findmnt.stdout)
+
+- name: Fail on mount verification
+  ansible.builtin.fail:
+    msg: "{{ ovlm_mount_point }} is not mounted from filesystem UUID {{ dv_props.UUID }}"
+  when: not ansible_check_mode and (dv_findmnt.rc != 0 or dv_props.UUID not in dv_findmnt.stdout)
+
+- name: Read the data marker if present (read-only)
+  ansible.builtin.stat:
+    path: "{{ ovlm_mount_point }}/{{ ovlm_data_marker }}"
+    checksum_algorithm: sha256
+  register: dv_marker
+  check_mode: false
+
+- name: Record the result
+  ansible.builtin.set_fact:
+    ovlm_changed: "{{ dv_mount is changed }}"
+    ovlm_facts: "{{ ovlm_facts | combine({'mount_point': ovlm_mount_point, 'marker_present': dv_marker.stat.exists, 'marker_sha256': dv_marker.stat.checksum | default(none)}) }}"
+    ovlm_checks: "{{ ovlm_checks + [{'name': 'mount', 'ok': true, 'detail': 'mounted by UUID', 'observed': dv_props.UUID, 'expected': 'UUID of ' ~ ovlm_fs_type ~ ' on the volume'}] }}"
+    ovlm_message: "mounted {{ ovlm_mount_point }} from UUID {{ dv_props.UUID }}"

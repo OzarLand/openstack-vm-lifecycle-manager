@@ -1,0 +1,56 @@
+---
+# Start the service. STATE-CHANGING on the target VM (start_service phase). Idempotent.
+- name: Guard - the data volume must be mounted before the service starts (read-only)
+  ansible.builtin.command: mountpoint -q {{ ovlm_mount_point | quote }}
+  register: counter_mp
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: not ovlm_test_mode | bool
+
+- name: Refuse to start on the root disk
+  ansible.builtin.set_fact:
+    ovlm_class: needs_human
+  when: not ovlm_test_mode | bool and counter_mp.rc != 0
+
+- name: Fail when the data mount is missing
+  ansible.builtin.fail:
+    msg: "{{ ovlm_mount_point }} is not a mount point; refusing to start the service on the root disk"
+  when: not ovlm_test_mode | bool and counter_mp.rc != 0
+
+- name: Enable and start the unit (STATE-CHANGING)
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  register: counter_start_sd
+  loop: "{{ ovlm_service_units }}"
+  when: not ovlm_test_mode | bool
+
+- name: TEST MODE ONLY - is the service already running? (read-only)
+  ansible.builtin.command: start-stop-daemon --status --pidfile {{ counter_run_dir }}/ovlm-counter.pid
+  register: counter_tm_status
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: ovlm_test_mode | bool
+
+- name: TEST MODE ONLY - start the service without systemd (STATE-CHANGING)
+  ansible.builtin.command: >-
+    start-stop-daemon --start --background --make-pidfile
+    --pidfile {{ counter_run_dir }}/ovlm-counter.pid
+    --chuid {{ counter_user }}
+    --output {{ counter_run_dir }}/ovlm-counter.log
+    --startas {{ counter_app_dir }}/run-testmode.sh
+    --exec {{ counter_app_dir }}/run-testmode.sh
+  register: counter_tm_start
+  changed_when: true
+  when: ovlm_test_mode | bool and counter_tm_status.rc != 0
+
+- name: Wait until the service listens (about 10 s on a 1 vCPU guest, EXP-01)
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ ovlm_app_port }}"
+    delay: 1
+    timeout: 60
+  check_mode: false
