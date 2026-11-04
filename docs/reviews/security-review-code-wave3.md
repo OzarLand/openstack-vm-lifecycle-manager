@@ -65,8 +65,8 @@ Argon2id with dummy-hash verification on unknown users, generic failure, per-acc
 | Tree | Unit (`pytest tests/unit`) | Integration (`pytest tests/integration`, real PostgreSQL 16) |
 |---|---|---|
 | `main` `023aff8` | 206 passed | 168 passed (2 min 48 s) |
-| `claude/ovlm-write-client` `816e3db` | 370 passed (164 added by the branch, all green) | run in progress at the time of this commit; result added in the next commit |
-| `claude/ovlm-rbac` `c230165` | 395 passed (189 added by the branch, all green) | run in progress at the time of this commit; result added in the next commit |
+| `claude/ovlm-write-client` `816e3db` | 370 passed (164 added by the branch, all green) | 168 passed (3 min 02 s; the branch adds no integration tests) |
+| `claude/ovlm-rbac` `c230165` | 395 passed (189 added by the branch, all green) | 201 passed (3 min 40 s; 33 added by the branch: `test_sod_db.py`, `test_authz_scope.py`, all green) |
 
 Environment: `uv sync --frozen` per tree (hash-locked), Python 3.13, Docker unavailable in this session, so the integration suites ran against a local PostgreSQL 16.15 cluster through `OVLM_TEST_DATABASE_URL` (the fixtures create the `ovlm_owner`/`ovlm_api`/`ovlm_worker` roles and a fresh database per test exactly as the Compose init script does). No real cloud: the write backend is exercised against a canned transport and the hand-written fake, as the branch states; the first run against a cloud is the lab run (E5-6), which should include SEC-C-2's log check.
 
