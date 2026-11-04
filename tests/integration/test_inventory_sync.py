@@ -37,7 +37,7 @@ class Clock:
 @pytest.fixture
 def worker_engine(admin_url: URL, fresh_db: str, secrets_dir: Path) -> Iterator[Engine]:
     s = settings_for("migrate", admin_url, fresh_db, secrets_dir)
-    command.upgrade(alembic_config(s.migrations_dir, s.db_url()), "inventory@head")
+    command.upgrade(alembic_config(s.migrations_dir, s.db_url()), "inventory_0001")
     engine = make_engine(settings_for("worker", admin_url, fresh_db, secrets_dir))
     yield engine
     engine.dispose()

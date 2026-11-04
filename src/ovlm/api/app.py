@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from ovlm import __version__
 from ovlm.api.health import DbReadinessProbe, ReadinessProbe
 from ovlm.api.routes_auth import router as auth_router
+from ovlm.api.routes_inventory import router as inventory_router
 from ovlm.config import Settings
 from ovlm.db.engine import make_engine
 from ovlm.observability.context import bind_context
@@ -126,4 +127,5 @@ def create_app(
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.include_router(ui_router)
     app.include_router(auth_router)
+    app.include_router(inventory_router)
     return app
