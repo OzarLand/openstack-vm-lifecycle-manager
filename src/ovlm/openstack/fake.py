@@ -195,6 +195,7 @@ class FakeOpenStack:
         self._ids = 0
         self._rules: list[_Rule] = []
         self._counts: Counter[str] = Counter()
+        self._hidden: set[str] = set()
 
     # --- clock ---------------------------------------------------------------------------------------------
 
@@ -377,6 +378,11 @@ class FakeOpenStack:
             setattr(s, k, v)
         s.updated = self.now
 
+    def hide_server(self, server_id: str, hidden: bool = True) -> None:
+        """A listing omits the server (a partial listing, a cell hiccup) without a tombstone or a minimal
+        construct. Not a documented Nova behaviour: used to test ``gone`` marking and reappearance."""
+        (self._hidden.add if hidden else self._hidden.discard)(server_id)
+
     def remove_volume(self, volume_id: str) -> None:
         """Remove a volume without trace (Cinder has no tombstones)."""
         self._volumes.pop(volume_id)
@@ -505,6 +511,8 @@ class FakeOpenStack:
             need, any_of = set(tags), set(tags_any)
             out: list[ServerInfo] = []
             for s in self._servers.values():
+                if s.id in self._hidden:
+                    continue
                 if s.deleted and changes_since is None:
                     continue
                 if changes_since is not None and s.updated < changes_since:
