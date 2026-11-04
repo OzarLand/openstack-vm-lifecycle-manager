@@ -6,15 +6,20 @@
 | Date | 2026-11-04 |
 | Deciders | Agent 2 (Chief Architect); maintainer approval required |
 
+> **Revision 2026-11-04**: restore converges from "quiesced but ACTIVE" (SRE-R-1); `first_use` always false (SRE-R-3);
+> automatic restore is a policy field with a closed trigger table and one attempt (SEC-R-30, SRE Q5); snapshot failure
+> restores (SRE-R-7); window budget enforced (SRE-R-6); EXP-01 results (lab-observed tags, no volume creation, no
+> temporary FIP confirmed). Open: maintainer decision **D-1** (below).
+
 ## Context
 
 FR-REN-2 fixes one MVP strategy. Tags below are Agent 3's (openstack-integration.md). Hard facts that shape it:
 
 | Fact | Section | Tag |
 |---|---|---|
-| A non-multiattach volume can be attached to one server only; a second attach is rejected (400) | §4 | SOURCE-VERIFIED |
+| A non-multiattach volume can be attached to one server only; a second attach is rejected (400) | §4 | SOURCE-VERIFIED; **LAB-OBSERVED** (EXP-01 Q6) |
 | Hot-detach of a mounted volume can be refused by the guest; volume rolls back to `in-use` after ~`device_detach_timeout × attempts` | §4 | SOURCE-VERIFIED |
-| A locked server rejects attach, detach, stop, start, delete for a non-admin (409) | §4, §7 | SOURCE-VERIFIED |
+| A locked server rejects attach, detach, stop, start, delete for a non-admin (409) | §4, §7 | SOURCE-VERIFIED; stop and detach refusal and own-unlock **LAB-OBSERVED** (EXP-01 Q6) |
 | A lock set by an admin cannot be removed by the project member | §7 | SOURCE-VERIFIED |
 | Attach/detach allowed in `ACTIVE` and `STOPPED` (no task in progress) | §4 | SOURCE-VERIFIED |
 | Detach needs the server's compute host up; force-detach / reset-state are admin only | §4, §9 | SOURCE-VERIFIED |
@@ -55,16 +60,19 @@ FR-REN-2 fixes one MVP strategy. Tags below are Agent 3's (openstack-integration
 | Stop blue before detach | **Always** in MVP. No hot-detach option. | Removes the guest-refusal failure mode; the guest is already quiesced. |
 | Attach to green | Hot attach to running green (needed for `data_attach` playbook). | Attach is the less risky direction. |
 | Lock blue | **Only after** external verify succeeded (`retain_old`). OVLM's project credential sets the lock (`locked_by=owner`). Unlock is the first step of revert and of retirement. A blue VM locked by an admin is a readiness **blocker**. | Locked servers reject attach/stop/start/delete for non-admin; an admin lock cannot be undone by OVLM. |
-| Blue's fstab | Quiesce stops units and unmounts but **does not remove** the fstab entry (must be by UUID/LABEL with `nofail`). | Revert = attach to stopped blue, start blue; boot remounts and restarts enabled units. |
+| Blue's fstab and units | Quiesce stops units and unmounts but **does not remove** the fstab entry (must be by UUID/LABEL with `nofail`) and **never disables** units; readiness requires `service_units` enabled. Restore step S6 ensures blue has **booted since quiesce**: if blue is still ACTIVE with the volume unmounted or units inactive, it stops and starts blue (SRE-R-1). Nova stop + start was chosen over `reboot HARD` because both are already in the write credential's operation set. | Revert = attach to stopped blue, boot blue; boot remounts and restarts enabled units. Converges without `rollback_hooks`. |
+| Data volume formatting | The strategy always passes `first_use = false`; a blank volume in a renewal is needs_human. `first_use = true` is reserved for a future initial-provisioning strategy with its own gate (SRE-R-3). | Closes the only `mkfs` path for renewals. |
 | Rollback / revert | One **convergent restore sequence** (renewal-workflow.md §4): each step probes and skips if already satisfied, target = "volume on blue, blue ACTIVE and healthy, FIP on blue's port, green stopped". Used for in-window rollback and post-cutover revert until retirement. | One code path, testable from every intermediate state. |
-| Automatic vs human rollback | Build-phase failure: run stops `failed` with green kept for diagnosis; operator rollback (typed confirmation) deletes green (security-model.md §7.1). In-window failure with unambiguous state: automatic restore (`renewal.auto_rollback_in_window`, default true). Ambiguous state (quiesce failure, `data_attach` needs_human, stuck volume, unknown FIP state): stop, `needs_human`. After cutover: revert only on operator request. | Contract §6 classes; data safety beats speed. |
+| Automatic vs human rollback | Build-phase failure (incl. `NoValidHost`): run stops `failed` with green kept for diagnosis; operator rollback (typed confirmation) deletes green (security-model.md §7.1). In-window failure: automatic restore only for the rows of the **closed table** (renewal-workflow.md §4.1), controlled by the **policy** field `auto_restore_in_window` (default true; bound through the policy version in the plan hash, copied into the plan, shown at G2). One automatic restore per run; a restore failure is `needs_human`; never re-enter the window automatically. Ambiguous state (quiesce failure, `data_attach` needs_human, stuck volume, unknown FIP state, API unreachable): stop, `needs_human`. Failures after the service started on green (W7–W10): **open maintainer decision D-1**. After cutover: revert only on operator request. | Contract §6 classes; data safety beats speed; an automatic destructive sequence must be bound to what the approver saw (SEC-R-30). |
+| Window budget | Policy field `max_window_duration`, required; enforced before W2–W8 (state known → restore); from W9 the run finishes forward. G2 shows the worst-case window (Σ step deadlines W1–W10 + S1–S10) (SRE-R-6). | A threshold that only alerts is not a stop condition. |
 | Number of data volumes | **Exactly one** data volume, or **zero** for profiles declaring `stateless_service: true` (handoff steps skipped). N volumes = V1. | Sequential multi-volume handoff multiplies partial states (2 of 3 moved) for no MVP value. |
 | Root disk | Green boots **from image** (local root disk). Blue may be boot-from-volume: its root volume is never touched by handoff; at retirement OVLM reports a leftover root volume (`delete_on_termination=false`) and does not delete it. Boot-from-volume **green** = V1. | Simplest; but see risk below (clouds with only zero-disk flavors). |
 | Network | Green gets a **new port** on blue's network/subnet (same router path); new fixed IP and MAC; FIP is the stable address. FIP required: VMs without FIP are not renewable in MVP (readiness blocker). | §6.1, §9 |
 | AZ | Green is created in the data volume's AZ. | §4 same-AZ rule |
-| Snapshot before handoff | Optional per profile (`data_volume.snapshot_before_handoff`, default false), taken while the volume is `available` between detach and attach; deleted at retirement. | Backup is the workload owner's job; adds downtime. |
+| Snapshot before handoff | Optional per profile (`data_volume.snapshot_before_handoff`, default false), taken while the volume is `available` between detach and attach; deleted at retirement. When on: B1 checks Cinder `snapshots`/`gigabytes` quota; W4 failure or deadline → automatic restore, never an open-ended outage (SRE-R-7). When off: G2 states "revert carries green's writes forward". A policy-level mandate is V1 (SRE-R-19). | Backup is the workload owner's job; adds downtime. |
 | Anti-affinity | Best effort `different_host` hint only if configured per project; plan states "same host possible". | §7 (AS on filter availability) |
-| Guest access | Worker reaches green's fixed IP **directly** (routed) or through a per-project **jump host**. No temporary FIP. | OVLM never creates FIPs in MVP (§6.1); avoids public-IP leftovers. |
+| Guest access | Worker reaches green's fixed IP **directly** (routed) or through a per-project **jump host**. No temporary FIP. | OVLM never creates FIPs in MVP (§6.1); avoids public-IP leftovers. **Confirmed by EXP-01**: the FIP pool was empty while the FIP quota was unlimited (allocation → 400), so a design that allocated FIPs would fail on quota-green clouds; direct SSH to a fixed IP worked (LAB-OBSERVED). The write-session allowlist excludes FIP create/delete (SEC-R-7). |
+| Volume creation | OVLM creates **no Cinder volume** in MVP (green boots from image; the data volume pre-exists). Any future strategy that creates one (boot-from-volume green, V1) passes an explicit `volume_type` resolved to an ID at plan time and in the plan hash, and preflight checks it exists. | EXP-01: `volume create` without a type → HTTP 500 (`__DEFAULT__` not found) on Felcloud; a working default type cannot be assumed (LAB-OBSERVED). |
 
 ### Out of MVP scope (refused by readiness, not silently handled)
 
@@ -74,7 +82,9 @@ fixed-IP or MAC preservation, Octavia/Designate cutover, hot-detach, blue locked
 ## Consequences
 
 - Downtime = quiesce + stop + detach + attach + data_attach + start + healthcheck + FIP propagation. It is **measured**,
-  not promised (renewal-workflow.md §3). The lab gives first numbers (TCG timings are not representative, ADR-0001).
+  not promised (renewal-workflow.md §3). First real-cloud observation (EXP-01, one run, 1 vCPU): ~45 s from unmount
+  to green serving, excluding the FIP move (not yet measured). This informs documentation only; it is not a default
+  and not a promise (renewal-workflow.md §10).
 - Quota must cover one extra server (cores, RAM, instances, port) during the build phase and retention.
 - Old VM stays stopped and locked (FR-REN-7), consuming instance quota (cores/RAM accounting of stopped servers is
   cloud-dependent, ASSUMPTION) until retirement.
@@ -92,3 +102,26 @@ The maintainer accepted the three points raised by Agent 2:
 2. **Pre-handoff snapshot:** off by default. This remains subject to the independent SRE review (Agent 7 holds a veto
    on unsafe lifecycle operations). If the SRE review rejects this default, the question goes back to the maintainer.
 3. **After a revert:** the new VM stays stopped until an operator discards it.
+
+## Open maintainer decision D-1 (2026-11-04): automatic restore after the service ran on green
+
+**Question.** When a failure happens at W7 `start_service_green`, W8 `healthcheck_green`, W9 `move_fip` or W10
+`verify_external` (the service has run on the data volume on green), should OVLM restore to blue automatically?
+(Raised by the security review, ruling (a) condition 7, for W7/W8; W9/W10 carry the same data exposure, so the answer
+should cover W7–W10.)
+
+| Option | Behaviour | Consequence |
+|---|---|---|
+| A. Keep default `true` | Auto restore for W7–W10 as for earlier rows; policy help text and G2 state that blue restarts on data green may have changed | Shortest outage at 3 a.m.; risk: blue's software meets data written or migrated by a half-working green, with no snapshot to go back to |
+| **B. needs_human unless snapshot (recommended)** | W7–W10 failures → `needs_human`, unless `snapshot_before_handoff` is on, in which case auto restore runs | No automatic restart of blue on possibly changed data without a copy of the pre-handoff data; cost: an outage that lasts until a human acts (paging via the alert rules becomes mandatory), and profiles that want unattended recovery must turn the snapshot on (adds snapshot time to the window and needs Cinder quota) |
+| C. Per-profile attestation | Auto restore for W7–W10 only if the profile carries an attestation "blue's software accepts data written by green's version" (V1 attestation mechanism pulled into MVP) | Puts the judgement with the workload owner; more MVP scope (attestation storage, expiry with profile changes) |
+
+**Recommendation: B.** The rows before W7 move only metadata (attachments, power state), so an automatic restore
+there cannot meet changed data. From W7 on it can, and only a snapshot makes that case recoverable. The consequence to
+accept is a longer outage for profiles without a snapshot. Whatever the answer, the switch stays a policy field bound
+into the plan hash. Until the maintainer decides, option A (the earlier design) stays in force.
+
+## Backlog (V1) from the reviews
+
+SRE-R-19 policy may mandate the snapshot; SRE-R-21 stateless profiles move the FIP before stopping blue; SRE-R-22 pause
+refused inside the window except at step boundaries with known state; SRE-R-20 notification channel.

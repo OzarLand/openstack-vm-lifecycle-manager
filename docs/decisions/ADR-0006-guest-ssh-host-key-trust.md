@@ -5,6 +5,10 @@
 | Status | Proposed (Phase 1, awaiting maintainer approval) |
 | Date | 2026-11-04 |
 | Deciders | Agent 8 (Security, owner of the control, [security-model.md](../security-model.md) §6.2); Agent 2 (Chief Architect, workflow integration); maintainer approval required |
+| Evidence | **LAB-OBSERVED** (EXP-01, Felcloud, 2026-11-04, member-equivalent credential, Ubuntu 24.04): option C works end to end. Previously ASSUMPTION. |
+
+> **Revision 2026-11-04**: evidence upgraded from ASSUMPTION to LAB-OBSERVED by EXP-01 Q1; console text storage
+> narrowed (SEC-R-19).
 
 ## Context
 
@@ -19,7 +23,7 @@ security rationale lives in security-model.md §6.2.
 |---|---|
 | A. Disable host-key checking | MITM gets the session. Forbidden. |
 | B. TOFU (`accept-new`), fingerprint recorded | MITM in the first-connect window undetected. |
-| C. Fingerprints read from the console log (`os-getConsoleOutput`, write credential) | Image must print fingerprints to the serial console; console-output policy not verified by Agent 3 (ASSUMPTION); parsing. |
+| C. Fingerprints read from the console log (`os-getConsoleOutput`, write credential) | Image must print fingerprints to the serial console; parsing. Console read by a non-admin project user and fingerprint printing by Ubuntu 24.04 are LAB-OBSERVED (EXP-01); the upstream policy default is still not source-verified by Agent 3, so other clouds may differ. |
 | D. OVLM-generated host key injected via user-data | Private host key stored in Nova and readable from inside the guest via the metadata service (§2, ASSUMPTION). |
 
 ## Decision
@@ -34,10 +38,14 @@ private key material out of Nova.
 | No fingerprint by deadline | `needs_human` "host key unverifiable". Operator may switch the profile to `tofu` (new profile version → plan re-approval, since the profile version is in the approval hash). |
 | Pinning | Per-run `known_hosts`, `StrictHostKeyChecking=yes`; fingerprint stored in step evidence and on the managed VM when green becomes current. |
 | Blue | Fingerprint recorded at registration (worker scan, operator confirms, audited). Mismatch at run time = `needs_human`. |
-| Console text | Untrusted guest output: size-capped, parsed by a strict pattern, never rendered unescaped (security-model.md §6.4). |
+| Console text | Untrusted guest output: size-capped, parsed by a strict pattern, never rendered unescaped (security-model.md §6.4). OVLM stores **only** the extracted fingerprint lines plus a SHA-256 of the console text, never the console itself (it may hold workload output; SEC-R-19). |
+| Timing | EXP-01: the `BEGIN SSH HOST KEY FINGERPRINTS` block appeared ~190 s after `server create` on a 1 vCPU guest. Informs the documentation of `timeouts.green_host_key`; the default stays TBD in the lab. The block also printed the public keys (`BEGIN SSH HOST KEY KEYS`); MVP still pins by fingerprint after keyscan. |
 
 ## Consequences
 
-- Readiness check "image prints SSH fingerprints to console" becomes `unknown` until one green build has proved it.
-- Lab must confirm: console-output role, and that the Ubuntu 24.04 cloud image prints fingerprints (test plan item).
+- Readiness check "image prints SSH fingerprints to console" becomes `unknown` until one green build with that image
+  has proved it on the target cloud (evidence stored per image ID).
+- EXP-01 confirmed the console-output read by a non-admin and Ubuntu 24.04 fingerprint printing on Felcloud: green's
+  key was pinned from the console alone and SSH then worked with `StrictHostKeyChecking=yes`. Remaining: Agent 3 to
+  source-verify the upstream `os-getConsoleOutput` policy default (SEC-R-19).
 - Building on C keeps option D available later as a third policy value if Agent 8 accepts it.

@@ -6,6 +6,13 @@
 | Status | **Designed** (Phase 1 proposal; nothing implemented) |
 | Last updated | 2026-11-04 |
 
+> **Revision 2026-11-04**: DB role split `ovlm_api` / `ovlm_worker` with grants, `run_signal`, run `requested` state
+> (SEC-R-1); requester set and hash inputs on approvals, automation diff on plans (SEC-R-2); automation artefact
+> classes and retention (SEC-R-3, SEC-R-31); secret refs bound to a service (SEC-R-27); security-group IDs and image
+> facts in `resolved`, policy fields `auto_restore_in_window` and `max_window_duration` (SEC-R-29, SEC-R-30, SRE-R-6);
+> `lease_owner` as per-process id (SRE-R-4); current-truth panel (SRE-R-9); ledger partial uniqueness (SRE-R-11);
+> port lock timing (SRE-R-16).
+
 PostgreSQL, SQLAlchemy 2 + Alembic. Conventions: `id uuid` PK (UUIDv7, time-ordered); `created_at`, `updated_at`
 `timestamptz`; `version int` for optimistic concurrency where an API exposes ETags; enumerations as `text` + `CHECK`;
 JSON documents as `jsonb` validated by pydantic schemas in the owning module. Every table belongs to exactly one module
@@ -29,7 +36,7 @@ not stored as a separate truth. The UI shows both columns side by side (FR-REG-4
 |---|---|---|
 | `cloud` | `name`, `auth_url`, `region`, `ca_bundle_ref`, `interface` | `UNIQUE(name)`; TLS verify always on |
 | `project_connection` | `cloud_id`, `openstack_project_id`, `name`, `read_credential_id`, `write_credential_id` (nullable), `guest_access` jsonb (`mode: direct|jump_host`, jump host address + pinned key), `enabled` | `UNIQUE(cloud_id, openstack_project_id)`. Write credential nullable: inventory/assessment work without it (FR-INV-2). |
-| `credential_ref` | `kind` (`os_read`, `os_write`, `ssh_key`, `vault_password`, `secret`), `secret_id` → sealed secret (security-model.md §5), `app_credential_id`, `expires_at`, `last_validated_at`, `validation_result` jsonb, `rotated_at` | Secret value never in this table; `UNIQUE` per (project_connection, kind) for `os_*` |
+| `credential_ref` | `kind` (`os_read`, `os_write`, `ssh_key`, `vault_password`, `secret`), `service_id` (nullable), `secret_id` → sealed secret (security-model.md §5), `app_credential_id`, `expires_at`, `last_validated_at`, `validation_result` jsonb, `rotated_at` | Secret value never in this table; `UNIQUE` per (project_connection, kind) for `os_*`; `CHECK(service_id IS NOT NULL OR kind IN ('os_read','os_write','ssh_key'))`: vault passwords and secrets belong to one service (SEC-R-27); the per-project SSH key is deliberately shared across services |
 
 ## 3. Inventory (observed state)
 
@@ -72,13 +79,15 @@ transaction at `verify_external` success).
 | Table | Key columns | Constraints / notes |
 |---|---|---|
 | `profile` | `service_id`, `name`, `latest_version`, `version` (ETag) | one active profile per service in MVP |
-| `profile_version` | `profile_id`, `number`, `spec` jsonb, `spec_hash`, `created_by`, `created_at`, `automation_sha` | `UNIQUE(profile_id, number)`; immutable (no UPDATE grant) |
+| `profile_version` | `profile_id`, `number`, `spec` jsonb, `spec_hash`, `created_by`, `created_at`, `automation_sha`, `lint_result` jsonb (worker job, SEC-R-3) | `UNIQUE(profile_id, number)`; immutable except `lint_result` (worker-only column grant); `created_by` is in the requester set of every gate of a plan built on it (SEC-R-2) |
 
 `spec` (pydantic-validated): `flavor` (name), `image` (`{name}` or `{properties}`; resolved at plan time and recorded in
-the plan), `network` (`network_id`, `subnet_id`), `security_groups`, `availability_zone` (`from_volume`),
-`data_volume` (`volume_id`, `fs_type`, `fs_uuid` or `label`, `mount_point`, `snapshot_before_handoff`) or
-`stateless_service: true`, `automation` (automation-contract.md §1: repo, full SHA, playbook_dir, requirements,
-inventory_vars, `secret_refs` → `credential_ref`), `guest_access` (`ssh_user`, `host_key_policy: console|tofu`),
+the plan: the match must be **unique** among `active` images visible to the project, ambiguity is a plan error, never
+"newest wins", SEC-R-29), `network` (`network_id`, `subnet_id`), `security_groups` (resolved to IDs at plan time),
+`availability_zone` (`from_volume`), `data_volume` (`volume_id`, `fs_type`, `fs_uuid` or `label`, `mount_point`,
+`snapshot_before_handoff`) or `stateless_service: true`, `automation` (automation-contract.md §1: repo, full SHA,
+playbook_dir, requirements, inventory_vars, `secret_refs` → `credential_ref` **of the same service only**, SEC-R-27;
+`store_diffs` bool default false, SEC-R-3; `lint_waiver` (approval id, audited) if the blocking lint fails), `guest_access` (`ssh_user`, `host_key_policy: console|tofu`),
 `health_check` (`external: {scheme, port, path, expected_status}`, `accept_degraded`), `cutover` (`floating_ip_id`;
 method fixed to `floating_ip` in MVP), `strategy` (`bluegreen_fip_v1`).
 
@@ -86,7 +95,7 @@ method fixed to `floating_ip` in MVP), `strategy` (`bluegreen_fip_v1`).
 
 | Table | Key columns | Constraints / notes |
 |---|---|---|
-| `policy` | `name`, `max_age`, `renewal_interval`, `windows` jsonb (weekday + time ranges + IANA tz), `approvals` jsonb (`plan`, `cutover` bool; retirement always required), `require_distinct_approvers`, `retention_period`, `version` | ETag; no global default (FR-POL-4) |
+| `policy` | `name`, `max_age`, `renewal_interval`, `windows` jsonb (weekday + time ranges + IANA tz), `approvals` jsonb (`plan`, `cutover` bool; retirement always required), `require_distinct_approvers`, `allow_operator_approver` (default false, SEC-R-2), `auto_restore_in_window` (default true, SEC-R-30), `max_window_duration` (**required**, SRE-R-6), `retention_period`, `version`, `last_edited_by` | ETag; no global default (FR-POL-4); `version` and its fields are bound into the plan hash; `last_edited_by` is in the requester set |
 | `policy_binding` | `policy_id`, `scope_type` (`service_group`, `service`), `scope_id` | `UNIQUE(scope_type, scope_id)`; most specific wins (FR-POL-2) |
 | `policy_exception` (V1) | `service_id`, `reason`, `owner`, `starts_at`, `expires_at`, `approved_by` | `CHECK(expires_at > starts_at)`; ignored after expiry |
 
@@ -100,17 +109,18 @@ scheduler: `managed_vm_id`, `policy_id`, `deadline`, `next_window_start`, `compu
 | `readiness_assessment` | `managed_vm_id`, `profile_version_id`, `observed_server_revision_id`, `input_snapshot` jsonb (revision ids used), `level` (`not-ready`, `partially-ready`, `ready`), `summary` jsonb, `requested_by`, `workflow_run_id` | Append-only (FR-RDY-4) |
 | `check_result` | `assessment_id`, `check_key`, `check_version`, `category`, `result` (`pass`, `fail`, `unknown`, `not-applicable`), `severity` (`blocker`, `warning`, `info`), `evidence` jsonb, `recommendation` | `UNIQUE(assessment_id, check_key)` |
 | `attestation` (V1) | `managed_vm_id`, `check_key`, `statement`, `attested_by`, `attested_at`, `expires_at`, `profile_version_id` | expires with profile change |
-| `renewal_plan` | `managed_vm_id`, `profile_version_id`, `assessment_id`, `policy_id`, `policy_version`, `resolved` jsonb (image id, flavor id, network/subnet, AZ, FIP id, volume id, blue server id), `plan_hash`, `planned_window_start`, `capacity_check` jsonb (advisory), `state` (`draft`, `awaiting_approval`, `approved`, `started`, `cancelled`, `expired`), `created_by` | `plan_hash` = SHA-256 over canonical JSON of (resolved, profile_version spec_hash, automation SHA, target IDs, policy version) — security-model.md §7.1 |
-| `approval` | `subject_type` (`plan`, `cutover`, `retirement`, `manual_recovery`), `subject_id`, `bound_hash`, `requested_by`, `decided_by`, `decision` (`approved`, `rejected`), `typed_confirmation` (name + last 6 ID chars, as typed), `auth_method`, `reauth_at`, `decided_at`, `expires_at`, `void_reason` | `CHECK(decided_by <> requested_by)`; partial unique: one open request per subject; valid only while `bound_hash` matches and `now() < expires_at` |
+| `renewal_plan` | `managed_vm_id`, `profile_version_id`, `assessment_id`, `policy_id`, `policy_version`, `resolved` jsonb (image id + `owner`, `visibility` and hash fields (names AS), flavor id, network/subnet, **security-group ids**, AZ, FIP id, volume id, blue server id, `auto_restore_in_window`, `max_window_duration`, worst-case window), `automation_diff` jsonb (worker job: previous approved SHA for the service or "first approval of this repo", changed files, capped diff; SEC-R-2), `plan_hash`, `planned_window_start`, `capacity_check` jsonb (advisory), `state` (`draft`, `awaiting_approval`, `approved`, `started`, `cancelled`, `expired`), `created_by` | `plan_hash` = SHA-256 over canonical JSON of (resolved, profile_version spec_hash, automation SHA, target IDs, policy version) — security-model.md §7.1 |
+| `approval` | `subject_type` (`plan`, `cutover`, `retirement`, `manual_recovery`), `subject_id`, `bound_hash`, `hash_inputs` jsonb (every input shown to the approver), `requester_set` uuid[] (snapshot for display), `requested_by`, `decided_by`, `decision` (`approved`, `rejected`), `typed_confirmation` (name + last 6 ID chars, as typed), `auth_method`, `reauth_at`, `stepup_id`, `sod_allowance` (if operator+approver allowed), `decided_at`, `expires_at`, `void_reason` | `CHECK(decided_by <> requested_by)` and `CHECK(NOT decided_by = ANY(requester_set))`; partial unique: one open request per subject; valid only while `bound_hash` matches and `now() < expires_at`. The worker recomputes the requester set and re-validates the evidence; it never trusts these columns alone (renewal-workflow.md §3.1) |
 
 ## 8. Workflow engine (ADR-0003)
 
 | Table | Key columns | Constraints / notes |
 |---|---|---|
-| `workflow_run` | `kind` (`renewal`, `inventory_sync`, `readiness`, `credential_test`, `rewrap`), `strategy`, `strategy_version`, `state`, `renewal_plan_id`, `service_id`, `subject` jsonb, `abort_requested`, `abort_requested_by`, `phase` (`build`, `window`, `retained`, `restore`, `retire`), `downtime_started_at`, `downtime_ended_at`, `started_by`, `started_at`, `finished_at`, `version` | Partial unique: one non-terminal `renewal` run per service (`UNIQUE(service_id) WHERE kind='renewal' AND state NOT IN terminal`) |
-| `workflow_step` | `run_id`, `seq`, `step_key`, `state` (`ready`, `running`, `waiting`, `succeeded`, `failed`, `needs_human`, `skipped`, `cancelled`), `attempt int`, `fencing_token bigint`, `lease_owner`, `lease_expires_at`, `heartbeat_at`, `not_before`, `deadline_at`, `intent` jsonb, `evidence` jsonb, `error_class` (`retryable`, `needs_human`, `fatal`), `error` jsonb, `destructive bool` | `UNIQUE(run_id, seq)`; partial unique `UNIQUE(run_id) WHERE state='running'`; index `(state, not_before)`; index `(state, lease_expires_at)` |
+| `workflow_run` | `kind` (`renewal`, `inventory_sync`, `readiness`, `credential_test`, `rewrap`, `automation_lint`, `automation_diff`, `probe`), `strategy`, `strategy_version`, `state` (`requested`, `rejected`, `running`, `needs_human`, `failed`, `completed`, `rolled_back`, …), `renewal_plan_id`, `service_id`, `subject` jsonb, `abort_requested`, `abort_requested_by`, `phase` (`build`, `window`, `retained`, `restore`, `retire`), `auto_restore_used bool`, `downtime_started_at` (written in the W1 claim transaction), `downtime_ended_at`, `current_truth` jsonb + `current_truth_at` (SRE-R-9), `started_by`, `started_at`, `finished_at`, `version` | Partial unique: one non-terminal `renewal` run per service (`UNIQUE(service_id) WHERE kind='renewal' AND state NOT IN terminal`); api may INSERT only with `state='requested'` (trigger) |
+| `run_signal` | `run_id`, `kind` (`admit`, `abort`, `rollback`, `revert`, `retry_step`, `mark_resolved`, `probe`, `discard`), `actor_id`, `approval_id`, `payload` jsonb (TC as typed, step-up id, attestation), `created_at`, `consumed_at`, `outcome` | Written by api (INSERT), consumed by worker (UPDATE `consumed_at`, `outcome`); the worker re-validates actor role, step-up and TC before acting |
+| `workflow_step` | `run_id`, `seq`, `step_key`, `state` (`ready`, `running`, `waiting`, `succeeded`, `failed`, `needs_human`, `skipped`, `cancelled`), `attempt int`, `fencing_token bigint`, `lease_owner` (worker instance UUID, new per process start), `lease_expires_at`, `heartbeat_at`, `not_before`, `deadline_at`, `intent` jsonb, `evidence` jsonb, `error_class` (`retryable`, `needs_human`, `fatal`), `error` jsonb, `destructive bool` | `UNIQUE(run_id, seq)`; partial unique `UNIQUE(run_id) WHERE state='running'`; index `(state, not_before)`; index `(state, lease_expires_at)` |
 | `workflow_step_attempt` | `step_id`, `attempt`, `fencing_token`, `worker_id`, `started_at`, `ended_at`, `outcome`, `evidence` jsonb | Append-only history of attempts (FR-AUD-2 "every step attempt") |
-| `automation_run` | `step_id`, `attempt`, `phase`, `target_role` (`old`, `new`), `repo`, `sha`, `requirements_hash`, `ansible_core_version`, `extravars_sha256`, `extravars_keys`, `exit_code`, `classification`, `result` jsonb (validated `ovlm.result/1`), `log` (redacted, capped) | automation-contract.md §1, §3.7, §7 |
+| `automation_run` | `step_id`, `attempt`, `phase`, `target_role` (`old`, `new`), `repo`, `sha`, `requirements_hash`, `ansible_core_version`, `extravars_sha256`, `extravars_keys`, `exit_code`, `classification`, `result` jsonb (validated `ovlm.result/1`), `task_summary` jsonb (per task: name, changed/ok/failed), **restricted**: `log` (redacted, capped), `events` jsonb, `diff` (only if the profile set `store_diffs`), `artifact_expires_at` | automation-contract.md §1, §3.7, §7. **Restricted columns may contain workload secrets** (SEC-R-3): readable through the API only by `operator`/`admin` in scope; purged after `automation.artifact_retention` (separate from audit retention); excluded from every export |
 | `worker_heartbeat` | `worker_id`, `hostname`, `started_at`, `last_seen_at`, `version`, `draining` | readiness probe |
 | sequence `fencing_seq` | global monotonic | — |
 
@@ -118,14 +128,37 @@ scheduler: `managed_vm_id`, `policy_id`, `deadline`, `next_window_start`, `compu
 
 | Table | Key columns | Constraints / notes |
 |---|---|---|
-| `owned_resource` | `run_id`, `resource_type` (`server`, `snapshot`), `role` (`green`, `snapshot`), `intended_name`, `openstack_id` (nullable until known), `state` (`intended`, `present`, `deleted`, `orphan`) | `UNIQUE(resource_type, openstack_id)`; `UNIQUE(run_id, role)` in MVP |
-| `resource_lock` | `resource_type` (`service`, `server`, `volume`, `floating_ip`, `port`), `resource_key`, `holder_run_id`, `acquired_at`, `reason` | **PK (resource_type, resource_key)**; FK to run; released when the run becomes terminal |
+| `owned_resource` | `run_id`, `resource_type` (`server`, `snapshot`), `role` (`green`, `snapshot`), `intended_name`, `openstack_id` (nullable until known), `state` (`intended`, `present`, `deleted`, `orphan`), `intent_committed_at` | `UNIQUE(resource_type, openstack_id)`; partial unique `UNIQUE(run_id, role) WHERE state IN ('intended','present')`; `deleted` rows kept as history (SRE-R-11) |
+| `resource_lock` | `resource_type` (`service`, `server`, `volume`, `floating_ip`, `port`), `resource_key`, `holder_run_id`, `acquired_at`, `reason` | **PK (resource_type, resource_key)**; FK to run; acquired by the worker at run admission; green's server and port in the B4 success transaction (SRE-R-16); released when the run becomes terminal |
 
 ## 10. Audit
 
 | Table | Key columns | Constraints / notes |
 |---|---|---|
-| `audit_event` | `id bigserial`, `ts`, `actor_id`, `principal_type`, `auth_method`, `source_ip`, `project_scope`, `action`, `target_type`, `target_id`, `before` jsonb, `after` jsonb (allowlisted fields, secrets excluded), `result`, `run_id`, `step_id`, `request_id` | Append-only: `ovlm_app` has INSERT/SELECT only + trigger rejecting UPDATE/DELETE (security-model.md §8). Written in the same transaction as the change it records. |
+| `audit_event` | `id bigserial`, `ts` (DB transaction clock), `actor_id`, `principal_type`, `auth_method`, `source_ip`, `project_scope`, `action`, `target_type`, `target_id`, `before` jsonb, `after` jsonb (allowlisted fields, secrets excluded), `result`, `run_id`, `step_id`, `request_id`, `authority_ref` (e.g. G2 approval id for `restore.auto`) | Append-only: `ovlm_api` and `ovlm_worker` have INSERT/SELECT only + trigger rejecting UPDATE/DELETE (security-model.md §8). Written in the same transaction as the change it records. **Mirrored**: after commit, `audit.record()` emits the full row (with its id) as a JSON log line `event=audit` to the log stream, so a DB-side rewrite is detectable against the log collector before the V1 hash chain (SEC-R-1, SEC-R-21) |
+
+## 12. Database roles and grants (SEC-R-1)
+
+The runtime role `ovlm_app` is replaced by two roles. `ovlm_owner` (one-shot `migrate` only; its secret is never
+mounted into api or worker containers, SEC-R-18) owns all tables; `ovlm_audit_admin` purges audit (offline).
+
+| Table group | `ovlm_api` | `ovlm_worker` |
+|---|---|---|
+| users, sessions, api tokens, step-up records, role bindings + history (security-model.md) | read/write | SELECT on users, step-up records, role bindings + history (to re-validate approvals); nothing on sessions/tokens |
+| sealed secret values | INSERT (seal) only; **no SELECT** on ciphertext columns | SELECT; UPDATE (re-wrap) |
+| `credential_ref` metadata, `cloud`, `project_connection` | read/write | SELECT; UPDATE on validation columns |
+| `service`, `managed_vm`, `profile*`, `policy*` | read/write (no UPDATE of `managed_vm.role`, `profile_version.lint_result`) | SELECT; UPDATE `managed_vm.role`, `ssh_host_key_fingerprint`, `profile_version.lint_result` |
+| `renewal_plan`, `approval` | read/write (no UPDATE of `renewal_plan.automation_diff`) | SELECT; UPDATE `renewal_plan.automation_diff`, `renewal_plan.state` (`started`) |
+| `workflow_run` | INSERT (`state='requested'` only), SELECT | read/write |
+| `run_signal` | INSERT, SELECT | SELECT, UPDATE (`consumed_at`, `outcome`) |
+| `workflow_step*`, `automation_run`, `owned_resource`, `resource_lock`, `worker_heartbeat` | SELECT | read/write |
+| `observed_*`, `sync_run`, `readiness_assessment`, `check_result` | SELECT (readiness rows: INSERT of the request) | read/write |
+| `audit_event` | INSERT, SELECT | INSERT, SELECT |
+
+Effect: a compromised api cannot change run or step state, cannot read secret ciphertext, and its forged approvals
+must pass the worker's evidence re-validation (renewal-workflow.md §3.1); a compromised worker cannot create
+approvals, users or sessions. Residual: renewal-workflow.md §3.1.
+
 
 ## 11. ER diagram (main entities)
 
