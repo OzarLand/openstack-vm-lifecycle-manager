@@ -12,6 +12,8 @@ Principle: the VM is replaceable; the service and its data outlive it. OVLM must
 > **Revision 2026-11-04 (round 2)**: synced to architecture round 2. Section 9: lint is static analysis only, `check_mode`/`delegate_to` rules
 > (SEC-R-35); section 2: `--syntax-check`/`--list-hosts` move to step B6; section 3.6/3.7: healthcheck result authoritative in `result.json`,
 > optional input `ovlm.expected_fs_uuid` (reference workload).
+>
+> **Revision 2026-11-04 (image/docs alignment)**: section 3.6.1 defines the external-probe identity contract.
 
 ## 1. Profile reference to automation
 
@@ -125,6 +127,22 @@ Read-only, may run any number of times and in check mode. Contract:
 - Exit code: 0 healthy, 2 unhealthy (retryable: wait and repeat), 3 degraded-but-serving (treated as unhealthy unless profile sets `accept_degraded`), 1/other = automation error. **Clarification (reference workload): the result is authoritative in `result.json`** (`classification` and `facts.health_state`), not the exit code, because Ansible's own exit codes cannot express 2/3/1 (a playbook run ends 0 or non-zero; there is no "degraded" state). The exit code is used only when `result.json` is missing or malformed (section 3.7).
 - Produces `artifacts/result.json` (3.7) with `checks[]`: each `{name, ok, detail, observed, expected}`. Required checks: service responds (profile-defined URL/port), data mount present and by expected fs UUID, marker checksum equals `ovlm.expected_marker_checksum` (passed by OVLM from the `quiesce` output of the old VM). Optional input `ovlm.expected_fs_uuid` (the filesystem UUID recorded for the data volume): when present, the data-mount check compares the mounted filesystem UUID against it.
 - Timeout per call 60 s default; OVLM does the repetition/backoff, not the playbook.
+
+### 3.6.1 External-probe identity contract (B8, W10, S9)
+The health endpoint behind `health_check.external` must prove **which server answered**; "something answered" is not
+enough, because after the FIP move a stale or still-attached VM could answer too. OVLM reads the identity in this
+order and uses the first one present:
+1. HTTP response header `X-OVLM-Server-Id`;
+2. else JSON field `server_id` in the body;
+3. else JSON field `hostname` in the body.
+
+The value must equal what OVLM expects for that probe: the Nova server id of the VM that must be serving (blue at B8
+and S9, green at W10). A response without any of the three, with a different value, or a plain TCP/HTTP-status-only
+check **cannot pass B8, W10 or S9**. The value is data from the guest: compared for equality, length-capped, never
+interpreted. The reference workload serves the header on every response and `server_id` in `/health`, taken from the
+cloud-init instance-id (equal to the Nova server id on OpenStack); it never falls back to the hostname and sends
+nothing when the id is unknown (`ansible/tests/test_identity.py`). `hostname` (3) exists for workloads that cannot
+read the instance-id; it is only as strong as the hostname is unique per VM, so profiles should prefer 1 or 2.
 
 ### 3.7 Result JSON (all phases)
 Written by the playbook to `{{ ovlm_result_path }}` (OVLM passes the path; ASSUMPTION) via `ansible.builtin.copy` of a dict, or via `set_stats` (DOCUMENTED-UNVERIFIED which of these ansible-runner exposes; OVLM must support the file route).
