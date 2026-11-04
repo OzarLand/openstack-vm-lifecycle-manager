@@ -40,7 +40,7 @@ from ovlm.renewal import closed_table, metrics
 from ovlm.renewal.base import Deps, RStep, read_truth
 from ovlm.renewal.config import RESTORE_STEPS, WINDOW_STEPS
 from ovlm.renewal.ledger import DbOwnershipRegistry, green_row, plan_resolved, snapshot_row
-from ovlm.renewal.plans import KIND, STRATEGY, STRATEGY_VERSION, load_facts, tc_of
+from ovlm.renewal.plans import KIND, STRATEGY, STRATEGY_VERSION, load_facts, tc_target
 from ovlm.renewal.steps_after import (
     AttachToOld,
     AwaitDiscard,
@@ -104,20 +104,6 @@ from ovlm.workflow.contract import (
 
 log = logging.getLogger("ovlm.renewal")
 
-audit.register_entity(
-    "renewal_run",
-    [
-        "trigger",
-        "step_key",
-        "error_class",
-        "reason",
-        "outcome",
-        "approval_id",
-        "snapshot_id",
-        "truth",
-        "rule",
-    ],
-)
 
 BUILD = (
     "preflight",
@@ -462,7 +448,7 @@ class BlueGreenFipV1(WorkflowDefinition):
             )
             if nxt is not None and getattr(self._steps[nxt], "destructive", False) and not approver:
                 return "the next step is destructive: mark-resolved needs the approver role"
-        target = _tc_target(c, run, sig.kind, phase, resolved)
+        target = tc_target(c, run.id, sig.kind, phase, resolved)
         return _check_confirmation(c, sig, run.id, target)
 
     def prepare_signal(self, run: RunView, signal: SignalView) -> Any:
@@ -670,21 +656,6 @@ def _abort_actor(c: Connection, run_id: str) -> str | None:
         text("SELECT abort_requested_by FROM workflow_run WHERE id = :r"), {"r": run_id}
     ).scalar()
     return str(value) if value else None
-
-
-def _tc_target(
-    c: Connection, run: RunView, kind: str, phase: str, resolved: Mapping[str, Any]
-) -> str:
-    """TC of the affected VM: green in the build phase (when it exists) and for discard; blue otherwise."""
-    g = green_row(c, run.id)
-    green_tc = (
-        tc_of(g["intended_name"], g["openstack_id"])
-        if g is not None and g["openstack_id"]
-        else None
-    )
-    if kind == "discard" or (kind in ("rollback", "abort") and phase == "build" and green_tc):
-        return green_tc or ""
-    return tc_of(resolved["blue"]["name"], resolved["blue"]["server_id"])
 
 
 def _check_confirmation(

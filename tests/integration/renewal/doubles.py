@@ -36,6 +36,9 @@ class RenewalFake(FakeOpenStack):
 
     green_ip = "10.0.0.9"
 
+    def snapshot(self) -> Any:  # typed loosely for the tests' invariant checks
+        return super().snapshot()
+
     def create_server(self, spec: CreateServerSpec) -> ServerInfo:
         info = super().create_server(spec)
         self.add_port(
@@ -73,7 +76,7 @@ class FakeGuest:
 
     def sync(self) -> None:
         snap = self.cloud.snapshot()
-        for sid, s in snap["servers"].items():  # type: ignore[union-attr]
+        for sid, s in snap["servers"].items():
             st = self.g(sid)
             if s["status"] == "SHUTOFF":
                 st.mounted = st.units = False
@@ -89,7 +92,7 @@ class FakeGuest:
 
     def _active(self, sid: str) -> bool:
         snap = self.cloud.snapshot()
-        return snap["servers"].get(sid, {}).get("status") == "ACTIVE"  # type: ignore[union-attr]
+        return bool(snap["servers"].get(sid, {}).get("status") == "ACTIVE")
 
     # -- GuestPort --------------------------------------------------------------------------------------
 
@@ -129,7 +132,7 @@ class FakeGuest:
         if phase == "data_attach":
             assert data_volume is not None and data_volume["first_use"] is False
             vol = self.cloud.snapshot()["volumes"][data_volume["id"]]
-            if vol["attached_to"] != [target.server_id] or vol["status"] != "in-use":  # type: ignore[index]
+            if vol["attached_to"] != [target.server_id] or vol["status"] != "in-use":
                 return PhaseResult("needs_human", "device not found")
             st.mounted = True
             return PhaseResult(
@@ -177,7 +180,7 @@ class FakeGuest:
         self.sync()
         if self.external_down:
             return ExternalResult(False, None, "injected")
-        port_id = next(iter(p for f, p in self.cloud.snapshot()["floating_ips"].items()))  # type: ignore[call-overload]
+        port_id = next(iter(p for f, p in self.cloud.snapshot()["floating_ips"].items()))
         if port_id is None:
             return ExternalResult(False, None, "no port")
         server = self.cloud.get_port(port_id).device_id

@@ -22,9 +22,21 @@ from uuid import UUID
 
 from sqlalchemy import Connection, RowMapping, text
 
+from ovlm import audit  # noqa: E402
 from ovlm.auth.sod import RequesterSet
 from ovlm.registry.errors import DomainError
 from ovlm.renewal.config import RenewalConfig
+
+audit.register_entity(
+    "renewal_run",
+    ["trigger", "step_key", "error_class", "reason", "outcome", "approval_id", "snapshot_id", "truth", "rule",
+     "kind", "signal_id", "plan_id", "run_id"],
+)  # fmt: skip
+audit.register_entity("renewal_plan", ["managed_vm_id", "state", "policy_version", "run_id"])
+audit.register_entity(
+    "approval",
+    ["subject_type", "subject_id", "decision", "self_approved", "operator_confirmed", "expires_at"],
+)
 
 STRATEGY = "bluegreen_fip_v1"
 STRATEGY_VERSION = "1"
@@ -187,7 +199,7 @@ def _observed(conn: Connection, table: str, pc: Any, openstack_id: str) -> RowMa
 
 
 def resolve_plan(
-    conn: Connection, managed_vm_id: UUID, cfg: RenewalConfig, *, policy_row: Mapping[str, Any]
+    conn: Connection, managed_vm_id: UUID, cfg: RenewalConfig, *, policy_row: Mapping[Any, Any]
 ) -> dict[str, Any]:
     """Resolve the profile against the latest inventory (no OpenStack call in the api; the run re-validates live).
 
@@ -440,3 +452,29 @@ def blast_radius(resolved: Mapping[str, Any], gate: str) -> dict[str, Any]:
 def now_db(conn: Connection) -> datetime:
     value: datetime = conn.execute(text("SELECT now()")).scalar_one()
     return value
+
+
+def tc_target(
+    conn: Connection, run_id: str, kind: str, phase: str, resolved: Mapping[str, Any]
+) -> str:
+    """TC of the VM a run action affects: green in the build phase (once it exists) and for discard; blue
+    otherwise (api-design.md 4). Shared by the api (checked on request) and the worker (re-validated)."""
+    g = (
+        conn.execute(
+            text(
+                "SELECT intended_name, openstack_id FROM owned_resource WHERE run_id = :r AND role = 'green' "
+                "ORDER BY created_at DESC LIMIT 1"
+            ),
+            {"r": run_id},
+        )
+        .mappings()
+        .first()
+    )
+    green_tc = (
+        tc_of(g["intended_name"], g["openstack_id"])
+        if g is not None and g["openstack_id"]
+        else None
+    )
+    if kind == "discard" or (kind in ("rollback", "abort") and phase == "build" and green_tc):
+        return green_tc or ""
+    return tc_of(resolved["blue"]["name"], resolved["blue"]["server_id"])

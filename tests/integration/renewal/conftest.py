@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import URL
 
+from ovlm.inventory.tables import OBSERVED
 from ovlm.openstack.allowlist import TAG_MANAGED
 from ovlm.profiles.spec import spec_hash, validate_spec
 from ovlm.renewal.base import Deps
@@ -100,7 +101,7 @@ class World:
     def keys(self) -> list[str]:
         return [s["step_key"] for s in self.steps()]
 
-    def open_step(self) -> Any | None:
+    def open_step(self) -> Any:
         rows = self.q(
             "SELECT * FROM workflow_step WHERE run_id = :r AND state IN ('ready','running','waiting','needs_human')",
             r=self.run_id,
@@ -249,10 +250,11 @@ class World:
 
     def attached(self) -> list[str]:
         vol = self.cloud.snapshot()["volumes"][self.ids["volume"]]
-        return list(vol["attached_to"])  # type: ignore[index]
+        return list(vol["attached_to"])
 
     def fip_port(self) -> str | None:
-        return self.cloud.snapshot()["floating_ips"][self.ids["fip"]]  # type: ignore[return-value]
+        port: str | None = self.cloud.snapshot()["floating_ips"][self.ids["fip"]]
+        return port
 
 
 def _seed(
@@ -319,14 +321,12 @@ def _seed(
 
         def observed(table: str, oid: str, name: str | None, **cols: Any) -> str:
             rid = new_id()
-            names = ", ".join(cols)
-            vals = ", ".join(f":{k}" for k in cols)
             c.execute(
-                text(f"INSERT INTO observed_{table} (id, project_connection_id, openstack_id, name, payload, "
-                     f"payload_hash, first_seen_sync_id, last_seen_sync_id, status, synced_at"
-                     f"{', ' + names if names else ''}) VALUES (:id, :pc, :oid, :name, '{{}}'::jsonb, :h, :s, :s, "
-                     f"'present', now(){', ' + vals if vals else ''})"),
-                {"id": rid, "pc": pc, "oid": oid, "name": name, "h": "0" * 64, "s": sync, **cols},
+                OBSERVED[table].insert().values(
+                    id=rid, project_connection_id=pc, openstack_id=oid, name=name, payload={}, payload_hash="0" * 64,
+                    first_seen_sync_id=sync, last_seen_sync_id=sync, status="present",
+                    synced_at=datetime.now(UTC), **cols,
+                )
             )  # fmt: skip
             return rid
 
@@ -431,7 +431,7 @@ def world(world_factory: Any) -> World:
 def to_cutover(w: World) -> None:
     """Start and drive the build phase to G2, grant G2."""
     w.start()
-    r = w.drive(until="await_cutover")
+    w.drive(until="await_cutover")
     st = w.open_step()
     assert st is not None and st["step_key"] == "await_cutover", explain(w)
     w.approve("cutover")

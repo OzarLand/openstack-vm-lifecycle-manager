@@ -3,6 +3,7 @@ fake cloud (strict gate) and the fake guest. Each test names the row it covers."
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from ovlm.openstack.errors import ServerError
@@ -237,10 +238,10 @@ def test_w1_claim_refused_when_b9_is_stale_no_outage(world: World) -> None:
     w = world
     w.make_engine(RenewalConfig(**{**CFG.__dict__, "green_ready_max_age": 1e-9}))
     to_cutover(w)
-    try:
-        w.drive(max_passes=40)
-    except AssertionError:
-        pass  # it loops B9 -> W1 (refused) -> B9 ... by design: never claims W1 with a stale B9
+    with contextlib.suppress(AssertionError):
+        w.drive(
+            max_passes=40
+        )  # it loops B9 -> W1 (refused) -> B9 ... by design: never claims W1 with a stale B9
     keys = w.keys()
     assert keys.count("verify_green_ready") >= 2 and "stop_old" not in keys
     assert w.run()["downtime_started_at"] is None
@@ -443,9 +444,9 @@ def test_w10_external_verify_exhausted_with_snapshot_restores_fip(world_factory:
     to_cutover(w)
     w.drive(until="verify_external")
     w.guest.external_down = True
-    w.engine.run_once()  # type: ignore[union-attr]
+    w.engine.run_once()
     expire_deadline(w)
-    w.engine.run_once()  # type: ignore[union-attr]
+    w.engine.run_once()
     w.guest.external_down = False
     w.drive()
     restored(w)
