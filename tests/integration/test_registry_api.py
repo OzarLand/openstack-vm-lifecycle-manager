@@ -1,3 +1,4 @@
+# ruff: noqa: F811
 """Inventory and registration endpoints against a real PostgreSQL, connected as the ``ovlm_api`` role
 (so the grants of data-model.md section 12 are exercised), data written by the real sync job with the fake."""
 
@@ -10,44 +11,67 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from alembic import command
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, text
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import IntegrityError, ProgrammingError
 
-from ovlm.api.app import create_app
-from ovlm.api.health import CheckResult
-from ovlm.api.routes_inventory import Actor, current_actor
-from ovlm.config import Settings
-from ovlm.db.engine import make_engine, make_session_factory
-from ovlm.db.schema import alembic_config
+from ovlm.db.engine import make_engine
 from ovlm.inventory.sync import SyncConfig, run_inventory_sync
 from ovlm.openstack.fake import FakeOpenStack
+from tests.integration.auth_support import ORIGIN
+from tests.integration.auth_support import Env as AuthEnv
+from tests.integration.auth_support import env as auth_env  # noqa: F401
 from tests.integration.conftest import settings_for
 
-OPERATOR = Actor(uuid4(), frozenset({"operator"}))
-VIEWER = Actor(uuid4(), frozenset({"viewer"}))
-ADMIN = Actor(uuid4(), frozenset({"admin"}))
 
+class Session:
+    """A real logged-in client (cookie session). Unsafe requests carry the Origin and CSRF token, as a browser does."""
 
-class _Probe:
-    def check(self) -> list[CheckResult]:
-        return [CheckResult("database", True, "")]
+    def __init__(self, client: TestClient, user_id: UUID) -> None:
+        self.client, self.user_id = client, user_id
+
+    def request(self, method: str, url: str, **kw: Any) -> Any:
+        headers = dict(kw.pop("headers", None) or {})
+        if method not in ("GET", "HEAD"):
+            csrf = self.client.get("/api/v1/session").json()["csrf_token"]
+            headers = {"Origin": ORIGIN, "X-CSRF-Token": csrf, **headers}
+        return self.client.request(method, url, headers=headers, **kw)
+
+    def get(self, url: str, **kw: Any) -> Any:
+        return self.request("GET", url, **kw)
+
+    def post(self, url: str, **kw: Any) -> Any:
+        return self.request("POST", url, **kw)
+
+    def patch(self, url: str, **kw: Any) -> Any:
+        return self.request("PATCH", url, **kw)
+
+    def delete(self, url: str, **kw: Any) -> Any:
+        return self.request("DELETE", url, **kw)
 
 
 @dataclass
 class Env:
-    client: TestClient
+    auth: AuthEnv
+    users: dict[str, Session]
+    current: list[str]
     worker: Engine
     api: Engine
     project: UUID
     fake: FakeOpenStack
     ids: dict[str, str]
-    actor: list[Actor]
 
-    def as_(self, actor: Actor) -> None:
-        self.actor[0] = actor
+    @property
+    def client(self) -> Session:
+        return self.users[self.current[0]]
+
+    def as_(self, who: str) -> None:
+        self.current[0] = who
+
+    @property
+    def operator_id(self) -> UUID:
+        return self.users["operator"].user_id
 
     def sync(self, **kw: Any) -> None:
         run_inventory_sync(
@@ -73,11 +97,7 @@ class Env:
 
 
 @pytest.fixture
-def env(admin_url: URL, fresh_db: str, secrets_dir: Path) -> Iterator[Env]:
-    s = settings_for("migrate", admin_url, fresh_db, secrets_dir)
-    command.upgrade(
-        alembic_config(s.migrations_dir, s.db_url()), "registry@head"
-    )  # pulls inventory_0001 in
+def env(auth_env: AuthEnv, admin_url: URL, fresh_db: str, secrets_dir: Path) -> Iterator[Env]:
     worker = make_engine(settings_for("worker", admin_url, fresh_db, secrets_dir))
     api = make_engine(settings_for("api", admin_url, fresh_db, secrets_dir))
 
@@ -96,11 +116,11 @@ def env(admin_url: URL, fresh_db: str, secrets_dir: Path) -> Iterator[Env]:
     fake.update_floating_ip(fip, port)
     ids = {"blue": blue, "green": green, "vol": vol, "port": port, "fip": fip}
 
-    app = create_app(Settings(), probe=_Probe(), start_metrics_server=False)
-    app.state.session_factory = make_session_factory(api)
-    actor = [OPERATOR]
-    app.dependency_overrides[current_actor] = lambda: actor[0]
-    e = Env(TestClient(app), worker, api, uuid4(), fake, ids, actor)
+    users = {}
+    for name, role in (("operator", "operator"), ("viewer", "viewer"), ("admin", "admin")):
+        client, _ = auth_env.user_client(name, [(role, "global")])
+        users[name] = Session(client, UUID(client.get("/api/v1/session").json()["user_id"]))
+    e = Env(auth_env, users, ["operator"], worker, api, uuid4(), fake, ids)
     e.sync()
     yield e
     worker.dispose()
@@ -214,29 +234,72 @@ def test_sync_runs_are_listed_newest_first_and_readable(env: Env) -> None:
     assert len(page["items"]) == 1 and page["next_cursor"]
 
 
-# --- RBAC hook (placeholder) -------------------------------------------------------------------------------------------
+# --- RBAC (real authentication) -------------------------------------------------------------------------------------------
 
 
 def test_roles_follow_the_matrix(env: Env) -> None:
-    c = env.client
-    env.as_(VIEWER)
-    assert c.get("/api/v1/servers").status_code == 200
-    denied = c.post(
+    env.as_("viewer")
+    assert env.client.get("/api/v1/servers").status_code == 200
+    denied = env.client.post(
         "/api/v1/services",
         json={"name": "x", "slug": "x", "project_connection_id": str(env.project)},
     )
     assert denied.status_code == 403 and denied.json()["code"] == "forbidden"
-    env.as_(ADMIN)  # admin does not inherit operator (security-model.md section 3.1)
-    assert c.get("/api/v1/servers").status_code == 200
+    env.as_("admin")  # admin does not inherit operator (security-model.md section 3.1)
+    assert env.client.get("/api/v1/servers").status_code == 200
     assert (
-        c.post(
+        env.client.post(
             "/api/v1/services",
             json={"name": "x", "slug": "x", "project_connection_id": str(env.project)},
         ).status_code
         == 403
     )
-    env.as_(OPERATOR)
+    env.as_("operator")
     assert env.make_service("x")["slug"] == "x"
+
+
+def test_unauthenticated_requests_get_401_and_tokens_need_the_operate_scope(env: Env) -> None:
+    bare = env.auth.client()
+    assert bare.get("/api/v1/servers").status_code == 401
+    payload = {"name": "x", "slug": "x", "project_connection_id": str(env.project)}
+    assert bare.post("/api/v1/services", json=payload).status_code == 401
+
+    def token(scope: str) -> dict[str, str]:
+        r = env.users["operator"].post("/api/v1/tokens", json={"name": scope, "scopes": [scope]})
+        assert r.status_code in (200, 201), r.text
+        return {"Authorization": f"Bearer {r.json()['token']}"}  # no CSRF/Origin needed for tokens
+
+    read, operate = token("read"), token("operate")
+    assert bare.get("/api/v1/servers", headers=read).status_code == 200
+    denied = bare.post("/api/v1/services", json=payload, headers=read)
+    assert denied.status_code == 403 and denied.json()["code"] == "token-scope"
+    assert bare.post("/api/v1/services", json=payload, headers=operate).status_code == 201
+
+
+def test_changes_are_audited_with_allowlisted_fields(env: Env) -> None:
+    c = env.client
+    svc = c.post(
+        "/api/v1/services",
+        json={"name": "A", "slug": "aud", "project_connection_id": str(env.project),
+              "owner_contact": "secret-contact@example.invalid"},
+    ).json()  # fmt: skip
+    c.patch(f"/api/v1/services/{svc['id']}", json={"name": "B"}, headers={"If-Match": '"1"'})
+    vm = _register(env, svc["id"], "blue").json()
+    assert c.delete(f"/api/v1/managed-vms/{vm['id']}").status_code == 204
+    assert c.delete(f"/api/v1/services/{svc['id']}", headers={"If-Match": '"2"'}).status_code == 204
+    rows = env.auth.sql(
+        "SELECT action, actor_id, project_scope, before, after FROM audit_event"
+        " WHERE action LIKE 'service.%' OR action LIKE 'managed_vm.%' ORDER BY id"
+    )
+    assert [r[0] for r in rows] == [
+        "service.create", "service.update", "managed_vm.register", "managed_vm.unregister",
+        "service.delete",
+    ]  # fmt: skip
+    assert all(r[1] == env.operator_id and r[2] == f"project:{env.project}" for r in rows)
+    assert "secret-contact" not in str(rows)
+    assert rows[1][3]["name"] == "A" and rows[1][4]["name"] == "B"
+    assert rows[2][4]["openstack_server_id"] == env.ids["blue"]
+    assert "registered_by" not in rows[2][4]  # not allowlisted
 
 
 # --- services ---------------------------------------------------------------------------------------------------------------
@@ -330,7 +393,7 @@ def test_register_observed_server_as_managed_vm(env: Env) -> None:
         and vm["service_id"] == svc["id"]
         and vm["openstack_server_id"] == env.ids["blue"]
     )
-    assert vm["registered_by"] == str(OPERATOR.id) and vm["registered_at"]
+    assert vm["registered_by"] == str(env.operator_id) and vm["registered_at"]
     assert vm["launched_at_effective"]  # launched_at, falling back to created
     assert vm["ssh_host_key_fingerprint"] is None  # not scanned yet (ADR-0006, workflow engine)
     assert r.headers["Location"] == f"/api/v1/managed-vms/{vm['id']}"
@@ -407,7 +470,7 @@ def test_registration_refusals(env: Env) -> None:
     gone = _register(env, env.make_service("app03")["id"], "green")
     assert gone.status_code == 409 and gone.json()["code"] == "observed-server-not-present"
 
-    env.as_(VIEWER)
+    env.as_("viewer")
     assert _register(env, svc["id"], "green").status_code == 403
 
 

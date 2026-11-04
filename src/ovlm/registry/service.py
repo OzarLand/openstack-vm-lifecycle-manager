@@ -8,14 +8,13 @@ Never imports ``ovlm.openstack``. Registration reads the observed server through
 
 INTEGRATION POINTS (clearly stubbed, no behaviour guessed):
 
-* audit (E3-4): ``_audit`` only logs; it becomes ``audit.record(...)`` in the same transaction.
+* audit: written by the api layer (``routes_inventory``) with ``ovlm.audit.record`` in the request's transaction.
 * service lock (E5-1): ``_lock_holder`` always returns ``None`` until ``resource_lock`` exists.
 * host-key scan run (ADR-0006): registration does not start one; the api answers ``201``, not ``202``.
 """
 
 from __future__ import annotations
 
-import logging
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -30,8 +29,6 @@ from ovlm.inventory.ids import uuid7
 from ovlm.inventory.service import Page, clamp_limit, decode_cursor, encode_cursor
 from ovlm.registry.errors import DomainError, conflict, not_found
 from ovlm.registry.tables import managed_vm, service, service_group
-
-log = logging.getLogger("ovlm.registry")
 
 SLUG = re.compile(r"^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$")
 _UNSET: Any = object()
@@ -52,14 +49,6 @@ def parse_if_match(header: str | None) -> int:
             412, "etag-mismatch", "Precondition failed", "The If-Match value is not a valid ETag."
         )
     return int(value)
-
-
-def _audit(
-    action: str, actor_id: UUID | None, target_type: str, target_id: UUID, **fields: object
-) -> None:
-    """STUB (E3-4): becomes ``audit.record(...)`` in the caller's transaction."""
-    log.info("audit stub", extra={"action": action, "actor_id": str(actor_id), "target_type": target_type,
-                                  "target_id": str(target_id), **fields})  # fmt: skip
 
 
 def _lock_holder(session: Session, service_id: UUID) -> UUID | None:
@@ -138,7 +127,6 @@ def create_service(
         raise conflict("slug-taken", "Slug already in use", f"A service with slug '{slug}' exists.",
                        "Choose another slug.") from exc  # fmt: skip
     row = session.execute(select(service).where(service.c.id == sid)).one()
-    _audit("service.create", actor_id, "service", sid, slug=slug)
     return _service_dict(row)
 
 
@@ -178,7 +166,6 @@ def update_service(
     name: str | None = None,
     owner_contact: Any = _UNSET,
     service_group_id: Any = _UNSET,
-    actor_id: UUID | None = None,
 ) -> dict[str, Any]:
     changes: dict[str, Any] = {}
     if name is not None:
@@ -199,13 +186,10 @@ def update_service(
     if result is None:
         raise DomainError(412, "etag-mismatch", "Precondition failed",
                           "The service was changed since you read it.", "GET the service again and retry.")  # fmt: skip
-    _audit("service.update", actor_id, "service", service_id, fields=sorted(changes))
     return _service_dict(result)
 
 
-def delete_service(
-    session: Session, service_id: UUID, expected_version: int, *, actor_id: UUID | None = None
-) -> None:
+def delete_service(session: Session, service_id: UUID, expected_version: int) -> None:
     if get_service(session, service_id) is None:
         raise not_found("service-not-found", "Service")
     n = session.execute(
@@ -223,7 +207,6 @@ def delete_service(
     if deleted is None:
         raise DomainError(412, "etag-mismatch", "Precondition failed", "The service was changed since you read it.",
                           "GET the service again and retry.")  # fmt: skip
-    _audit("service.delete", actor_id, "service", service_id)
 
 
 # --- managed VMs ---------------------------------------------------------------------------------------------------
@@ -268,14 +251,6 @@ def register_managed_vm(
                            "Unregister the current VM first, or renew the service.") from exc  # fmt: skip
         raise
     row = session.execute(select(managed_vm).where(managed_vm.c.id == vm_id)).one()
-    _audit(
-        "managed_vm.register",
-        actor_id,
-        "managed_vm",
-        vm_id,
-        service_id=str(service_id),
-        server=ref.openstack_id,
-    )
     return _vm_dict(row)
 
 
@@ -322,7 +297,7 @@ def get_managed_vm(session: Session, vm_id: UUID) -> dict[str, Any] | None:
     return out
 
 
-def unregister_managed_vm(session: Session, vm_id: UUID, *, actor_id: UUID | None = None) -> None:
+def unregister_managed_vm(session: Session, vm_id: UUID) -> None:
     row = session.execute(select(managed_vm).where(managed_vm.c.id == vm_id)).first()
     if row is None:
         raise not_found("managed-vm-not-found", "Managed VM")
@@ -331,7 +306,6 @@ def unregister_managed_vm(session: Session, vm_id: UUID, *, actor_id: UUID | Non
         raise conflict("resource-locked", "Service is locked by a run", f"Run {holder} holds the service lock.",
                        "Wait for the run to finish or abort it.")  # fmt: skip
     session.execute(delete(managed_vm).where(managed_vm.c.id == vm_id))
-    _audit("managed_vm.unregister", actor_id, "managed_vm", vm_id, server=row.openstack_server_id)
 
 
 def registered_server_ids(session: Session) -> set[str]:

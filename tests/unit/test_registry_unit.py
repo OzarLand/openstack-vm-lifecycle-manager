@@ -1,4 +1,4 @@
-"""Pure parts of inventory.service / registry.service / the placeholder auth (no database)."""
+"""Pure parts of inventory.service / registry.service / the authentication guard (no database)."""
 
 from __future__ import annotations
 
@@ -72,8 +72,8 @@ def test_uuid7_is_time_ordered_valid_v7() -> None:
     assert all(x.int < later.int for x in first)
 
 
-def test_without_the_auth_module_every_route_fails_closed() -> None:
-    """PLACEHOLDER behaviour: until E3 replaces current_actor, nothing is reachable (problem+json 503)."""
+def test_unauthenticated_requests_are_refused_with_401() -> None:
+    """Every route needs a session or token: no credentials means problem+json 401, never data."""
     client = TestClient(create_app(Settings(), probe=_Probe(), start_metrics_server=False))
     for method, path in (
         ("GET", "/api/v1/servers"),
@@ -82,7 +82,7 @@ def test_without_the_auth_module_every_route_fails_closed() -> None:
         ("DELETE", f"/api/v1/managed-vms/{uuid4()}"),
     ):
         r = client.request(method, path, json={} if method == "POST" else None)
-        assert r.status_code in (503, 422), (method, path, r.status_code)
+        assert r.status_code == 401, (method, path, r.status_code)
     r = client.get("/api/v1/servers")
-    assert r.status_code == 503 and r.headers["content-type"] == "application/problem+json"
-    assert r.json()["code"] == "auth-not-configured" and r.json()["instance"] == "/api/v1/servers"
+    assert r.headers["content-type"] == "application/problem+json"
+    assert r.json()["instance"] == "/api/v1/servers"
