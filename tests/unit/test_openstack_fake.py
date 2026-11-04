@@ -462,9 +462,11 @@ def test_the_fake_is_strict_by_default() -> None:
     fake = FakeOpenStack()
     assert fake.strict_gate
     srv = fake.add_server("x")  # fake-only set-up is outside the OVLM write boundary
-    for call in (lambda: fake.stop_server(srv), lambda: fake.lock_server(srv, "ovlm:x"),
-                 lambda: fake.delete_server(srv)):  # fmt: skip
-        with pytest.raises(errors.WriteNotAllowedError, match="no fence gate bound"):
-            call()
+    with pytest.raises(errors.WriteNotAllowedError, match="no fence gate bound"):
+        fake.stop_server(srv)
+    with pytest.raises(errors.WriteNotAllowedError, match="no fence gate bound"):
+        fake.lock_server(srv, "ovlm:x")
+    with pytest.raises(errors.WriteNotAllowedError, match="no fence gate bound"):
+        fake.delete_server(srv)
     assert fake.calls == []
     fake.get_server(srv)  # reads are not gated
