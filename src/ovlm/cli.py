@@ -1,4 +1,4 @@
-"""``ovlm`` command: ``api``, ``worker``, ``migrate`` (architecture.md section 4).
+"""``ovlm`` command: ``api``, ``worker``, ``migrate`` (architecture.md section 4) and ``admin create`` (bootstrap).
 
 There are deliberately no secret-bearing options: secrets are read from the files named in the settings.
 """
@@ -56,10 +56,15 @@ def _run_migrate() -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    args_in = list(sys.argv[1:] if argv is None else argv)
+    if args_in[:1] == ["admin"]:  # `ovlm admin create ...` (bootstrap); see ovlm.auth.cli
+        from ovlm.auth.cli import admin_main
+
+        return admin_main(args_in[1:])
     parser = argparse.ArgumentParser(prog="ovlm", description="OpenStack VM Lifecycle Manager")
     parser.add_argument("--version", action="version", version=f"ovlm {__version__}")
     parser.add_argument("command", choices=["api", "worker", "migrate"])
-    args = parser.parse_args(argv)
+    args = parser.parse_args(args_in)
     runners = {"api": _run_api, "worker": _run_worker, "migrate": _run_migrate}
     try:
         return runners[args.command]()
