@@ -1,0 +1,112 @@
+{# The polled part of the run page: no form with a password inside, so a refresh never clobbers typing. #}
+<div id="run-panel" {% if not terminal %}hx-get="/renewals/runs/{{ run.id }}/panel" hx-trigger="every 5s" hx-swap="outerHTML"{% endif %}>
+  <section class="panel" aria-labelledby="status-h">
+    <h2 id="status-h">Status
+      <span class="badge {{ 'err' if run.state in ('needs_human', 'failed', 'rejected') else ('ok' if run.state in ('completed', 'rolled_back') else 'info') }}">{{ state_text }}</span>
+      {% if self_approved %}<span class="badge warn">self-approved</span>{% endif %}
+    </h2>
+    <dl class="kv">
+      <dt>Phase</dt><dd>{{ phase_text }}</dd>
+      <dt>Current step</dt><dd>{% if run.current_step %}{{ run.current_step.step_key | step_code }} {{ run.current_step.step_key | step_text }}: {{ run.current_step.state.replace("_", " ") }}, attempt {{ run.current_step.attempt }}
+        {% if run.current_step.deadline_at %}<br><span class="muted">deadline {{ run.current_step.deadline_at | timestamp }}</span>{% endif %}
+        {% if run.current_step.state == "running" and run.current_step.lease_owner %}<br><span class="muted">held by worker <span class="mono">{{ run.current_step.lease_owner }}</span>; lease until {{ run.current_step.lease_expires_at | timestamp }}; last heartbeat {{ run.current_step.heartbeat_at | age }} ago</span>
+          {% if lease_expired %}<br><span class="badge warn">worker lease expired</span> no heartbeat since {{ run.current_step.heartbeat_at | age }}: another worker takes over after its safety delay{% endif %}{% endif %}
+        {% else %}none{% endif %}</dd>
+      <dt>Worker</dt><dd>{% if run.last_worker_heartbeat %}last heard from {{ run.last_worker_heartbeat | age }} ago{% else %}no worker has reported yet{% endif %}
+        {% if run.state == "requested" %}<br>Waiting for worker admission. Abort cancels it.{% endif %}</dd>
+      {% if run.locks %}<dt>Locks held</dt><dd class="mono">{% for l in run.locks %}{{ l.resource_type }} {{ l.resource_key }}{{ ", " if not loop.last }}{% endfor %}</dd>{% endif %}
+      {% if run.auto_restore_used %}<dt>Automatic restore</dt><dd>OVLM already restored automatically once in this run. It will not do it again.</dd>{% endif %}
+      {% if run.abort_requested %}<dt>Abort</dt><dd><span class="badge warn">requested</span> It is honoured at the next step boundary.</dd>{% endif %}
+      {% if run.end_reason %}<dt>Ended because</dt><dd>{{ run.end_reason }}</dd>{% endif %}
+    </dl>
+    {% if run.pending_signals %}
+    <p role="status" class="banner info"><strong>Pending:</strong>
+      {% for s in run.pending_signals %}{{ s.kind.replace("_", " ") }} requested by {{ names.get(s.actor_id, "the system") }} {{ s.created_at | age }} ago{{ "; " if not loop.last }}{% endfor %}.
+      The worker validates each request again before it acts.</p>
+    {% endif %}
+  </section>
+
+  {% if downtime %}
+  <section class="panel" aria-labelledby="dt-h">
+    <h2 id="dt-h">Downtime {% if downtime.running %}<span class="badge err">in progress</span>{% else %}<span class="badge ok">ended</span>{% endif %}</h2>
+    <p class="timer"><strong>{{ downtime.elapsed | duration }}</strong>
+      {% if downtime.budget %}of the {{ downtime.budget | duration }} budget the approver accepted{% endif %}
+      {% if downtime.running and downtime.remaining is not none %}{% if downtime.remaining >= 0 %}, {{ downtime.remaining | duration }} left{% else %}, <span class="badge err">over budget by {{ (0 - downtime.remaining) | duration }}</span>{% endif %}{% endif %}
+      <span class="muted">(started {{ downtime.started | timestamp }}; worst case {{ downtime.worst_case | duration }})</span></p>
+    {% if downtime.percent is not none %}<progress max="100" value="{{ downtime.percent }}" aria-label="Share of the downtime budget used">{{ downtime.percent }}%</progress>{% endif %}
+    {% if downtime.over and downtime.running %}<p role="alert" class="banner error">The budget is spent. Nothing continues by itself past it: an operator decides.</p>{% endif %}
+  </section>
+  {% endif %}
+
+  {% if nh %}
+  <section class="panel attention" aria-labelledby="nh-h">
+    <h2 id="nh-h">This run is stopped and needs a person</h2>
+    <p><strong>What happened.</strong> {{ nh.what }}</p>
+    <p class="muted">Reason code: <span class="mono">{{ nh.reason }}</span>{% if parked %}, at step {{ parked.code }} {{ parked.label }}{% endif %}.
+       Nothing else is being changed: the run keeps its locks and the resources stay as they are.</p>
+    <p><strong>What to do next.</strong></p>
+    <ol>{% for t in nh.todo %}<li>{{ t }}</li>{% endfor %}</ol>
+    {% if parked and parked.error_rows %}<details open><summary>The step's error</summary><dl class="kv">{% for k, v in parked.error_rows %}<dt>{{ k }}</dt><dd class="mono">{{ v }}</dd>{% endfor %}</dl></details>{% endif %}
+  </section>
+  {% endif %}
+
+  <section class="panel" aria-labelledby="truth-h">
+    <h2 id="truth-h">Current truth</h2>
+    {% if truth %}
+      <p class="muted">What OVLM last read from OpenStack and the guests, {{ truth_age | duration }} ago ({{ run.current_truth_at | timestamp }}).
+        {% if truth_age is not none and truth_age > 600 %}<span class="badge warn">older than 10 minutes: press Probe</span>{% endif %}</p>
+      {% for section, rows in truth %}<h3>{{ section }}</h3><dl class="kv">{% for k, v in rows %}<dt>{{ k }}</dt><dd class="mono">{{ v }}</dd>{% endfor %}</dl>{% endfor %}
+    {% else %}<p class="empty">No probe has been stored yet. {% if not terminal %}Press Probe to read the resources now (read-only).{% endif %}</p>{% endif %}
+  </section>
+
+  <section class="panel" aria-labelledby="act-h">
+    <h2 id="act-h">What you can do now</h2>
+    {% if not actions %}<p class="empty">{% if terminal %}The run is finished: nothing more to do.{% else %}Nothing is offered in this state.{% endif %}</p>{% endif %}
+    <ul class="actions-list">
+    {% for a in actions %}
+      <li>
+        <div><strong>{{ a.label }}</strong> <span class="muted">needs: {{ a.role }}</span></div>
+        <div>{{ a.effect }}</div>
+        {% if a.usable %}
+          {% if a.confirmed %}
+            <a class="button{{ ' danger' if a.action in ('rollback', 'abort', 'revert', 'discard') else '' }}" href="/renewals/runs/{{ run.id }}/actions/{{ a.action }}">{{ a.label }}…</a>
+            <span class="muted">asks you to confirm with your password, a code and the VM's name</span>
+          {% else %}
+            <form method="post" action="/renewals/runs/{{ run.id }}/actions/{{ a.action }}" class="inline">
+              <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+              <input type="hidden" name="idempotency_key" value="{{ key }}-{{ a.action }}">
+              <button type="submit">{{ a.label }}</button>
+            </form>
+          {% endif %}
+        {% else %}<p class="muted">{{ a.why }}</p>{% endif %}
+      </li>
+    {% endfor %}
+    </ul>
+  </section>
+
+  <section class="panel" aria-labelledby="steps-h">
+    <h2 id="steps-h">Steps</h2>
+    {% if not steps %}<p class="empty">No step has started yet.</p>{% endif %}
+    <ol class="timeline">
+    {% for s in steps %}
+      <li class="step {{ s.state }}">
+        <div class="head"><span class="code mono">{{ s.code }}</span> <strong>{{ s.label }}</strong>
+          <span class="badge {{ s.state | step_badge }}">{{ s.state.replace("_", " ") }}</span>
+          {% if s.destructive %}<span class="badge warn">changes things</span>{% endif %}
+          <span class="muted">attempt {{ s.attempt }}{% if s.finished_at %}, finished {{ s.finished_at | age }} ago{% endif %}</span></div>
+        {% if s.error_rows %}<details{% if s.state in ('failed', 'needs_human') %} open{% endif %}><summary>Error{% if s.error_class %} ({{ s.error_class.replace("_", " ") }}){% endif %}</summary><dl class="kv">{% for k, v in s.error_rows %}<dt>{{ k }}</dt><dd class="mono">{{ v }}</dd>{% endfor %}</dl></details>{% endif %}
+        {% if s.evidence_rows %}<details><summary>Evidence{% if s.guest %} (includes text reported by the guest){% endif %}</summary>
+          {% if s.guest %}<p class="muted">Values from the guest are untrusted: shown as plain text, never as instructions.</p>{% endif %}
+          <dl class="kv">{% for k, v in s.evidence_rows %}<dt>{{ k }}</dt><dd class="mono">{{ v }}</dd>{% endfor %}</dl></details>{% endif %}
+        {% if s.attempts %}<details><summary>Automation attempts ({{ s.attempts | length }})</summary>
+          <table><thead><tr><th scope="col">Attempt</th><th scope="col">Phase</th><th scope="col">Result</th><th scope="col">Exit</th><th scope="col">Took</th><th scope="col">Log</th></tr></thead>
+          <tbody>{% for t in s.attempts %}<tr>
+            <td>{{ t.attempt }}</td><td>{{ t.phase }} on {{ t.target_role }}</td><td>{{ t.classification }}{% if t.reason %}<br><span class="muted">{{ t.reason }}</span>{% endif %}</td>
+            <td>{{ t.exit_code if t.exit_code is not none else "" }}</td><td>{{ t.duration_seconds | duration if t.duration_seconds is not none else "" }}</td>
+            <td>{% if t.can_read_artefacts %}<a href="/api/v1/automation-runs/{{ t.id }}/artefacts">log, events, diff</a><br><span class="muted">restricted; each read is audited</span>{% elif t.purged %}<span class="muted">purged</span>{% else %}<span class="muted">operators and admins only</span>{% endif %}</td>
+          </tr>{% endfor %}</tbody></table></details>{% endif %}
+      </li>
+    {% endfor %}
+    </ol>
+  </section>
+</div>

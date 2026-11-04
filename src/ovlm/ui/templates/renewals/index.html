@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Renewals{% endblock %}
+{% block content %}
+<h1>Renewals</h1>
+{% if notice %}<p role="status" class="banner ok">{{ notice }}</p>{% endif %}
+<p class="muted">Each VM's renewal deadline comes from its policy. A plan fixes what will be built; an approver decides it; the worker runs it.
+  Nothing here changes a VM until a run is started and, in the downtime window, approved again.</p>
+
+{% if open_approvals %}
+<section class="panel" aria-labelledby="appr-h">
+  <h2 id="appr-h">Waiting for an approver</h2>
+  <table>
+    <thead><tr><th scope="col">Gate</th><th scope="col">Service</th><th scope="col">VM</th><th scope="col">Requested</th><th scope="col"></th></tr></thead>
+    <tbody>
+    {% for a in open_approvals %}
+      <tr>
+        <td>{{ GATE_TEXT[a.subject_type][0] }} {{ GATE_TEXT[a.subject_type][1] }}</td>
+        <td>{{ a.blast_radius.service }}</td>
+        <td class="mono">{{ a.blast_radius.vms[0].name }}</td>
+        <td>{{ a.requested_at | age }} ago</td>
+        <td><a href="/approvals/{{ a.id }}">{% if "approver" in who.roles() %}Review and decide{% else %}View{% endif %}</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<section class="panel" aria-labelledby="up-h">
+  <h2 id="up-h">Upcoming renewals, by deadline</h2>
+  {% if not upcoming %}
+    <p class="empty">No managed VM is in scope. Register a VM from the inventory first.</p>
+  {% else %}
+  <table>
+    <thead><tr>
+      <th scope="col">VM</th><th scope="col">Deadline</th><th scope="col">Readiness</th>
+      <th scope="col">Blockers</th><th scope="col">Quota (advisory)</th><th scope="col">Next</th>
+    </tr></thead>
+    <tbody>
+    {% for r in upcoming %}
+      <tr>
+        <th scope="row"><a href="/inventory/servers/{{ r.vm.observed_server_id }}">{{ r.name }}</a><br><span class="muted">{{ r.service.name }}</span></th>
+        <td>
+          {% set d = r.deadline %}
+          {% if d.status == "due" %}<span class="badge err">due</span> since {{ d.deadline | timestamp }}
+          {% elif d.status == "scheduled" %}{{ d.deadline | timestamp }}
+          {% elif d.status == "waived" %}<span class="badge warn">waived</span> until {{ d.waived_until | timestamp }}
+          {% elif d.status == "no_policy" %}<span class="muted">no policy: never due</span>
+          {% else %}<span class="muted">{{ d.status or "unknown" }}</span>{% endif %}
+          {% if d.next_window_start %}<br><span class="muted">next window {{ d.next_window_start | timestamp }}</span>{% endif %}
+        </td>
+        <td>
+          {% if r.level %}<span class="badge {{ 'ok' if r.level == 'ready' else ('warn' if r.level == 'partially-ready' else 'err') }}">{{ level_text[r.level] }}</span>
+            <br><span class="muted">assessed {{ r.assessed_at | age }} ago</span>
+          {% else %}<span class="badge warn">not assessed</span>{% endif %}
+        </td>
+        <td>
+          {% if r.blockers %}
+            <ul class="plain">{% for b in r.blockers %}<li><span class="mono">{{ b.key }}</span> ({{ b.result }}){% if b.recommendation %}<br><span class="muted">{{ b.recommendation }}</span>{% endif %}</li>{% endfor %}</ul>
+          {% elif r.level %}<span class="muted">none</span>{% else %}<span class="muted">unknown until assessed</span>{% endif %}
+        </td>
+        <td>
+          {% if r.quota %}<span class="badge {{ {'pass': 'ok', 'fail': 'err'}.get(r.quota.result, 'warn') }}">{{ r.quota.result }}</span>
+            {% if r.quota.recommendation %}<br><span class="muted">{{ r.quota.recommendation }}</span>{% endif %}
+          {% else %}<span class="muted">not assessed</span>{% endif %}
+        </td>
+        <td>
+          {% if r.run %}<a href="/renewals/runs/{{ r.run.id }}">Run: {{ RUN_STATE_TEXT.get(r.run.state, r.run.state) }}</a>
+          {% elif r.plan %}<a href="/renewals/plans/{{ r.plan.id }}">Plan ({{ r.plan.state.replace("_", " ") }})</a>
+          {% elif r.can_plan %}
+            <form method="post" action="/renewals/plans" class="stack">
+              <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+              <input type="hidden" name="managed_vm_id" value="{{ r.vm.id }}">
+              <label>Planned window start (UTC, optional) <input type="datetime-local" name="planned_window_start"></label>
+              <button type="submit"{% if r.level == "ready" %} class="primary"{% endif %}>Create plan</button>
+              {% if r.level != "ready" %}<span class="muted">A run cannot start until readiness is "Ready".</span>{% endif %}
+            </form>
+          {% else %}<span class="muted">needs the operator role</span>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted">The quota check is advisory: members cannot see host capacity, and a quota is not schedulable capacity. The worker re-checks live before it creates the new VM.</p>
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="runs-h">
+  <h2 id="runs-h">Runs</h2>
+  {% if not runs %}<p class="empty">No renewal run yet.</p>{% else %}
+  <table>
+    <thead><tr><th scope="col">Run</th><th scope="col">State</th><th scope="col">Phase</th><th scope="col">Started</th></tr></thead>
+    <tbody>{% for r in runs %}
+      <tr>
+        <td><a href="/renewals/runs/{{ r.id }}" class="mono">{{ r.id | short_id }}</a></td>
+        <td><span class="badge {{ 'err' if r.state in ('needs_human', 'failed', 'rejected') else ('ok' if r.state in ('completed', 'rolled_back') else 'info') }}">{{ RUN_STATE_TEXT.get(r.state, r.state) }}</span>
+          {% if r.state == "needs_human" %}<br><span class="muted">{{ r.needs_human_reason }}</span>{% endif %}</td>
+        <td>{{ r.phase or "" }}</td>
+        <td>{{ r.created_at | age }} ago</td>
+      </tr>{% endfor %}
+    </tbody>
+  </table>{% endif %}
+</section>
+
+<section class="panel" aria-labelledby="plans-h">
+  <h2 id="plans-h">Plans</h2>
+  {% if not plans %}<p class="empty">No plan yet. Create one from the table above.</p>{% else %}
+  <table>
+    <thead><tr><th scope="col">Plan</th><th scope="col">Service</th><th scope="col">VM</th><th scope="col">State</th><th scope="col">Created</th></tr></thead>
+    <tbody>{% for p in plans %}
+      <tr>
+        <td><a href="/renewals/plans/{{ p.id }}" class="mono">{{ p.id | short_id }}</a></td>
+        <td>{{ p.resolved.service.slug }}</td><td class="mono">{{ p.resolved.blue.name }}</td>
+        <td>{{ p.state.replace("_", " ") }}</td><td>{{ p.created_at | age }} ago</td>
+      </tr>{% endfor %}
+    </tbody>
+  </table>{% endif %}
+</section>
+{% endblock %}

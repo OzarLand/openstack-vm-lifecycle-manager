@@ -30,6 +30,14 @@
       {% if latest.level == "not-ready" %}at least one blocker failed ({% for k in s.failed_blockers %}<span class="mono">{{ k }}</span>{{ ", " if not loop.last }}{% endfor %}).
       {% elif latest.level == "partially-ready" %}no blocker failed, but at least one blocker could not be determined ({% for k in s.unknown_blockers %}<span class="mono">{{ k }}</span>{{ ", " if not loop.last }}{% endfor %}).
       {% else %}no blocker failed and none is unknown. Warnings do not change the level.{% endif %}</p>
+    {% if rd.blockers %}
+    <div class="banner warn" role="status">
+      <strong>What stands between this VM and a renewal:</strong>
+      <ul class="plain">{% for b in rd.blockers %}<li><span class="mono">{{ b.key }}</span> ({{ b.result }}){% if b.recommendation %}: {{ b.recommendation }}{% endif %}</li>{% endfor %}</ul>
+    </div>
+    {% elif latest.level == "ready" %}
+    <p class="banner ok" role="status">Nothing blocks a renewal. <a href="/renewals">Plan it from the Renewals page</a>.</p>
+    {% endif %}
     {% for g in rd.groups %}
     <h3>{{ g.label }}</h3>
     <table class="checks">

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}{{ label }}{% endblock %}
+{% block content %}
+<p class="crumbs"><a href="/renewals">Renewals</a> › <a href="/renewals/runs/{{ run.id }}">Run <span class="mono">{{ run.id | short_id }}</span></a> › {{ label }}</p>
+<h1>{{ label }}</h1>
+{% if error %}<p role="alert" class="banner error"><strong>{{ error.title }}.</strong> {{ error.detail }}{% if error.next_action %} <em>{{ error.next_action }}</em>{% endif %}</p>{% endif %}
+
+<section class="panel attention" aria-labelledby="effect-h">
+  <h2 id="effect-h">What this will do</h2>
+  {% if offered %}<p><strong>{{ offered.effect }}</strong></p>
+  {% else %}<p role="alert" class="banner warn">This action is not offered in the run's current state ({{ run.state }}, {{ phase_text }}). The worker will refuse it.</p>{% endif %}
+  <dl class="kv">
+    <dt>Service</dt><dd>{{ blast.service }}</dd>
+    <dt>Old VM (blue)</dt><dd class="mono">{{ blast.vms[0].name }} · {{ blast.vms[0].openstack_id }}</dd>
+    <dt>Data volume</dt><dd class="mono">{{ blast.volume or "none" }}</dd>
+    <dt>Floating IP</dt><dd class="mono">{{ blast.floating_ip }}</dd>
+    <dt>Run phase</dt><dd>{{ phase_text }}{% if run.state == "needs_human" %}; stopped: <span class="mono">{{ parked }}</span>{% endif %}</dd>
+    <dt>The VM this concerns</dt><dd><strong class="mono">{{ tc_target.name }}</strong>, id ending <strong class="mono">{{ tc_target.tail }}</strong></dd>
+  </dl>
+</section>
+
+<section class="panel" aria-labelledby="confirm-h">
+  <h2 id="confirm-h">Confirm</h2>
+  {% if is_token %}
+    <p role="alert" class="banner warn"><strong>API tokens cannot confirm this.</strong> Typed confirmations are for people only: sign in to the web interface with your own account.</p>
+  {% else %}
+  <form method="post" action="/renewals/runs/{{ run.id }}/actions/{{ action_name }}" class="card">
+    <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+    <input type="hidden" name="idempotency_key" value="{{ key }}">
+    {% if action_name == "mark-resolved" %}
+    <p><label for="att">What did you do?</label>Describe the manual fix (for example "an admin force-detached the volume"). The engine probes again before it continues; your words go in the audit record.
+      <textarea id="att" name="attestation" rows="3" maxlength="2000" required>{{ form.attestation or "" }}</textarea></p>
+    {% endif %}
+    <p><label for="tc">Typed confirmation</label>Type the server's name, a space, and the last 6 characters of its id. It is checked on the server against the current record.
+      <input id="tc" name="typed_confirmation" autocomplete="off" autocapitalize="off" spellcheck="false" required></p>
+    <p><label for="pw">Password</label><input id="pw" name="password" type="password" required autocomplete="current-password"></p>
+    {% if who.totp_confirmed %}<p><label for="otp">Authenticator code</label><input id="otp" name="totp_code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required></p>{% endif %}
+    <p><button type="submit" class="danger">{{ label }}</button> <a href="/renewals/runs/{{ run.id }}">Cancel</a></p>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}
