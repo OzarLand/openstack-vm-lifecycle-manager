@@ -19,6 +19,27 @@ what needs the maintainer. Agent 1 (PM/EM) updates it after every handoff. Agent
 | 10 | Documentation Engineer | — | Not activated (Agent 1 writes the README) | — |
 | — | **Dev VM session** `ozar-dev` (maintainer's machine, Remote Control) | maintainer's local Claude Code | Probe done (read-only): 2 vCPU / 7 GB, KVM nested, openstack CLI, cloud `ozar-lab` (Felcloud). Too small to host the lab itself, but a good control host. **Needs the maintainer's direct authorization in that session** to create `ovlm-exp01-*` resources ([EXP-01](experiments/EXP-01-design-assumptions-on-felcloud.md)) | https://claude.ai/code/session_016ti9w2xkWinTeHFRq3zgS3 |
 
+## ✅ Standing authorization (maintainer, 2026-11-04)
+
+"All agents are my go to run; don't ask me for every action." Agent 1 applies it as follows.
+
+**Agents proceed without asking:**
+- commits and pushes to the working branch and the per-agent branches, and merging agent branches into the working
+  branch;
+- creating, briefing and continuing agent sessions and sub-agents, with model choice following the strategy;
+- lab work on Felcloud (`ozar-lab`) limited to `ovlm-*` resources, within quota, deleted when finished;
+- design changes, ADRs and requirement updates. Each is recorded here and stays reviewable.
+
+**Still brought to the maintainer, once per item:**
+- the Phase 1 → Phase 2 gate (the mission requires explicit approval before substantial implementation);
+- anything touching `main`, other OzarLand repositories (the upstream quick-lab proposal is already approved), or
+  public posts;
+- an SRE or Security veto that agents cannot resolve between themselves;
+- residual risks the maintainer must accept as owner;
+- any action outside `ovlm-*` resources on a cloud.
+
+The `ozar-dev` session applies its own approval rules: it accepts only approvals typed in its own conversation.
+
 ## 💬 Dedicated agent conversations
 
 Each conversation can be opened in the Claude app. You can read everything the agent does and type into it to
