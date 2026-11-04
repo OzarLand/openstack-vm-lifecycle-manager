@@ -48,10 +48,9 @@ Merge both review files into the working branch on resume.
      read rule in `auth`, `automation` dependency group in the runtime image, sudoers/`signal_prefix` for the Ansible
      user);
    - the automation lint worker job and the waiver endpoint.
-6. **Lab (E1-8, E5-6):**
-   - extend `openstack-quick-lab` with Cinder (LVM), through `ozar-dev`, with `ovlm-*` resources only;
+6. **Lab (E5-6), directly on Felcloud ([ADR-0007](decisions/ADR-0007-lab-on-felcloud.md); quick-lab dropped):**
+   - work through `ozar-dev`, in the current `ozar-lab` project, with `ovlm-*` resources only, and with a before/after snapshot proving that no other resource changed;
    - run the primary acceptance scenario and the failure scenarios, and store the evidence;
-   - propose the quick-lab change upstream with that evidence (the maintainer approved this).
 7. Install guide and release notes, then the MVP report to the maintainer.
 
 ## Rules in force (from the maintainer)

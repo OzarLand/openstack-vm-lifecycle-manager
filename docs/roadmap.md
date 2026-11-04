@@ -19,7 +19,7 @@ the required reviews are recorded.
 | **M3 — Inventory** (Phase 3) | Read-only discovery, managed VM registration, sync | Inventory of a fake cloud in CI; of Felcloud in the lab (read-only) |
 | **M4 — Lifecycle** (Phase 4) | Profiles, policies, deadlines, planning, audit, auth/RBAC/TOTP | CRUD + audit + RBAC tests in CI |
 | **M5 — Readiness** (Phase 5) | Explainable readiness checks | Rule-based levels with evidence, unit tested |
-| **M6 — Renewal engine** (Phase 6) | Workflow engine + `bluegreen_fip_v1` + the acceptance scenario | Crash-injection suite green in CI; **acceptance scenario lab validated** on the quick-lab with Cinder |
+| **M6 — Renewal engine** (Phase 6) | Workflow engine + `bluegreen_fip_v1` + the acceptance scenario | Crash-injection suite green in CI; **acceptance scenario lab validated** on Felcloud (ADR-0007) |
 | **MVP** | M1–M6 + operator UI for the MVP pages + install guide | Section 9 acceptance scenario and failure scenarios lab validated, with stored evidence |
 
 ## Backlog
@@ -47,7 +47,7 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | E1-5 | Docker image (non-root, two OS users), Compose file, Makefile | 4 | Sonnet | E1-4 | Integration tested, merged (#1) | `docker compose up` healthy in CI |
 | E1-6 | GitHub Actions CI (actions pinned to SHA, as in OzarLand) | 4 | Sonnet | E1-1 | Done: CI green on #1 | Green on the working branch |
 | E1-7 | Reference workload `ovlm-counter`: Ansible role and phase playbooks per the automation contract | 6 | Sonnet | — | Implemented; CI Ansible job added (PR #4) | `ansible-lint`, syntax check, run against a local container in CI |
-| E1-8 | openstack-quick-lab: opt-in Cinder (LVM) option, run once, then proposed upstream | 6 + ozar-dev | Sonnet | — | To do | quick-lab deploys with Cinder; upstream issue filed with evidence |
+| E1-8 | openstack-quick-lab: opt-in Cinder (LVM) option, run once, then proposed upstream | 6 + ozar-dev | Sonnet | — | Dropped (ADR-0007: lab on Felcloud) | quick-lab deploys with Cinder; upstream issue filed with evidence |
 
 ### E2 — Inventory (Phase 3)
 

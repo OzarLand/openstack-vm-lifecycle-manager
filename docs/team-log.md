@@ -708,3 +708,11 @@ The maintainer asked for a README and a pause of all work until "reprends", savi
 - The resume plan is in [HANDOFF.md](HANDOFF.md).
 
 No other work runs until the maintainer resumes.
+
+## Decision during the pause — 2026-11-04
+
+The maintainer decided **not to use quick-lab: the lab is Felcloud itself**, the real OpenStack cloud of the
+`ozar-lab` entry ([ADR-0007](decisions/ADR-0007-lab-on-felcloud.md), which supersedes ADR-0001).
+- E1-8 and the upstream quick-lab proposal are dropped.
+- Asked in a popup, the maintainer chose the **current project** (not a dedicated one) and accepts the residual risk.
+- Lab runs add a before/after snapshot proving that no non-`ovlm-*` resource changed.
