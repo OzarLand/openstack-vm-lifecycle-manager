@@ -82,8 +82,8 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | E5-1 | Workflow engine core: runs/steps, SKIP LOCKED claims, leases, fencing (local deadline), resource locks, signals, timers | 4 | **Opus** | E1 | Integration tested; SRE review fixes merged (PR #7) | WF-01..WF-20 crash-injection suite; review by 7 |
 | E5-2 | OpenStack write client with ownership guard and write allowlist | 4 | Opus | E2-1, E5-1 | Integration tested; security review fixes merged (PR #7) | Tests: untagged/unregistered target refused; review by 8 |
 | E5-3 | Automation runner (ansible-runner subprocess, per-run dir, `ovlm.result/1`, redaction, restricted artefact store, lint) | 6 | Sonnet | E1-7, E5-1 | Integration tested (PR #7) | Integration test against a local container |
-| E5-4 | `bluegreen_fip_v1` steps B1–X1, W1–W10, S1–S10 per renewal-workflow.md | 4 | Opus | E5-1..3 | In progress (WIP on claude/ovlm-renewal) | Unit tests with the fake per step and per failure row; reviews by 7 and 8 |
-| E5-5 | Gates G1–G3, approval evidence re-validation, typed confirmation | 4 | Opus | E3-2, E5-4 | To do | Security tests |
+| E5-4 | `bluegreen_fip_v1` steps B1–X1, W1–W10, S1–S10 per renewal-workflow.md | 4 | Opus | E5-1..3 | Integration tested, reviewed, fixes verified (PR #8) | Unit tests with the fake per step and per failure row; reviews by 7 and 8 |
+| E5-5 | Gates G1–G3, approval evidence re-validation, typed confirmation | 4 | Opus | E3-2, E5-4 | Integration tested, reviewed (PR #8) | Security tests |
 | E5-6 | Acceptance scenario + failure scenarios on Felcloud (ADR-0007) | 9 + ozar-dev | Sonnet | E5-4 | To do | Evidence stored; status "lab validated" |
 
 ### E6 — Operator UI (HTMX)
@@ -92,8 +92,8 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 |---|---|---|---|---|---|---|
 | E6-1 | Layout, auth pages, TOTP enrolment | 5 | Sonnet | E3-1 | Integration tested (PR #4) | UI tests (HTTP-level) |
 | E6-2 | Inventory list + VM details (observed vs desired) | 5 | Sonnet | E2 | Integration tested (PR #4) | |
-| E6-3 | Readiness view; renewal plan; approvals with hash inputs and diff | 5 | Sonnet | E4, E5-5 | To do | |
-| E6-4 | Run timeline with step evidence, available actions, audit view | 5 | Sonnet | E5 | To do | |
+| E6-3 | Readiness view; renewal plan; approvals with hash inputs and diff | 5 | Sonnet | E4, E5-5 | Integration tested (PR #8) | |
+| E6-4 | Run timeline with step evidence, available actions, audit view | 5 | Sonnet | E5 | Integration tested (PR #8) | |
 
 ### Later (V1, not in the MVP)
 

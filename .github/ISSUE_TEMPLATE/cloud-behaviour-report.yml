@@ -1,0 +1,83 @@
+name: Cloud behaviour report
+description: Tell us how your OpenStack cloud behaves, so OVLM's assumptions can be checked against more than one cloud.
+labels: ["kind/cloud-behaviour", "status/open"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        OVLM was designed against one real cloud ([EXP-01](https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/experiments/EXP-01-design-assumptions-on-felcloud.md)).
+        Other clouds differ. Reports like this are among the most useful contributions today. You do not need to
+        run OVLM.
+
+        **Use read-only commands, or a disposable project.** If a check creates, changes or deletes anything, say so
+        and make sure it was a test project.
+        **Never paste secrets, tokens, real hostnames, IP addresses, project IDs or unredacted output.**
+  - type: input
+    id: releases
+    attributes:
+      label: OpenStack release(s)
+      placeholder: "2025.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment method
+      options:
+        - kolla-ansible
+        - openstack-ansible
+        - charmed
+        - vendor distribution or public cloud
+        - manual / other
+        - I do not know (I am a user of the cloud)
+    validations:
+      required: true
+  - type: checkboxes
+    id: topics
+    attributes:
+      label: What this report covers
+      options:
+        - label: Policy defaults (what a `member` or `reader` can and cannot do; `enforce_new_defaults`)
+        - label: Cinder backend and volume types (default type, detach and attach behaviour)
+        - label: Floating IPs (pool size, re-association time, behaviour when moved)
+        - label: Console output and cloud-init (`console log`, `user_data` visibility)
+        - label: Application credentials (roles, expiry, access rules)
+        - label: Quotas and limits visible to a non-admin
+        - label: API microversions
+        - label: Something else (describe below)
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What you observed
+      description: For each topic, the command or API call, the result, and whether it matches what the design assumes. Redact.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: differs
+    attributes:
+      label: Where it differs from the OVLM design
+      description: Link the document and section (for example `docs/openstack-integration.md`, or the security model section 4).
+  - type: dropdown
+    id: scope
+    attributes:
+      label: How was this observed?
+      options:
+        - On a production cloud, read-only commands
+        - On a test or lab project
+        - From documentation or the cloud's operator only (not run by me)
+    validations:
+      required: true
+  - type: textarea
+    id: unsure
+    attributes:
+      label: What you are not sure about or did not test
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction
+      options:
+        - label: This issue contains no secrets, tokens, real hostnames, IP addresses, project IDs, or customer or person names.
+          required: true

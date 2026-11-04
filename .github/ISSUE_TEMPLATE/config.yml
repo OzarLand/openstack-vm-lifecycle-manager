@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Ask the community (OzarLand Discussions)
+    url: https://github.com/OzarLand/ozarland/discussions
+    about: Questions, ideas and open-ended conversations belong in Discussions, not in issues.
+  - name: Share an experience report
+    url: https://github.com/OzarLand/ozarland/discussions/categories/experience-reports
+    about: Upgrades, incidents, migrations and architecture choices, told first-hand.
+  - name: Vulnerability, or a secret or real hostname published by mistake
+    url: https://github.com/OzarLand/openstack-vm-lifecycle-manager/security/advisories/new
+    about: Do not open a public issue. Use private vulnerability reporting.
+  - name: Vulnerability in OpenStack itself
+    url: https://security.openstack.org/
+    about: Upstream vulnerabilities go to the OpenStack Vulnerability Management Team.

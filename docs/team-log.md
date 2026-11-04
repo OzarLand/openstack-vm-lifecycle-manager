@@ -816,3 +816,13 @@ operator wording, now added. **Verified:** lint clean, 1127 unit and 414 integra
   (X1 keeps the snapshot, probe identity contract, `sudo NOPASSWD` open for security). 1131 unit tests pass.
 - **Credential store agent:** blocked on a permission prompt (a harmless edit of `Makefile`, `compose.yaml` and the
   worker entrypoint, which wire the KEK). It needs the maintainer's approval in its own conversation.
+
+## PR #8 merged — 2026-11-04 23:20 UTC
+
+[OzarLand/openstack-vm-lifecycle-manager#8](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/8) is
+merged: the renewal strategy `bluegreen_fip_v1`, the renewal UI, the worker image and the Felcloud lab kit. CI was
+green. The independent verification (Opus) of the REN-1..8 fixes says **ready to merge**, with four extra probes on
+the REN-1 paths passing ([verification-renewal-fixes.md](reviews/verification-renewal-fixes.md)).
+
+**Remaining before the Felcloud acceptance campaign:** the encrypted credential store. Its agent has been blocked since
+22:21 UTC on a permission prompt that only the maintainer can approve.
