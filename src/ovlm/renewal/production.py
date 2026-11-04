@@ -421,6 +421,12 @@ def identify(answer: HttpAnswer, candidates: Mapping[str, str | None]) -> str | 
 class RunnerLike(Protocol):
     def prepare_automation(self, spec: AutomationSpec, workflow_id: str) -> PreparedAutomation: ...
 
+    def adopt_checkout(self, spec: AutomationSpec, workflow_id: str) -> PreparedAutomation | None:
+        """The run-level checkout B6 left on disk (``automation.run_root``, tmpfs: it survives a worker *process*
+        restart, not a container restart), re-verified locally (HEAD == SHA, lint, pins); ``None`` if absent.
+        Never contacts the git host."""
+        ...
+
     def run_phase(
         self, prepared: PreparedAutomation, req: PhaseRequest, *, fence: FenceLike | None = None
     ) -> PhaseOutcome: ...
@@ -505,16 +511,35 @@ class RunnerGuestPort:
         )  # fmt: skip
 
     def _prepared_for(self, run_id: str) -> PreparedAutomation:
+        """B6's checkout for this run. Another process prepared it (a restarted worker): re-adopt the checkout on
+        disk, re-verified locally. If it is gone, re-clone only **outside** the downtime window: nothing contacts the
+        git host inside it (automation-contract.md 2); inside it the step stops for a human."""
         with self._lock:
             prepared = self._prepared.get(run_id)
-        if (
-            prepared is None
-        ):  # another worker process prepared it (restart): one more verified clone, same SHA
-            resolved = self._resolved(run_id)
-            prepared = self.runner.prepare_automation(self._spec(run_id, resolved), run_id)
-            with self._lock:
-                self._prepared[run_id] = prepared
+        if prepared is not None:
+            return prepared
+        resolved = self._resolved(run_id)
+        spec = self._spec(run_id, resolved)
+        prepared = self.runner.adopt_checkout(spec, run_id)
+        if prepared is None:
+            if self._in_outage(run_id):
+                raise AutomationError(
+                    "the run's verified checkout is gone (worker container restarted?); re-cloning would contact "
+                    "the git host inside the downtime window",
+                    Classification.NEEDS_HUMAN,
+                )
+            prepared = self.runner.prepare_automation(spec, run_id)
+        with self._lock:
+            self._prepared[run_id] = prepared
         return prepared
+
+    def _in_outage(self, run_id: str) -> bool:
+        with self.engine.connect() as c:
+            row = c.execute(
+                text("SELECT phase, downtime_started_at IS NOT NULL AND downtime_ended_at IS NULL "
+                     "FROM workflow_run WHERE id = :r"), {"r": run_id},
+            ).one()  # fmt: skip
+        return bool(row[1]) or row[0] in ("window", "restore")
 
     # -- GuestPort ---------------------------------------------------------------------------------------
 
@@ -821,6 +846,24 @@ class _LazyRunner:
 
     def prepare_automation(self, spec: AutomationSpec, workflow_id: str) -> PreparedAutomation:
         prepared: PreparedAutomation = self._get().prepare_automation(spec, workflow_id)
+        return prepared
+
+    def adopt_checkout(self, spec: AutomationSpec, workflow_id: str) -> PreparedAutomation | None:
+        """Local re-verification with the runner's own checks. Uses two private helpers of the automation module
+        (its run-dir naming and ``_verify``): a public ``reverify`` there would be cleaner (reported)."""
+        from ovlm.automation import checkout as co
+        from ovlm.automation import runner as runner_module
+
+        runner = self._get()
+        dest = runner.cfg.run_root / runner_module._safe_component(workflow_id) / "_checkout"  # noqa: SLF001
+        if not dest.is_dir():
+            return None
+        head = co._git(["rev-parse", "HEAD"], dest, runner.cfg.clone, retryable=False)  # noqa: SLF001 - local
+        if head != spec.ref:
+            raise AutomationError(
+                "the checkout on disk is not at the pinned SHA", Classification.NEEDS_HUMAN
+            )
+        prepared: PreparedAutomation = runner._verify(spec, workflow_id, dest, head, None, None)  # noqa: SLF001
         return prepared
 
     def run_phase(

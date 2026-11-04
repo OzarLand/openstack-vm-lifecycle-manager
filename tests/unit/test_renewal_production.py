@@ -461,3 +461,53 @@ def test_bootstrap_user_data_holds_the_guest_key_and_a_fresh_host_key() -> None:
     other = g.bootstrap("run", "injected")
     assert other.public_key != boot.public_key  # one key per call (per run)
     assert "ssh_keys" not in yaml.safe_load(g.bootstrap("run", "console").user_data)
+
+
+# --- the run-level checkout after a worker restart -----------------------------------------------------------------
+
+
+class _Runner:
+    def __init__(self, on_disk: bool) -> None:
+        self.on_disk, self.cloned, self.adopted = on_disk, 0, 0
+
+    def prepare_automation(self, spec: Any, workflow_id: str) -> Any:
+        self.cloned += 1
+        return object()
+
+    def adopt_checkout(self, spec: Any, workflow_id: str) -> Any:
+        self.adopted += 1
+        return object() if self.on_disk else None
+
+
+class _CheckoutPort(RunnerGuestPort):
+    def __init__(self, runner: _Runner, outage: bool) -> None:
+        super().__init__(None, runner, _Static(), ssh=None, http=None)  # type: ignore[arg-type]
+        self.outage = outage
+
+    def _resolved(self, run_id: str) -> Mapping[str, Any]:
+        return {}
+
+    def _spec(self, run_id: str, resolved: Mapping[str, Any]) -> Any:
+        return object()
+
+    def _in_outage(self, run_id: str) -> bool:
+        return self.outage
+
+
+@pytest.mark.parametrize(
+    ("on_disk", "outage", "cloned"), [(True, True, 0), (True, False, 0), (False, False, 1)]
+)
+def test_a_restarted_worker_reuses_the_checkout_and_clones_only_outside_the_outage(
+    on_disk: bool, outage: bool, cloned: int
+) -> None:
+    runner = _Runner(on_disk)
+    port = _CheckoutPort(runner, outage)
+    first = port._prepared_for("run")  # noqa: SLF001
+    assert port._prepared_for("run") is first and runner.cloned == cloned and runner.adopted == 1  # noqa: SLF001
+
+
+def test_no_git_host_contact_inside_the_downtime_window() -> None:
+    runner = _Runner(on_disk=False)
+    with pytest.raises(AutomationError, match="inside the downtime window") as exc:
+        _CheckoutPort(runner, outage=True)._prepared_for("run")  # noqa: SLF001
+    assert exc.value.classification.value == "needs_human" and runner.cloned == 0

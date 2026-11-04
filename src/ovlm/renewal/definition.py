@@ -564,11 +564,17 @@ class BlueGreenFipV1(WorkflowDefinition):
 
 
 def _write_truth(c: Connection, run_id: str, truth: Mapping[str, Any]) -> None:
+    """The current-truth panel. A W4 snapshot of the run is named in it (renewal-workflow.md 4: "the snapshot id is
+    recorded in current_truth"), with its ledger state (``present``; ``orphan`` when W4 failed)."""
+    out = dict(truth)
+    snap = snapshot_row(c, run_id)
+    if snap is not None and snap["openstack_id"]:
+        out["snapshot"] = {"id": snap["openstack_id"], "ledger_state": snap["state"]}
     c.execute(
         text(
             "UPDATE workflow_run SET current_truth = CAST(:t AS jsonb), current_truth_at = now() WHERE id = :r"
         ),
-        {"r": run_id, "t": json.dumps(dict(truth), default=str)},
+        {"r": run_id, "t": json.dumps(out, default=str)},
     )
 
 

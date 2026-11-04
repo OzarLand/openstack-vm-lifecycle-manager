@@ -178,6 +178,7 @@ class RunnerDouble:
     def __init__(self, guest: FakeGuest, keys: GuestKeys, root: Path) -> None:
         self.guest, self.keys, self.root = guest, keys, root
         self.prepared: list[str] = []
+        self.adopted: list[str] = []
         self.requests: list[PhaseRequest] = []
 
     def prepare_automation(self, spec: AutomationSpec, workflow_id: str) -> PreparedAutomation:
@@ -188,6 +189,15 @@ class RunnerDouble:
         for phase in Phase:
             if phase not in optional or phase.value in self.guest.phases:
                 (checkout / spec.playbook_dir / f"{phase.value}.yml").write_text("- hosts: all\n")
+        return PreparedAutomation(
+            spec, workflow_id, checkout, spec.ref, "none", "2.19.4", LintResult()
+        )
+
+    def adopt_checkout(self, spec: AutomationSpec, workflow_id: str) -> PreparedAutomation | None:
+        checkout = self.root / workflow_id / "_checkout"
+        if not checkout.is_dir():
+            return None
+        self.adopted.append(workflow_id)
         return PreparedAutomation(
             spec, workflow_id, checkout, spec.ref, "none", "2.19.4", LintResult()
         )

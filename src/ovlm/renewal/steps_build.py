@@ -141,6 +141,12 @@ class Preflight(RStep):
         if facts.recomputed_hash is None:
             problems.append("plan sources (profile version or policy) are missing")
         expires = self.d.cloud.write_credential_expires_at(self.project(ctx))
+        with ctx.read() as c:
+            now = now_db(c)
+        if not credential_ok(
+            expires, 0.0, now
+        ):  # an expired write credential blocks new runs (security-model 4.4)
+            problems.append("the write credential has expired")
         return {
             "problems": problems,
             "g1": g1,

@@ -163,6 +163,7 @@ def test_snapshot_kept_after_a_restore_and_named_in_the_audit(world_factory: Any
         "SELECT after FROM audit_event WHERE run_id = :r AND action = 'restore.auto'", r=w.run_id
     )
     assert audit[0]["after"]["snapshot_id"] == sid
+    assert w.run()["current_truth"]["snapshot"] == {"id": sid, "ledger_state": "present"}
 
 
 def test_lost_create_response_is_adopted_by_name_never_created_twice(world_factory: Any) -> None:
@@ -208,3 +209,41 @@ def test_needs_human_when_two_snapshots_carry_the_name(world_factory: Any) -> No
     w.drive()
     parked(w, "duplicate_resource")
     assert "create_volume_snapshot" not in w.cloud.calls
+
+
+def test_rollback_consequence_names_the_snapshot_only_once_w4_succeeded(world_factory: Any) -> None:
+    from sqlalchemy.orm import Session
+
+    from ovlm.renewal.service import _snapshot_id, available_actions
+
+    w = world_factory(snapshot=True, policy={"auto_restore": False})
+    w.guest.failures["start_service"] = ["retryable"] * 3
+    to_cutover(w)
+    w.drive()
+    parked(w, "auto_restore_disabled")
+    (sid,) = snaps(w)
+    resolved = w.q("SELECT resolved FROM renewal_plan WHERE id = :p", p=w.ids["plan"])[0][
+        "resolved"
+    ]
+    with Session(w.api) as s:
+        assert _snapshot_id(s, w.run_id) == sid
+    actions = available_actions(w.run(), w.open_step(), resolved, sid)
+    rollback = next(a for a in actions if a["action"] == "rollback")
+    assert f"snapshot {sid} is kept" in rollback["effect"]
+    none = next(
+        a
+        for a in available_actions(w.run(), w.open_step(), resolved, None)
+        if a["action"] == "rollback"
+    )
+    assert "no snapshot exists" in none["effect"]
+
+
+def test_b1_refuses_an_expired_write_credential(world: World) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    w = world
+    w.port.credential_expires = datetime.now(UTC) - timedelta(minutes=1)
+    w.start()
+    assert w.drive()["state"] == "failed", explain(w)
+    pre = next(s for s in w.steps() if s["step_key"] == "preflight")
+    assert "the write credential has expired" in pre["error"]["problems"]

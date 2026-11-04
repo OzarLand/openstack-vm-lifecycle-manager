@@ -74,7 +74,8 @@ class Harness:
         self.thread: threading.Thread | None = None
 
     def start_worker(self) -> Worker:
-        runner = RunnerDouble(self.w.guest, self.keys, self.tmp / f"checkout-{len(self.runners)}")
+        # the same run_root (tmpfs in the container): B6's checkout survives a worker process restart
+        runner = RunnerDouble(self.w.guest, self.keys, self.tmp / "checkout")
         self.runners.append(runner)
         store = ArtifactStore(RunnerConfig(run_root=self.tmp / "run"))
         guest = RunnerGuestPort(self.w.worker, runner, self.creds, ssh=SshDouble(self.keys), http=self.http,
@@ -153,7 +154,7 @@ def test_full_renewal_through_the_worker_loop_with_a_crash_in_the_window(
         first_owner = st["lease_owner"]
         assert w.run()["downtime_started_at"] is not None  # we are inside the outage
 
-        h.start_worker()  # restarted worker: new lease owner, new adapter (empty checkout cache)
+        h.start_worker()  # restarted worker: new lease owner, new adapter (empty checkout cache: it re-adopts B6's checkout from disk)
         h.wait("G3", lambda: h.waiting_at("await_retirement"))
         w.approve("retirement", decider="ap2")
         h.wait("completion", lambda: w.run()["state"] == "completed")
@@ -180,10 +181,8 @@ def test_full_renewal_through_the_worker_loop_with_a_crash_in_the_window(
     assert w.cloud._servers[w.ids["blue"]].deleted  # noqa: SLF001
     assert cloud.violations == []
     # the production adapter's guest side
-    assert [len(r.prepared) for r in h.runners] == [
-        1,
-        1,
-    ]  # the restarted worker re-prepared (same SHA)
+    # one clone per run (B6); the restarted worker re-adopted the checkout on disk: no git inside the window
+    assert [(len(r.prepared), len(r.adopted)) for r in h.runners] == [(1, 0), (0, 1)]
     phases = [(r.phase.value, r.target.role) for runner in h.runners for r in runner.requests]
     assert (
         ("quiesce", "old") in phases
