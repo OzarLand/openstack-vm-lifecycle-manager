@@ -727,3 +727,18 @@ The maintainer said "reprends". Per [HANDOFF.md](HANDOFF.md):
 - PR #7 opened;
 - a short, fresh Opus session verifies the fixes against the findings before the merge;
 - the renewal-strategy agent resumes.
+
+## PR #7 merged — 2026-11-04 20:10 UTC
+
+[OzarLand/openstack-vm-lifecycle-manager#7](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/7) is
+merged: the write client, RBAC, the Ansible runner, readiness, and the engine and security review fixes. CI was green,
+**including the first run of the runner's integration tests against a real Ubuntu container over pinned SSH**.
+
+- **CI caught a real bug** that the root sandboxes had hidden. A non-root worker could not run
+  `ansible --version`, because Ansible needs a writable `HOME`, so every Ansible run would have failed in production.
+  Agent 1 reproduced it as a non-root user and fixed it. The working rules now require running the unit tests as
+  non-root.
+- **Independent verification of the fixes** (fresh Opus session, $2.65): 20 of 21 fixed; SEC-C-8 partial (needs a
+  `project_connection` table, tracked). The report is
+  [verification-review-fixes-wave3.md](reviews/verification-review-fixes-wave3.md). A short, focused verifier cost a
+  fraction of a long Fable re-review.
