@@ -261,6 +261,44 @@ choice the contract left open, or is stricter than the text, it is recorded here
 | Lint vs the reference workload | `check_mode: false` on the read-only probes of the reference roles is flagged (`check_mode_forced`) and needs an audited waiver (`roles/*/tasks/*.yml`). The only exempt pattern is the controller-side task that writes `ovlm_result_path` (`delegate_to: localhost`). |
 | Pin check | `requirements.yml` is checked (exact versions; git roles need a SHA) and every pinned collection must already be present at that version in `collections_paths` or in the repo's `collections/`. Nothing is downloaded. |
 | Fence | `Fence.check("automation:spawn:<phase>")` immediately before the spawn; the revoke callback stops the process tree at once. `lease_needed(timeout)` gives the lease a step must cover. |
-| Signalling another OS user | The worker can signal `ovlm-ansible` processes only with privilege; `signal_prefix` (e.g. `sudo -n -u ovlm-ansible`) is prepended to `kill`. The runner's own job/idle timeouts need no cross-user signal. Deployment must provide one of the two. |
+| Signalling another OS user | The worker can signal `ovlm-ansible` processes only with privilege. The container image gives the worker `CAP_KILL` (see "Separate OS user in the container" below), so a direct `kill` works; `signal_prefix` (e.g. `sudo -n -u ovlm-ansible`) remains for installations that cannot grant the capability and use the sudoers alternative. The runner's own job/idle timeouts need no cross-user signal. |
 | Run dir ownership | Worker root (or CAP_CHOWN): run dir chowned to `ovlm-ansible`, 0700/0600. Otherwise group `ovlm-ansible` with 0770/0660 and ancestors 0710; the KEK stays 0400 and owned by the worker user either way. |
 | Artefacts | Table `automation_run` (migration `automation_0001`). Restricted columns `log`, `events`, `diff`; `diff` only with `store_diffs` (also a table CHECK); purge sets the restricted columns to NULL after `artifact_expires_at`; no DELETE grant. |
+| Settings | `automation.*` in `Settings` (`src/ovlm/config/settings.py`): `run_root`, `require_tmpfs`, `ansible_bin_dir`, `collections_paths`, `run_user`, `signal_prefix`, per-phase `timeout`/`idle_timeout`/`max_timeout`, `result_max_bytes`, `log_max_bytes`, `artifact_retention_days`, `allowed_repos`, `git_ssh_key_file` + `git_ssh_known_hosts_file`. `ovlm.automation.config.runner_config(settings)` builds the `RunnerConfig`; `ovlm.config` imports nothing from `automation`. Secrets are file paths, never values. Validation: unknown phases, non-positive or inconsistent timeouts (default above `max_timeout`, idle above timeout), relative paths, malformed OS user names, repository allowlist entries that are not `https://`/`ssh://` prefixes or carry credentials, a deploy key without its `known_hosts`. In production (no `development_mode`) a worker refuses `run_user = null`. |
+| Start-up sweep | `Worker._start_workflow` calls `sweep_orphans(run_root, max_age)` first (before `register_worker`, the registry sweepers and any claim). `max_age` is the largest phase ceiling plus the kill grace and 60 s. A failure to sweep is logged and does not stop the worker. |
+| Image and collections | Two images from one Dockerfile: target `runtime` (api, migrate) has no ansible, ansible-runner or collections; target `worker` adds the `automation` group from `requirements-worker.lock` (`make lock` writes both lock files from `uv.lock`; `make lock-check` verifies both). `ansible.posix` is installed at build time into `/opt/ovlm/collections` from a pinned **commit** (the tag named in `ansible/requirements.yml`; the build fails if version or commit disagree) and the runner's `collections_paths` default points there. Galaxy is never contacted, at build or at run time. `make smoke` proves both images (`tests/smoke/`). |
+| Restricted artefacts | The read rule is `ovlm.auth.authz.can_read_restricted` (the `automation_artefact.view` matrix row: `operator`/`admin` in the run's project or global; `viewer`/`approver` never). `GET /api/v1/automation-runs/{id}/artefacts` (`ovlm.api.routes_automation`) reads `automation_run` as `ovlm_api` and does not import `ovlm.automation`: 404 outside the caller's scope and for unknown runs, 403 for a visible-but-not-allowed caller, every read and every refusal audited (the content is never audited). The diff is returned only when the profile opted in. |
+
+### Separate OS user in the container (decision and risk)
+
+**Problem.** The worker must start ansible-runner as `ovlm-ansible` (uid 10002) so that playbook code cannot read the
+worker's files (DB secret, KEK, other runs), yet the worker itself must not run as root. The compose hardening is
+`cap_drop: ALL` and `no-new-privileges`, which rules out `sudo` and any setuid helper.
+
+**Choice: ambient capabilities, no setuid binary.** `docker/worker-entrypoint.sh` starts as container root with four
+capabilities (`SETUID`, `SETGID`, `SETPCAP`, `KILL`), and `setpriv` drops to uid/gid `ovlm` (10001) with the
+supplementary group `ovlm-ansible` (10002), trims the bounding set to `SETUID, SETGID, KILL` and makes those three
+*ambient*, then `exec`s `ovlm worker`. Nothing runs as root afterwards; `SETPCAP` is gone from the bounding set. With
+them the worker can (a) `Popen(user=..., group=...)` the runner as `ovlm-ansible` and (b) signal that user's processes
+directly, so `signal_prefix` stays empty. The run directory is shared through the group (`owned=False` layout: ancestors
+0710, run dir 0770/files 0660, group `ovlm-ansible`; the worker is a member, so it needs no `CAP_CHOWN`); `run_root` is
+a tmpfs `0710 ovlm:ovlm-ansible`. The KEK stays `0400` owned by `ovlm`.
+Compose sets `user: "0:0"` for the worker only; started as `ovlm` without capabilities the worker still runs, but the
+runner refuses to start ansible (it cannot switch user).
+
+**Risk.** `CAP_SETUID` is not restricted to one uid: a *compromised worker process* could `setuid(0)` or to any uid in
+the container. It stays inside the container's other limits (read-only rootfs, no other capabilities, no
+`no-new-privileges` escape, no secrets other than the worker's own), and the worker already holds everything that
+matters in the container (DB worker role, KEK), so the capability adds little for an attacker who has code execution
+in the worker. What the design protects is the other direction: playbook code running as `ovlm-ansible` cannot read the
+worker's secrets. `CAP_KILL` lets the worker signal any process in its PID namespace (the container's), which is the
+minimum for stopping the runner's process tree (the runner kills by process group plus `/proc` descendants).
+Mitigations kept: one process namespace per container, no `CAP_SYS_PTRACE`, the playbook user cannot signal the worker
+(different uid, no capabilities), and `make smoke` asserts the worker's `CapEff/CapAmb/CapPrm/CapBnd` are exactly these three.
+
+**Rejected alternatives.** *sudoers rule* (`ovlm ALL=(ovlm-ansible) NOPASSWD: /opt/venv/bin/ansible-runner *`, `kill`
+for `signal_prefix`): needs a setuid `sudo` in the image and dropping `no-new-privileges`, and `*` in a sudoers argument
+list is itself an injection surface; it remains the way to do it on a bare-metal/VM installation without the capability
+(set `automation.signal_prefix`, and run the worker as a member of group `ovlm-ansible`). *Root worker that drops the
+user per child*: root with a full runner code path is the larger blast radius. *File capabilities on a helper*: blocked
+by `no-new-privileges`.

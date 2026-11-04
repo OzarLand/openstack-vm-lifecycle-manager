@@ -179,6 +179,17 @@ def action_scopes(principal: Principal, action: Action) -> frozenset[str]:
     return frozenset({GLOBAL}) if GLOBAL in scopes else frozenset(scopes)
 
 
+def can_read_restricted(grants: Collection[tuple[str, str]], project_scope: str) -> bool:
+    """May a holder of ``grants`` (``(role, scope)`` pairs) read the restricted automation artefacts (log, events,
+    diff) of a run in ``project_scope``? ``operator`` or ``admin`` in that project or globally; ``viewer`` and
+    ``approver`` never (security-model.md 5.2, SEC-R-3). Reads the matrix row, so the rule has one home. Token
+    restrictions are not decided here: callers with a :class:`Principal` use :func:`authorize_action`."""
+    return any(
+        role_allows(role, Action.AUTOMATION_ARTEFACT_VIEW) and scope_covers(granted, project_scope)
+        for role, granted in grants
+    )
+
+
 def project_scope_of(project_connection_id: UUID | str) -> str:
     return f"project:{project_connection_id}"
 

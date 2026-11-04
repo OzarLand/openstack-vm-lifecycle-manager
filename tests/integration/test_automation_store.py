@@ -11,8 +11,9 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError, ProgrammingError
 
+from ovlm.auth.authz import can_read_restricted
 from ovlm.automation.model import RunnerConfig, RunRecord
-from ovlm.automation.store import NEVER_EXPORT_COLUMNS, ArtifactStore, can_read_restricted
+from ovlm.automation.store import NEVER_EXPORT_COLUMNS, ArtifactStore
 from tests.integration.workflow.conftest import WfDb, drive, wf  # noqa: F401
 from tests.integration.workflow.dummy import plan_step
 

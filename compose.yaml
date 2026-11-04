@@ -66,15 +66,28 @@ services:
 
   worker:
     <<: *ovlm
+    image: ovlm-worker:dev              # ansible, ansible-runner and the pinned collections live only in this image
+    build:
+      context: .
+      target: worker
     command: ["worker"]
     init: true                          # minimal init: signal forwarding and reaping
+    # Starts as container root with four capabilities; the entrypoint drops to uid ovlm and keeps only
+    # CAP_SETUID/SETGID/KILL (ambient) so the worker can run ansible-runner as `ovlm-ansible` and stop its tree.
+    # SETPCAP is needed once, by the launcher, to trim the bounding set. Nothing runs as root afterwards.
+    # (automation-contract.md section 11.) no-new-privileges stays on: no setuid binary, no sudo.
+    user: "0:0"
+    cap_add: [SETUID, SETGID, SETPCAP, KILL]
     environment:
       <<: *ovlm-env
       OVLM_DB__PASSWORD_FILE: /run/secrets/db_worker_password
       OVLM_HTTP__METRICS_HOST: 0.0.0.0
+      OVLM_AUTOMATION__RUN_ROOT: /run/ovlm
+      OVLM_AUTOMATION__REQUIRE_TMPFS: "true"
+      OVLM_AUTOMATION__RUN_USER: ovlm-ansible
     secrets: [db_worker_password]
     tmpfs:
-      - /run/ovlm:mode=0700,uid=10001,gid=10001   # automation.run_root (later epics)
+      - /run/ovlm:mode=0710,uid=10001,gid=10002   # automation.run_root: memory only; group ovlm-ansible may traverse
     stop_grace_period: 40s
     depends_on:
       migrate: {condition: service_completed_successfully}

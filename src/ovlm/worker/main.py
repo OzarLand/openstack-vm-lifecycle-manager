@@ -89,10 +89,27 @@ class Worker:
         """Once per process: register, then run startup sweepers *before* the first claim (SRE-R-5)."""
         if self.workflow is None:
             return
+        self._sweep_automation_orphans()
         self.workflow.register_worker(__version__)
         for sweeper in self.workflow.registry.sweepers:
             sweeper()
         self._started = True
+
+    def _sweep_automation_orphans(self) -> None:
+        """Wipe run directories (secrets) a killed worker left behind and stop their processes, before any claim
+        (automation-contract.md sections 5 and 8). A failure is logged, not fatal: it must not take the worker down."""
+        from ovlm.automation.config import orphan_max_age, runner_config
+        from ovlm.automation.rundir import sweep_orphans
+
+        try:
+            removed = sweep_orphans(
+                self.settings.automation.run_root, orphan_max_age(runner_config(self.settings))
+            )
+        except Exception:
+            log.exception("automation orphan sweep failed")
+            return
+        if removed:
+            log.warning("removed orphan automation run directories", extra={"count": len(removed)})
 
     def _workflow_tick(self) -> None:
         wf = self.workflow
