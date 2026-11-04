@@ -45,6 +45,7 @@ markers = ["integration: needs a real PostgreSQL (OVLM_TEST_DATABASE_URL)"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+extend-exclude = ["ansible"]  # workload code, linted by ansible/tests/run.sh
 
 [tool.ruff.lint]
 ignore = ["E501"]
