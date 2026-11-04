@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Row, Select, and_, any_, literal, or_, select
+from sqlalchemy import Row, Select, and_, any_, false, literal, or_, select
 from sqlalchemy.orm import Session
 
 from ovlm.inventory.tables import OBSERVATION_STATUSES, OBSERVED, REVISIONS, sync_run
@@ -36,6 +36,18 @@ _NATIVE_STATUS = {
 
 class InvalidCursorError(ValueError):
     pass
+
+
+#: Project scoping (security-model.md 3.3): ``None`` = every project (global binding), otherwise the set of
+#: ``project_connection`` ids the caller may see (``ovlm.auth.authz.visible_projects``). An empty set sees nothing.
+Projects = Collection[UUID] | None
+
+
+def scoped(stmt: Select[Any], column: Any, projects: Projects) -> Select[Any]:
+    """Restrict ``stmt`` to rows whose ``column`` (a project_connection id) is in ``projects``."""
+    if projects is None:
+        return stmt
+    return stmt.where(column.in_(list(projects))) if projects else stmt.where(false())
 
 
 @dataclass(frozen=True)
@@ -107,13 +119,14 @@ def list_observed(
     exclude_openstack_ids: Collection[str] | None = None,
     limit: int | None = None,
     cursor: str | None = None,
+    projects: Projects = None,
 ) -> Page:
     """``status`` is the observation status (``present``, ``gone``, ``unknown``) or, for other values, the
     resource's own status (for example a server's ``ACTIVE``). ``tag`` applies to servers and floating IPs.
     ``openstack_ids`` / ``exclude_openstack_ids`` restrict to, or exclude, a known set (the ``registered`` filter)."""
     tbl = OBSERVED[resource]
     n = clamp_limit(limit)
-    stmt = select(tbl)
+    stmt = scoped(select(tbl), tbl.c.project_connection_id, projects)
     if project is not None:
         stmt = stmt.where(tbl.c.project_connection_id == project)
     if status is not None:
@@ -133,15 +146,22 @@ def list_observed(
     return _page(list(session.execute(stmt)), n, _observed_dict)
 
 
-def get_observed(session: Session, resource: str, row_id: UUID) -> dict[str, Any] | None:
+def get_observed(
+    session: Session, resource: str, row_id: UUID, *, projects: Projects = None
+) -> dict[str, Any] | None:
+    """``None`` when absent **or** outside ``projects`` (the api answers 404 for both)."""
     tbl = OBSERVED[resource]
-    row = session.execute(select(tbl).where(tbl.c.id == row_id)).first()
+    stmt = scoped(select(tbl).where(tbl.c.id == row_id), tbl.c.project_connection_id, projects)
+    row = session.execute(stmt).first()
     return _observed_dict(row) if row else None
 
 
-def server_detail(session: Session, row_id: UUID) -> dict[str, Any] | None:
-    """The observed server with its attachments, ports and floating IPs (api-design.md section 3.2)."""
-    server = get_observed(session, "server", row_id)
+def server_detail(
+    session: Session, row_id: UUID, *, projects: Projects = None
+) -> dict[str, Any] | None:
+    """The observed server with its attachments, ports and floating IPs (api-design.md section 3.2). The related
+    rows are taken from the server's own project only."""
+    server = get_observed(session, "server", row_id, projects=projects)
     if server is None:
         return None
     project = UUID(server["project_connection_id"])
@@ -175,10 +195,14 @@ def list_revisions(
     *,
     limit: int | None = None,
     cursor: str | None = None,
+    projects: Projects = None,
 ) -> Page | None:
-    """Snapshot history, oldest first. ``None`` if the observed row does not exist."""
+    """Snapshot history, oldest first. ``None`` if the observed row does not exist or is outside ``projects``."""
     cur, rev = OBSERVED[resource], REVISIONS[resource]
-    if session.execute(select(cur.c.id).where(cur.c.id == row_id)).first() is None:
+    parent = scoped(
+        select(cur.c.id).where(cur.c.id == row_id), cur.c.project_connection_id, projects
+    )
+    if session.execute(parent).first() is None:
         return None
     n = clamp_limit(limit)
     fk = rev.c[f"observed_{resource}_id"]
@@ -247,8 +271,11 @@ def list_syncs(
     )
 
 
-def get_sync(session: Session, sync_id: UUID) -> dict[str, Any] | None:
-    row = session.execute(select(sync_run).where(sync_run.c.id == sync_id)).first()
+def get_sync(
+    session: Session, sync_id: UUID, *, projects: Projects = None
+) -> dict[str, Any] | None:
+    stmt = select(sync_run).where(sync_run.c.id == sync_id)
+    row = session.execute(scoped(stmt, sync_run.c.project_connection_id, projects)).first()
     return _sync_dict(row) if row else None
 
 
@@ -267,9 +294,13 @@ class ObservedServerRef:
     created: datetime | None
 
 
-def get_server_ref(session: Session, row_id: UUID) -> ObservedServerRef | None:
+def get_server_ref(
+    session: Session, row_id: UUID, *, projects: Projects = None
+) -> ObservedServerRef | None:
     t = OBSERVED["server"]
-    r = session.execute(select(t).where(t.c.id == row_id)).first()
+    r = session.execute(
+        scoped(select(t).where(t.c.id == row_id), t.c.project_connection_id, projects)
+    ).first()
     if r is None:
         return None
     return ObservedServerRef(
@@ -279,11 +310,15 @@ def get_server_ref(session: Session, row_id: UUID) -> ObservedServerRef | None:
 
 
 def get_servers_by_openstack_ids(
-    session: Session, ids: Collection[str]
+    session: Session, ids: Collection[str], *, projects: Projects = None
 ) -> Mapping[str, dict[str, Any]]:
-    """Observed servers by OpenStack id (across projects), for the managed-VM ``observed`` block."""
+    """Observed servers by OpenStack id, for the managed-VM ``observed`` block; pass the managed VM's own project
+    in ``projects`` so a server observed in another project is never shown."""
     if not ids:
         return {}
     t = OBSERVED["server"]
-    rows = session.execute(select(t).where(t.c.openstack_id.in_(list(ids)))).all()
+    stmt = scoped(
+        select(t).where(t.c.openstack_id.in_(list(ids))), t.c.project_connection_id, projects
+    )
+    rows = session.execute(stmt).all()
     return {r.openstack_id: _observed_dict(r) for r in rows}

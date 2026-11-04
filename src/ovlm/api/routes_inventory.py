@@ -2,14 +2,13 @@
 
 Reads the database only: the api never calls OpenStack (architecture.md section 2). Syncs are run by the worker.
 
-Authentication and RBAC come from ``ovlm.auth.deps.require_role`` (viewer for reads, operator for changes; API
-tokens need the ``operate`` scope for changes). Changes are audited with ``ovlm.audit.record`` in the request's
-transaction, with allowlisted fields.
+Authentication and RBAC come from the RBAC matrix (``ovlm.auth.authz``): ``inventory.view`` for reads,
+``registry.manage`` (operator only) for changes; API tokens need the ``operate`` scope for changes. Changes are
+audited with ``ovlm.audit.record`` in the request's transaction, with allowlisted fields.
 
-# AUTH-HOOK (E3-2): project scoping of results is not done yet. Reads accept any role holder, and list results are
-not filtered with ``ovlm.auth.authz.scopes_for``; a project-scoped viewer still sees every project, where the design
-says out-of-scope resources answer 404. Filtering needs each resource mapped to its project in the inventory and
-registry queries, so it is left for E3-2 rather than half done here.
+Project scoping (security-model.md 3.3): every query is restricted to the projects the caller may view
+(``visible_projects``); a resource outside them answers 404 exactly like a missing one. A change is checked in the
+resource's own project (``ensure_scope``): invisible -> 404, visible but not allowed -> 403.
 
 Not implemented here, on purpose (workflow engine, E5-1): ``POST /projects/{id}/syncs`` (202 run) and the host-key scan
 that registration should start (api-design.md s.3.3 says 202; this returns 201 without a scan).
@@ -28,7 +27,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from ovlm import audit
-from ovlm.auth.deps import require_role
+from ovlm.auth.authz import Action, project_scope_of, project_visible, visible_projects
+from ovlm.auth.deps import ensure_scope, get_db, require_action
 from ovlm.auth.errors import ProblemError, problem_response
 from ovlm.auth.principal import Principal
 from ovlm.config import Settings
@@ -37,9 +37,9 @@ from ovlm.inventory import service as inventory
 from ovlm.registry import service as registry
 from ovlm.registry.errors import DomainError
 
-# One dependency object per role (also keeps ruff B008 quiet). Tokens need the ``operate`` scope for changes.
-VIEWER = Depends(require_role("viewer"))
-OPERATOR = Depends(require_role("operator", token_scope="operate"))  # noqa: S106 - an API token scope name, not a secret
+# One dependency object per action (also keeps ruff B008 quiet). Tokens need the ``operate`` scope for changes.
+VIEWER = Depends(require_action(Action.INVENTORY_VIEW))
+OPERATOR = Depends(require_action(Action.REGISTRY_MANAGE))
 
 
 audit.register_entity(
@@ -114,6 +114,7 @@ def get_session(request: Request) -> Iterator[Session]:
 
 
 DB = Annotated[Session, Depends(get_session)]
+AuthDb = Annotated[Session, Depends(get_db)]  # denials are audited in their own transaction
 Limit = Annotated[int | None, Query(ge=1, le=inventory.MAX_PAGE)]
 CursorQ = Annotated[str | None, Query()]
 
@@ -136,22 +137,47 @@ def _found[T](value: T | None, code: str, what: str) -> T:
     return value
 
 
+def _not_found(code: str, what: str) -> ProblemError:
+    return ProblemError(404, code, f"{what} not found", f"No such {what.lower()}.")
+
+
+def _check(
+    request: Request,
+    db: Session,
+    who: Principal,
+    action: Action,
+    project: Any,
+    code: str,
+    what: str,
+) -> None:
+    """``action`` on a resource of ``project`` (``None``: missing): 404 if invisible or missing, 403 if visible
+    but not allowed."""
+    scope = project_scope_of(project) if project is not None else None
+    ensure_scope(request, db, who, action, scope, not_found=_not_found(code, what))
+
+
 # --- inventory ---------------------------------------------------------------------------------------------------------
 
 
 @router.get("/projects/{project_id}/syncs")
 def list_syncs(
     project_id: UUID, session: DB, limit: Limit = None, cursor: CursorQ = None,
-    _: Principal = VIEWER,
+    who: Principal = VIEWER,
 ) -> dict[str, Any]:  # fmt: skip
+    if not project_visible(visible_projects(who), project_id):
+        raise _not_found("project-not-found", "Project")
     return _cursor_guard(
         lambda: inventory.list_syncs(session, project_id, limit=limit, cursor=cursor)
     )
 
 
 @router.get("/syncs/{sync_id}")
-def get_sync(sync_id: UUID, session: DB, _: Principal = VIEWER) -> dict[str, Any]:
-    return _found(inventory.get_sync(session, sync_id), "sync-not-found", "Sync")
+def get_sync(sync_id: UUID, session: DB, who: Principal = VIEWER) -> dict[str, Any]:
+    return _found(
+        inventory.get_sync(session, sync_id, projects=visible_projects(who)),
+        "sync-not-found",
+        "Sync",
+    )
 
 
 @router.get("/servers")
@@ -163,7 +189,7 @@ def list_servers(
     registered: bool | None = None,
     limit: Limit = None,
     cursor: CursorQ = None,
-    _: Principal = VIEWER,
+    who: Principal = VIEWER,
 ) -> dict[str, Any]:
     """``status`` is the observation status (present, gone, unknown) or the server's own status (ACTIVE...)."""
     only = exclude = None
@@ -174,23 +200,26 @@ def list_servers(
     return _cursor_guard(
         lambda: inventory.list_observed(
             session, "server", project=project, status=status, tag=tag, openstack_ids=only,
-            exclude_openstack_ids=exclude, limit=limit, cursor=cursor,
+            exclude_openstack_ids=exclude, limit=limit, cursor=cursor, projects=visible_projects(who),
         )
     )  # fmt: skip
 
 
 @router.get("/servers/{server_id}")
-def get_server(server_id: UUID, session: DB, _: Principal = VIEWER) -> dict[str, Any]:
-    return _found(inventory.server_detail(session, server_id), "server-not-found", "Server")
+def get_server(server_id: UUID, session: DB, who: Principal = VIEWER) -> dict[str, Any]:
+    detail = inventory.server_detail(session, server_id, projects=visible_projects(who))
+    return _found(detail, "server-not-found", "Server")
 
 
 @router.get("/servers/{server_id}/revisions")
 def list_server_revisions(
     server_id: UUID, session: DB, limit: Limit = None, cursor: CursorQ = None,
-    _: Principal = VIEWER,
+    who: Principal = VIEWER,
 ) -> dict[str, Any]:  # fmt: skip
     page = _cursor_guard_none(
-        lambda: inventory.list_revisions(session, "server", server_id, limit=limit, cursor=cursor)
+        lambda: inventory.list_revisions(
+            session, "server", server_id, limit=limit, cursor=cursor, projects=visible_projects(who)
+        )
     )
     return _page(_found(page, "server-not-found", "Server"))
 
@@ -208,7 +237,7 @@ def _simple_resource(path: str, resource: str, what: str) -> None:
 
     def list_all(
         session: DB, project: UUID | None = None, status: str | None = None, tag: str | None = None,
-        limit: Limit = None, cursor: CursorQ = None, _: Principal = VIEWER,
+        limit: Limit = None, cursor: CursorQ = None, who: Principal = VIEWER,
     ) -> dict[str, Any]:  # fmt: skip
         return _cursor_guard(
             lambda: inventory.list_observed(
@@ -219,13 +248,13 @@ def _simple_resource(path: str, resource: str, what: str) -> None:
                 tag=tag,
                 limit=limit,
                 cursor=cursor,
+                projects=visible_projects(who),
             )
         )
 
-    def get_one(item_id: UUID, session: DB, _: Principal = VIEWER) -> dict[str, Any]:
-        return _found(
-            inventory.get_observed(session, resource, item_id), f"{resource}-not-found", what
-        )
+    def get_one(item_id: UUID, session: DB, who: Principal = VIEWER) -> dict[str, Any]:
+        found = inventory.get_observed(session, resource, item_id, projects=visible_projects(who))
+        return _found(found, f"{resource}-not-found", what)
 
     router.add_api_route(f"/{path}", list_all, methods=["GET"], name=f"list_{resource}")
     router.add_api_route(f"/{path}/{{item_id}}", get_one, methods=["GET"], name=f"get_{resource}")
@@ -267,7 +296,12 @@ class RegisterVm(BaseModel):
 
 def _service_scope(session: Session, service_id: UUID) -> str | None:
     svc = registry.get_service(session, service_id)
-    return f"project:{svc['project_connection_id']}" if svc else None
+    return project_scope_of(svc["project_connection_id"]) if svc else None
+
+
+def _service_project(session: Session, service_id: UUID) -> str | None:
+    svc = registry.get_service(session, service_id)
+    return svc["project_connection_id"] if svc else None
 
 
 def _with_etag(response: Response, body: dict[str, Any]) -> dict[str, Any]:
@@ -278,17 +312,22 @@ def _with_etag(response: Response, body: dict[str, Any]) -> dict[str, Any]:
 @router.get("/services")
 def list_services(
     session: DB, project: UUID | None = None, limit: Limit = None, cursor: CursorQ = None,
-    _: Principal = VIEWER,
+    who: Principal = VIEWER,
 ) -> dict[str, Any]:  # fmt: skip
     return _cursor_guard(
-        lambda: registry.list_services(session, project=project, limit=limit, cursor=cursor)
+        lambda: registry.list_services(
+            session, project=project, limit=limit, cursor=cursor, projects=visible_projects(who)
+        )
     )
 
 
 @router.post("/services", status_code=201)
 def create_service(
-    body: ServiceCreate, response: Response, session: DB, who: Principal = OPERATOR
-) -> dict[str, Any]:
+    body: ServiceCreate, request: Request, response: Response, session: DB, auth_db: AuthDb,
+    who: Principal = OPERATOR,
+) -> dict[str, Any]:  # fmt: skip
+    _check(request, auth_db, who, Action.REGISTRY_MANAGE, body.project_connection_id,
+           "project-not-found", "Project")  # fmt: skip
     created = registry.create_service(session, actor_id=who.user_id, **body.model_dump())
     _audit(session, who, "service.create", "service", created["id"],
            scope=f"project:{created['project_connection_id']}", after=created)  # fmt: skip
@@ -299,18 +338,19 @@ def create_service(
 
 @router.get("/services/{service_id}")
 def get_service(
-    service_id: UUID, response: Response, session: DB, _: Principal = VIEWER
+    service_id: UUID, response: Response, session: DB, who: Principal = VIEWER
 ) -> dict[str, Any]:
-    return _with_etag(
-        response, _found(registry.get_service(session, service_id), "service-not-found", "Service")
-    )
+    found = registry.get_service(session, service_id, projects=visible_projects(who))
+    return _with_etag(response, _found(found, "service-not-found", "Service"))
 
 
 @router.patch("/services/{service_id}")
 def patch_service(
-    service_id: UUID, body: ServicePatch, response: Response, session: DB,
-    if_match: Annotated[str | None, Header()] = None, who: Principal = OPERATOR,
+    service_id: UUID, body: ServicePatch, request: Request, response: Response, session: DB,
+    auth_db: AuthDb, if_match: Annotated[str | None, Header()] = None, who: Principal = OPERATOR,
 ) -> dict[str, Any]:  # fmt: skip
+    _check(request, auth_db, who, Action.REGISTRY_MANAGE, _service_project(session, service_id),
+           "service-not-found", "Service")  # fmt: skip
     version = registry.parse_if_match(if_match)
     fields = body.model_dump(exclude_unset=True)
     before = registry.get_service(session, service_id)
@@ -323,9 +363,11 @@ def patch_service(
 
 @router.delete("/services/{service_id}", status_code=204)
 def delete_service(
-    service_id: UUID, session: DB, if_match: Annotated[str | None, Header()] = None,
-    who: Principal = OPERATOR,
+    service_id: UUID, request: Request, session: DB, auth_db: AuthDb,
+    if_match: Annotated[str | None, Header()] = None, who: Principal = OPERATOR,
 ) -> Response:  # fmt: skip
+    _check(request, auth_db, who, Action.REGISTRY_MANAGE, _service_project(session, service_id),
+           "service-not-found", "Service")  # fmt: skip
     before = _found(registry.get_service(session, service_id), "service-not-found", "Service")
     registry.delete_service(session, service_id, registry.parse_if_match(if_match))
     _audit(session, who, "service.delete", "service", str(service_id),
@@ -339,13 +381,17 @@ def delete_service(
 
 @router.post("/services/{service_id}/managed-vms", status_code=201)
 def register_managed_vm(
-    service_id: UUID, body: RegisterVm, response: Response, session: DB, who: Principal = OPERATOR,
+    service_id: UUID, body: RegisterVm, request: Request, response: Response, session: DB,
+    auth_db: AuthDb, who: Principal = OPERATOR,
 ) -> dict[str, Any]:  # fmt: skip
     """Register an observed server as the service's current VM. api-design.md says this also starts a host-key scan
     run (202); that needs the workflow engine, so for now it answers 201 and the host key stays unconfirmed."""
+    _check(request, auth_db, who, Action.REGISTRY_MANAGE, _service_project(session, service_id),
+           "service-not-found", "Service")  # fmt: skip
     vm = registry.register_managed_vm(
-        session, service_id, body.observed_server_id, actor_id=who.user_id
-    )
+        session, service_id, body.observed_server_id, actor_id=who.user_id,
+        projects=visible_projects(who, Action.REGISTRY_MANAGE),
+    )  # fmt: skip
     _audit(session, who, "managed_vm.register", "managed_vm", vm["id"],
            scope=_service_scope(session, service_id), after=vm)  # fmt: skip
     session.commit()
@@ -356,20 +402,27 @@ def register_managed_vm(
 @router.get("/managed-vms")
 def list_managed_vms(
     session: DB, service: UUID | None = None, limit: Limit = None, cursor: CursorQ = None,
-    _: Principal = VIEWER,
+    who: Principal = VIEWER,
 ) -> dict[str, Any]:  # fmt: skip
     return _cursor_guard(
-        lambda: registry.list_managed_vms(session, service_id=service, limit=limit, cursor=cursor)
+        lambda: registry.list_managed_vms(
+            session, service_id=service, limit=limit, cursor=cursor, projects=visible_projects(who)
+        )
     )
 
 
 @router.get("/managed-vms/{vm_id}")
-def get_managed_vm(vm_id: UUID, session: DB, _: Principal = VIEWER) -> dict[str, Any]:
-    return _found(registry.get_managed_vm(session, vm_id), "managed-vm-not-found", "Managed VM")
+def get_managed_vm(vm_id: UUID, session: DB, who: Principal = VIEWER) -> dict[str, Any]:
+    found = registry.get_managed_vm(session, vm_id, projects=visible_projects(who))
+    return _found(found, "managed-vm-not-found", "Managed VM")
 
 
 @router.delete("/managed-vms/{vm_id}", status_code=204)
-def unregister_managed_vm(vm_id: UUID, session: DB, who: Principal = OPERATOR) -> Response:
+def unregister_managed_vm(
+    vm_id: UUID, request: Request, session: DB, auth_db: AuthDb, who: Principal = OPERATOR
+) -> Response:
+    _check(request, auth_db, who, Action.REGISTRY_MANAGE, registry.managed_vm_project(session, vm_id),
+           "managed-vm-not-found", "Managed VM")  # fmt: skip
     before = _found(registry.get_managed_vm(session, vm_id), "managed-vm-not-found", "Managed VM")
     registry.unregister_managed_vm(session, vm_id)
     _audit(session, who, "managed_vm.unregister", "managed_vm", str(vm_id),

@@ -21,6 +21,7 @@ audit.register_entity("totp", ["state"])
 audit.register_entity("stepup", ["action", "target_id", "expires_at"])
 audit.register_entity("session", ["auth_method", "reason"])
 audit.register_entity("endpoint", [])
+audit.register_entity("installation_setting", ["value", "stepup_id", "reason"])
 
 
 def unknown_user_ref(username: str) -> str:
