@@ -119,6 +119,10 @@ def test_only_the_owner_can_submit_a_password_structural() -> None:
         ("POST", "/api/v1/session"),
         ("POST", "/api/v1/session/reauth"),
         ("POST", "/account/stepup"),  # the UI form for the same reauth call
+        # The renewal forms carry the signed-in user's own password for the same single-use step-up (E6-3, E6-4).
+        ("POST", "/approvals/{approval_id}/decision"),
+        ("POST", "/renewals/runs/{run_id}/cutover-request"),
+        ("POST", "/renewals/runs/{run_id}/actions/{name}"),
     }
 
 
