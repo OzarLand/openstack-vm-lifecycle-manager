@@ -61,6 +61,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         from ovlm.auth.cli import admin_main
 
         return admin_main(args_in[1:])
+    if args_in[:1] == ["inventory"]:  # `ovlm inventory sync --cloud <name>` (E2-2); own sub-parser
+        from ovlm.inventory.cli import main as inventory_main
+
+        try:
+            return inventory_main(args_in[1:])
+        except Exception as exc:  # noqa: BLE001 - last-resort handler for the process
+            logging.getLogger("ovlm.cli").error("fatal: %s", exc, exc_info=True)
+            return 1
     parser = argparse.ArgumentParser(prog="ovlm", description="OpenStack VM Lifecycle Manager")
     parser.add_argument("--version", action="version", version=f"ovlm {__version__}")
     parser.add_argument("command", choices=["api", "worker", "migrate"])

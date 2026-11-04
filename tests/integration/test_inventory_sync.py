@@ -434,3 +434,19 @@ def test_tables_module_matches_the_migrated_schema(
     ours = {k for k in db if k[0] in {t.name for t in metadata.tables.values()}}
     assert ours == modeled, f"columns only in the migration: {sorted(ours - modeled)}"
     assert set(REVISIONS) == set(OBSERVED) == set(RESOURCES)
+
+
+def test_cli_sync_command_writes_through_the_real_path(worker_engine: Engine) -> None:
+    from ovlm.inventory.cli import sync_command
+
+    fake, _ = _world()
+    code, out = sync_command(fake, cloud="lab", engine=worker_engine)
+    assert code == 0 and out["status"] == "succeeded" and out["kind"] == "full"
+    assert len(_rows(worker_engine, "server")) == 2
+    code2, out2 = sync_command(
+        fake, cloud="lab", engine=worker_engine
+    )  # same project id: a delta now
+    assert code2 == 0 and out2["project_connection_id"] == out["project_connection_id"]
+    fake.fail("list_volumes", OpenStackError("down"))
+    code3, out3 = sync_command(fake, cloud="lab", engine=worker_engine, kind="full")
+    assert code3 == 1 and out3["status"] == "failed"
