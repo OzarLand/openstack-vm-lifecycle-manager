@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 
 from tests.integration.auth_support import ORIGIN, PASSWORD, Env, env  # noqa: F401
 
+PA, PB, PX = (str(uuid4()) for _ in range(3))  # project connection ids (scopes are UUIDs, SEC-C-8)
+
 
 def post(env: Env, c: TestClient, path: str, **kw: Any) -> Any:
     return c.post(path, headers=env.headers(c), **kw)
@@ -107,7 +109,7 @@ def test_token_cannot_exceed_owner_scope_or_90_days(env: Env) -> None:
     assert (
         c.post(
             "/api/v1/tokens",
-            json={"name": "t", "scopes": ["read"], "project_scope": "project:x"},
+            json={"name": "t", "scopes": ["read"], "project_scope": f"project:{PX}"},
             headers=h,
         ).status_code
         == 201
@@ -170,10 +172,10 @@ def test_token_scopes_gate_operator_endpoints(env: Env) -> None:
 
 def test_project_scoped_token_stays_in_its_project(env: Env) -> None:
     c, _ = env.user_client("sven", [("operator", "global")])
-    raw = mint_token(env, c, "operate", project="project:a")
+    raw = mint_token(env, c, "operate", project=f"project:{PA}")
     anon = env.client()
-    assert anon.post("/_t/project/a", headers=bearer(raw)).status_code == 200
-    assert anon.post("/_t/project/b", headers=bearer(raw)).status_code == 403
+    assert anon.post(f"/_t/project/{PA}", headers=bearer(raw)).status_code == 200
+    assert anon.post(f"/_t/project/{PB}", headers=bearer(raw)).status_code == 403
     assert anon.post("/_t/operator", headers=bearer(raw)).status_code == 200  # "any scope I hold"
 
 
@@ -182,14 +184,14 @@ def test_project_scoped_token_stays_in_its_project(env: Env) -> None:
 
 def test_require_role_lattice_and_project_scope(env: Env) -> None:
     viewer, _ = env.user_client("vic", [("viewer", "global")])
-    op_a, _ = env.user_client("opa", [("operator", "project:a")])
+    op_a, _ = env.user_client("opa", [("operator", f"project:{PA}")])
     op_g, _ = env.user_client("opg", [("operator", "global")])
     assert viewer.get("/_t/viewer").status_code == 200
     r = post(env, viewer, "/_t/operator")
     assert r.status_code == 403 and r.json()["code"] == "forbidden"
     assert r.headers["content-type"].startswith("application/problem+json")
-    assert post(env, op_a, "/_t/project/a").status_code == 200
-    assert post(env, op_a, "/_t/project/b").status_code == 403
+    assert post(env, op_a, f"/_t/project/{PA}").status_code == 200
+    assert post(env, op_a, f"/_t/project/{PB}").status_code == 403
     assert post(env, op_g, "/_t/project/anything").status_code == 200
     assert op_a.get("/_t/viewer").status_code == 200  # operator implies viewer
     assert env.client().get("/_t/viewer").status_code == 401
@@ -222,7 +224,7 @@ def test_role_binding_changes_end_sessions_and_are_audited(env: Env) -> None:
         env,
         admin,
         "/api/v1/role-bindings",
-        json={"user_id": str(xena.id), "role": "operator", "scope": "project:a"},
+        json={"user_id": str(xena.id), "role": "operator", "scope": f"project:{PA}"},
     )
     assert r.status_code == 201, r.text
     assert user.get("/api/v1/session").status_code == 401  # privilege change: new session needed
@@ -243,7 +245,7 @@ def test_role_binding_changes_end_sessions_and_are_audited(env: Env) -> None:
     )
     user = env.client()
     assert env.api_login(user, "xena").status_code == 200
-    assert post(env, user, "/_t/project/a").status_code == 200
+    assert post(env, user, f"/_t/project/{PA}").status_code == 200
     bid = r.json()["id"]
     assert (
         admin.delete(f"/api/v1/role-bindings/{bid}", headers=env.headers(admin)).status_code == 204
@@ -454,3 +456,77 @@ def test_stepup_stays_unspent_when_the_authorised_change_rolls_back(env: Env) ->
         c.post("/_t/decide-then-fail/ap-5", params={"stepup_id": step}, headers=env.headers(c))
     assert env.sql("SELECT consumed_at FROM stepup") == [(None,)]
     assert decide(env, c, step, target="ap-5").status_code == 200
+
+
+# --- binding scopes and duplicates (SEC-C-8, SEC-C-9) ---------------------------------------------------------
+
+
+def _binding(env: Env, admin: TestClient, user_id: Any, role: str, scope: str) -> Any:
+    return post(
+        env,
+        admin,
+        "/api/v1/role-bindings",
+        json={"user_id": str(user_id), "role": role, "scope": scope},
+    )
+
+
+def test_duplicate_binding_returns_the_existing_id_without_a_false_audit_row(env: Env) -> None:
+    admin, _ = env.user_client("root", [("admin", "global")])
+    env.user_client("dup", [("viewer", "global")])
+    [dup] = env.sql("SELECT id FROM app_user WHERE username='dup'")
+    first = _binding(env, admin, dup.id, "operator", f"project:{PA}")
+    assert first.status_code == 201 and first.json()["created"] is True
+    again = _binding(
+        env, admin, dup.id, "operator", f"project:{PA.upper()}"
+    )  # same scope, other case
+    assert again.status_code == 200, again.text
+    assert again.json() == {"id": first.json()["id"], "created": False}
+    rows = env.sql("SELECT id FROM role_binding WHERE user_id = :u AND role = 'operator'", u=dup.id)
+    assert [str(r.id) for r in rows] == [first.json()["id"]]
+    audited = env.sql("SELECT target_id FROM audit_event WHERE action LIKE 'role_binding.create%'")
+    assert [a.target_id for a in audited] == [first.json()["id"]]  # one creation, one row
+    # the returned id is real: revoking it works
+    assert (
+        admin.delete(
+            f"/api/v1/role-bindings/{again.json()['id']}", headers=env.headers(admin)
+        ).status_code
+        == 204
+    )
+
+
+def test_project_scopes_are_uuids_stored_lower_case(env: Env) -> None:
+    admin, _ = env.user_client("root", [("admin", "global")])
+    env.user_client("sco", [("viewer", "global")])
+    [sco] = env.sql("SELECT id FROM app_user WHERE username='sco'")
+    for bad in ("project:a", "project:not-a-uuid", "project:", "projects:" + PA):
+        assert _binding(env, admin, sco.id, "operator", bad).status_code == 422, bad
+    r = _binding(env, admin, sco.id, "operator", f"project:{PB.upper()}")
+    assert r.status_code == 201, r.text
+    [row] = env.sql("SELECT scope FROM role_binding WHERE id = :i", i=r.json()["id"])
+    assert row.scope == f"project:{PB}"
+    # the user can act in that project whatever case the request uses
+    user = env.client()
+    assert env.api_login(user, "sco").status_code == 200
+    assert post(env, user, f"/_t/project/{PB}").status_code == 200
+    assert post(env, user, f"/_t/project/{PB.upper()}").status_code == 200
+    # admin user creation validates the same way
+    created = post(env, admin, "/api/v1/users",
+                   json={"username": "sco2", "roles": [{"role": "viewer", "scope": "project:zz"}]})  # fmt: skip
+    assert created.status_code == 422
+
+
+def test_project_scope_must_name_an_existing_project_connection(env: Env) -> None:
+    """Once the project_connection table exists, a binding to an unknown project is 404."""
+    env.sql("CREATE TABLE project_connection (id uuid PRIMARY KEY)")
+    env.sql("GRANT SELECT ON project_connection TO ovlm_api")
+    env.sql("INSERT INTO project_connection (id) VALUES (:p)", p=PA)
+    admin, _ = env.user_client("root", [("admin", "global")])
+    env.user_client("pcx", [("viewer", "global")])
+    [pcx] = env.sql("SELECT id FROM app_user WHERE username='pcx'")
+    missing = _binding(env, admin, pcx.id, "operator", f"project:{PB}")
+    assert missing.status_code == 404 and missing.json()["code"] == "not-found"
+    assert _binding(env, admin, pcx.id, "operator", f"project:{PA}").status_code == 201
+    created = post(env, admin, "/api/v1/users",
+                   json={"username": "pcx2", "roles": [{"role": "viewer", "scope": f"project:{PB}"}]})  # fmt: skip
+    assert created.status_code == 404
+    assert not env.sql("SELECT 1 FROM app_user WHERE username = 'pcx2'")

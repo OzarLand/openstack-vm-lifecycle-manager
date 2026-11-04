@@ -162,7 +162,10 @@ Key groups (all timeouts and limits are named keys; **defaults TBD in lab** unle
 `worker.takeover_delay`, `green_ready.max_age`, `timeouts.green_ready`, `admission.alert_after`, `signal.alert_after`, `automation.{run_root, timeout.<phase>, idle_timeout.<phase>, result_max_bytes,
 log_max_bytes, artifact_retention}`, `inventory.{sync_interval, gone_after_missed_syncs}`,
 `renewal.max_concurrent_runs` (checked at admission), `retire.health_max_age`, `approval.validity.{plan, cutover, retirement}`,
-`ui.poll_interval`, `external_url`.
+`ui.poll_interval`, `external_url` (required for the api unless `development_mode`), `http.trusted_proxies` (TLS
+proxy addresses whose `X-Forwarded-For` is believed; default loopback), `auth.login_ip_delay_seconds` (fixed,
+non-escalating per-source delay), `log.openstack_http_debug` (refused unless `development_mode`), `development_mode`
+(development/test installations only).
 `auto_restore_in_window` and `max_window_duration` are **policy** fields, not config keys (bound into the plan hash,
 SEC-R-30, SRE-R-6). `auth.allow_operator_approver` is an installation setting in the DB (admin, TC, audited, M9), not
 a file key. EXP-01/EXP-01b lab times (renewal-workflow.md §10) are documentation, never defaults.

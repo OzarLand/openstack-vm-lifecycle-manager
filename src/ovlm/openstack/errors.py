@@ -103,7 +103,14 @@ class OwnershipViolationError(OpenStackError):
 
 
 class ForeignLockError(OpenStackError):
-    """The server is locked with a reason OVLM did not set: OVLM neither re-locks nor unlocks it."""
+    """The server is locked with a reason this run did not set (another person, another run, or any other
+    ``ovlm:`` reason): OVLM neither re-locks nor unlocks it. ``locked_reason`` goes to the step evidence."""
+
+    def __init__(
+        self, message: str, *, locked_reason: str | None = None, status: int | None = None
+    ) -> None:
+        super().__init__(message, status=status)
+        self.locked_reason = locked_reason
 
 
 class DuplicateResourceError(OpenStackError):

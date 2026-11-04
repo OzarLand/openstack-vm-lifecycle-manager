@@ -13,6 +13,7 @@ cookie (unsafe methods also need the CSRF token and a matching Origin). Anything
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable, Iterator
 from typing import Annotated, cast
@@ -31,6 +32,7 @@ from ovlm.auth.authz import (
     decide_in_scope,
     token_may,
 )
+from ovlm.auth.clientaddr import ClientAddress, resolve_client
 from ovlm.auth.errors import ProblemError, forbidden, unauthenticated
 from ovlm.auth.events import record_independent
 from ovlm.auth.login import needs_totp
@@ -43,7 +45,9 @@ from ovlm.auth.users import load_bindings
 from ovlm.config import Settings
 from ovlm.db.engine import make_engine, make_session_factory
 
+log = logging.getLogger("ovlm.auth")
 _lock = threading.Lock()
+_warned_no_forwarded = False
 _DEFAULT_HASHER = make_hasher()
 ScopeSpec = str | Callable[[Request], str | None] | None
 
@@ -92,8 +96,34 @@ def get_vault(request: Request) -> TotpVault | None:
     return cast(TotpVault, vault)
 
 
+def client_address(request: Request) -> ClientAddress:
+    """The client behind the trusted proxies (:mod:`ovlm.auth.clientaddr`), resolved once per request."""
+    global _warned_no_forwarded  # noqa: PLW0603
+    cached: ClientAddress | None = getattr(request.state, "client_address", None)
+    if cached is not None:
+        return cached
+    settings: Settings = request.app.state.settings
+    resolved = resolve_client(
+        request.client.host if request.client else None,
+        request.headers.getlist("x-forwarded-for"),
+        settings.http.trusted_proxies,
+    )
+    if not resolved.attributable and not _warned_no_forwarded:
+        _warned_no_forwarded = True
+        log.warning(
+            "a request from a trusted proxy names no client in X-Forwarded-For: its source address is "
+            "unknown and only the per-account login limit applies; configure the proxy to set the header"
+        )
+    request.state.client_address = resolved
+    return resolved
+
+
 def client_ip(request: Request) -> str | None:
-    return request.client.host if request.client else None
+    """The client's address for audit rows, sessions and the per-source login limit.
+
+    ``None`` when it is unknown: a trusted proxy that did not name the client. The proxy's own address is never
+    returned for it, because it stands for every user at once (SEC-C-1)."""
+    return client_address(request).rate_limit_key
 
 
 def _endpoint(request: Request) -> str:

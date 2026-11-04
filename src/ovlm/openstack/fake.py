@@ -29,7 +29,8 @@ where the lab tag says otherwise:
 
 Write boundary (E5-2): every operation in ``allowlist.WRITE_OPERATIONS`` calls the fence gate bound on
 ``gate_binding`` **before** it touches state, like the SDK session hook does before sending. With no gate bound the
-call proceeds unless ``strict_gate`` is set (direct fake tests); ``GuardedWriteClient`` always binds one. Fault
+call is refused (``strict_gate``, the default, SEC-C-7), as the real transport refuses it; ``GuardedWriteClient``
+always binds one. Tests of the cloud model itself, which call the fake directly, pass ``strict_gate=False``. Fault
 rules (``fail``) apply after the gate, so a refused gate never consumes an injected fault.
 
 Extensions beyond the Protocols (cloud-side operations OVLM itself never performs, needed to model the cloud):
@@ -123,6 +124,7 @@ class _Server:
     guest_refuses_detach: bool = False
     console: str = ""
     fault: str | None = None
+    user_id: str = "00000000-0000-0000-0000-0000000000b0"  # someone in the project
 
 
 @dataclass
@@ -179,6 +181,7 @@ class FakeOpenStack:
         compute_max: tuple[int, int] = (2, 100),
         block_storage_max: tuple[int, int] = (3, 71),
         now: datetime | None = None,
+        strict_gate: bool = True,
     ) -> None:
         self._project_id = project_id
         self.role: Role = role
@@ -191,10 +194,13 @@ class FakeOpenStack:
             None  # None: the cloud has no default type (LAB-OBSERVED)
         )
         self.force_no_valid_host = False
+        #: Keystone user of the credential OVLM uses on this fake: servers it creates carry it as ``user_id``.
+        self.user_id = "00000000-0000-0000-0000-0000000000a1"
         self.calls: list[str] = []
-        #: Fence gate binding (see the module docstring); ``strict_gate`` refuses writes with no gate bound.
+        #: Fence gate binding (see the module docstring). ``strict_gate`` (the default, like the real transport)
+        #: refuses a write with no gate bound; only tests of the cloud model itself turn it off, explicitly.
         self.gate_binding = GateBinding()
-        self.strict_gate = False
+        self.strict_gate = strict_gate
         self._servers: dict[str, _Server] = {}
         self._volumes: dict[str, _Volume] = {}
         self._volume_types: dict[str, str] = {}
@@ -352,6 +358,7 @@ class FakeOpenStack:
         host_down: bool = False,
         guest_refuses_detach: bool = False,
         launched: bool = True,
+        user_id: str | None = None,
     ) -> str:
         sid = self._new_id()
         vm_state, power = {
@@ -365,6 +372,8 @@ class FakeOpenStack:
             tags=list(tags), metadata=dict(metadata or {}), minimal=minimal or status == STATUS_UNKNOWN,
             host_down=host_down, guest_refuses_detach=guest_refuses_detach,
         )  # fmt: skip
+        if user_id is not None:
+            self._servers[sid].user_id = user_id
         return sid
 
     def add_volume(
@@ -493,6 +502,7 @@ class FakeOpenStack:
             image_id=s.image_id, availability_zone=s.availability_zone, locked=s.locked,
             locked_reason=s.locked_reason, tags=tuple(s.tags), metadata=dict(s.metadata), host_id=s.host_id,
             attached_volumes=tuple(AttachedVolume(v, d) for v, d in sorted(s.attached.items())),
+            user_id=s.user_id,
         )  # fmt: skip
 
     def _volume_info(self, v: _Volume) -> VolumeInfo:
@@ -630,7 +640,7 @@ class FakeOpenStack:
                 raise BadRequestError("Invalid imageRef or flavorRef provided.", status=400)
             sid = self.add_server(
                 spec.name, status="BUILD", tags=spec.tags, metadata=dict(spec.metadata),
-                image_id=spec.image_id, flavor=self._flavors[spec.flavor_id].name,
+                image_id=spec.image_id, flavor=self._flavors[spec.flavor_id].name, user_id=self.user_id,
             )  # fmt: skip
             s = self._servers[sid]
             s.task_state = "spawning"
