@@ -31,41 +31,41 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 
 | ID | Task | Owner | Model | Depends on | Status | Acceptance / tests |
 |---|---|---|---|---|---|---|
-| E0-1 | Design revision round 2 (decisions M9, SEC-R-11/13/34/35/36, SRE-R-23/24/26, ADR-0006 fallback, readiness before T0) | 2 | Opus | — | In progress | Edits merged; list of edits for other owners |
-| E0-2 | Apply cross-owner edits | doc-sync | Sonnet | E0-1 | To do | Files consistent |
-| E0-3 | Reviewers check their own open items only | 7, 8 | Fable | E0-2 | To do | "Accept" for implementation scope |
+| E0-1 | Design revision round 2 (decisions M9, SEC-R-11/13/34/35/36, SRE-R-23/24/26, ADR-0006 fallback, readiness before T0) | 2 | Opus | — | Done | Edits merged; list of edits for other owners |
+| E0-2 | Apply cross-owner edits | doc-sync | Sonnet | E0-1 | In progress | Files consistent |
+| E0-3 | Reviewers check their own open items only | 7, 8 | Fable | E0-2 | In progress (Security sign-off requested) | "Accept" for implementation scope |
 | E0-4 | README, CONTRIBUTING, issue/PR templates (OzarLand conventions) | 10 | Haiku | M2 | To do | check_content-style rules: no secrets, statuses honest |
 
 ### E1 — Foundation (Phase 2)
 
 | ID | Task | Owner | Model | Depends on | Status | Acceptance / tests |
 |---|---|---|---|---|---|---|
-| E1-1 | Repo layout, `pyproject`, pinned deps, lint (ruff), type check (mypy), pytest | 4 | Sonnet | — | In progress | CI job green |
-| E1-2 | Settings (pydantic-settings, secrets from files), structured JSON logging with correlation IDs | 4 | Sonnet | E1-1 | In progress | Unit tests; no secret in logs (test) |
-| E1-3 | PostgreSQL via SQLAlchemy 2 + Alembic, split DB roles `ovlm_owner` / `ovlm_api` / `ovlm_worker` with grants | 4 | Sonnet | E1-1 | In progress | Migration test on real PostgreSQL in CI |
-| E1-4 | FastAPI app skeleton, `/healthz`, `/readyz`, `/metrics`; worker process skeleton with a heartbeat | 4 | Sonnet | E1-2, E1-3 | In progress | Integration test in Compose |
-| E1-5 | Docker image (non-root, two OS users), Compose file, Makefile | 4 | Sonnet | E1-4 | In progress | `docker compose up` healthy in CI |
-| E1-6 | GitHub Actions CI (actions pinned to SHA, as in OzarLand) | 4 | Sonnet | E1-1 | In progress | Green on the working branch |
-| E1-7 | Reference workload `ovlm-counter`: Ansible role and phase playbooks per the automation contract | 6 | Sonnet | — | In progress | `ansible-lint`, syntax check, run against a local container in CI |
+| E1-1 | Repo layout, `pyproject`, pinned deps, lint (ruff), type check (mypy), pytest | 4 | Sonnet | — | Integration tested | CI job green |
+| E1-2 | Settings (pydantic-settings, secrets from files), structured JSON logging with correlation IDs | 4 | Sonnet | E1-1 | Integration tested | Unit tests; no secret in logs (test) |
+| E1-3 | PostgreSQL via SQLAlchemy 2 + Alembic, split DB roles `ovlm_owner` / `ovlm_api` / `ovlm_worker` with grants | 4 | Sonnet | E1-1 | Integration tested | Migration test on real PostgreSQL in CI |
+| E1-4 | FastAPI app skeleton, `/healthz`, `/readyz`, `/metrics`; worker process skeleton with a heartbeat | 4 | Sonnet | E1-2, E1-3 | Integration tested | Integration test in Compose |
+| E1-5 | Docker image (non-root, two OS users), Compose file, Makefile | 4 | Sonnet | E1-4 | Integration tested | `docker compose up` healthy in CI |
+| E1-6 | GitHub Actions CI (actions pinned to SHA, as in OzarLand) | 4 | Sonnet | E1-1 | Implemented (CI not yet observed green on GitHub) | Green on the working branch |
+| E1-7 | Reference workload `ovlm-counter`: Ansible role and phase playbooks per the automation contract | 6 | Sonnet | — | Implemented (reported tested in a container; real-device paths not run) | `ansible-lint`, syntax check, run against a local container in CI |
 | E1-8 | openstack-quick-lab: opt-in Cinder (LVM) option, run once, then proposed upstream | 6 + ozar-dev | Sonnet | — | To do | quick-lab deploys with Cinder; upstream issue filed with evidence |
 
 ### E2 — Inventory (Phase 3)
 
 | ID | Task | Owner | Model | Depends on | Status | Acceptance / tests |
 |---|---|---|---|---|---|---|
-| E2-1 | OpenStack adapter interface; read client (GET/HEAD-only guard) and a hand-written fake | 3 → 4 | Sonnet | E1 | To do | Fake models async states and the observed gotchas |
-| E2-2 | Inventory sync job (worker), snapshots, `gone` handling, Nova changes-since | 4 | Sonnet | E2-1 | To do | Unit tests with the fake |
-| E2-3 | Managed VM registration and services | 4 | Haiku | E2-2 | To do | API tests |
+| E2-1 | OpenStack adapter interface; read client (GET/HEAD-only guard) and a hand-written fake | 3 → 4 | Sonnet | E1 | In progress | Fake models async states and the observed gotchas |
+| E2-2 | Inventory sync job (worker), snapshots, `gone` handling, Nova changes-since | 4 | Sonnet | E2-1 | In progress | Unit tests with the fake |
+| E2-3 | Managed VM registration and services | 4 | Haiku | E2-2 | In progress | API tests |
 | E2-4 | Read-only inventory against Felcloud (lab) | ozar-dev | — | E2-2 | To do | Evidence stored |
 
 ### E3 — Lifecycle (Phase 4)
 
 | ID | Task | Owner | Model | Depends on | Status | Acceptance / tests |
 |---|---|---|---|---|---|---|
-| E3-1 | Auth: local users (argon2id), sessions, CSRF, API tokens, **TOTP for approver/admin**, step-up | 4 | Sonnet | E1 | To do | Security tests from security-model §10 |
+| E3-1 | Auth: local users (argon2id), sessions, CSRF, API tokens, **TOTP for approver/admin**, step-up | 4 | Sonnet | E1 | In progress | Security tests from security-model §10 |
 | E3-2 | RBAC with project scope, requester sets, separation of duties, "self-approved" flag | 4 | Opus | E3-1 | To do | Matrix tests; review by 8 |
-| E3-3 | Profiles + immutable versions; policies + bindings + exceptions; deadlines | 4 | Sonnet | E1 | To do | API + unit tests |
-| E3-4 | Append-only audit (grants + trigger), mirror to the log stream | 4 | Sonnet | E1-3 | To do | DB-level tests: UPDATE/DELETE refused |
+| E3-3 | Profiles + immutable versions; policies + bindings + exceptions; deadlines | 4 | Sonnet | E1 | In progress | API + unit tests |
+| E3-4 | Append-only audit (grants + trigger), mirror to the log stream | 4 | Sonnet | E1-3 | In progress | DB-level tests: UPDATE/DELETE refused |
 | E3-5 | Renewal planning: upcoming list, advisory quota check, same-service lock | 4 | Sonnet | E3-3, E2 | To do | Unit tests |
 
 ### E4 — Readiness (Phase 5)
@@ -79,7 +79,7 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 
 | ID | Task | Owner | Model | Depends on | Status | Acceptance / tests |
 |---|---|---|---|---|---|---|
-| E5-1 | Workflow engine core: runs/steps, SKIP LOCKED claims, leases, fencing (local deadline), resource locks, signals, timers | 4 | **Opus** | E1 | To do | WF-01..WF-20 crash-injection suite; review by 7 |
+| E5-1 | Workflow engine core: runs/steps, SKIP LOCKED claims, leases, fencing (local deadline), resource locks, signals, timers | 4 | **Opus** | E1 | In progress | WF-01..WF-20 crash-injection suite; review by 7 |
 | E5-2 | OpenStack write client with ownership guard and write allowlist | 4 | Opus | E2-1, E5-1 | To do | Tests: untagged/unregistered target refused; review by 8 |
 | E5-3 | Automation runner (ansible-runner subprocess, per-run dir, `ovlm.result/1`, redaction, restricted artefact store, lint) | 6 | Sonnet | E1-7, E5-1 | To do | Integration test against a local container |
 | E5-4 | `bluegreen_fip_v1` steps B1–X1, W1–W10, S1–S10 per renewal-workflow.md | 4 | Opus | E5-1..3 | To do | Unit tests with the fake per step and per failure row; reviews by 7 and 8 |

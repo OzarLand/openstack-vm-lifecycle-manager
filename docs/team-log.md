@@ -58,7 +58,10 @@ unblock it. Each agent pushes only to its own branch, and Agent 1 reviews the br
 | Agent | Model | Conversation | Branch |
 |---|---|---|---|
 | 2 — Architect, design revision | Opus 5.5 | https://claude.ai/code/session_016ti9w3B7uuCUrzzL1QrXZW | `claude/ovlm-architect` |
-| 4 — Backend, foundation | Sonnet 5.5 | https://claude.ai/code/session_016ti9w32wY5ZDgLijH6QUnf | `claude/ovlm-backend` |
+| 4 — Backend: foundation done; now CI Ansible job and profiles/policies (E3-3) | Sonnet 5.5 | https://claude.ai/code/session_016ti9w32wY5ZDgLijH6QUnf | `claude/ovlm-backend` |
+| 4b — Workflow engine core (E5-1) | **Opus 5.5** | https://claude.ai/code/session_016ti9vywkeoCSGZGMFzFPxV | `claude/ovlm-engine` |
+| 4c — OpenStack adapter and inventory (E2-1..3) | Sonnet 5.5 | https://claude.ai/code/session_016ti9vzKi1fqsTgLVu6o7w3 | `claude/ovlm-inventory` |
+| 4d — Auth, TOTP and audit (E3-1, E3-4) | Sonnet 5.5 | https://claude.ai/code/session_016ti9w3txqUnUJFzEBSyjXk | `claude/ovlm-auth` |
 | 6 — Automation, reference workload | Sonnet 5.5 | https://claude.ai/code/session_016ti9vzqoWEEXYUi7HZ4qT1 | `claude/ovlm-automation` |
 | 7 — SRE reliability reviewer (veto holder) | Fable 5.1 | https://claude.ai/code/session_016ti9w2Rhy79ZyTv4fvtUTJ | `claude/ovlm-sre-review` |
 | 8 — Security reviewer | Fable 5.1 | https://claude.ai/code/session_016ti9vzmfDPFJ7HnXMMD5n5 | `claude/ovlm-security-review` |
@@ -548,3 +551,32 @@ On the maintainer's go, the backlog is in [roadmap.md](roadmap.md). Running in p
 - Agent 2: design round 2, E0-1 (Opus).
 
 The quick-lab Cinder option (E1-8) starts when the engine work starts, so the lab VM does not sit idle at cost.
+
+## Phase 2 results and the next wave — 2026-11-04 14:45 UTC
+
+**Verified by Agent 1 on the merged working branch** (not only reported by the agents):
+- `make lint`: ruff, format, mypy and import-linter pass.
+- 25 unit tests pass.
+- 9 integration tests pass against a real PostgreSQL 16. A local server was used, because Docker Hub rate-limited this
+  container (429).
+- Ansible reference workload: Agent 6 reports lint, syntax check, a 9-case `data_attach` decision table and an
+  unprivileged-container run passing. **Agent 1 did not re-run it** (no image pull possible here); CI will.
+- One integration fix by Agent 1: ruff excludes `ansible/`.
+
+**Design round 2 (Architect, Opus, $7.48 in total):**
+- ADR-0006 now injects an OVLM-generated bootstrap host key through cloud-init user-data and replaces it at B5.
+- New step B9 `verify_green_ready` runs before T0.
+- The M9 decisions are applied (solo installs need a second human account for G3, TOTP step-up bound to an action),
+  plus SEC-R-11/13/34/35/36 and SRE-R-23..31.
+- The Security reviewer is asked for a sign-off on the user-data exception and the SEC-R-34 deviation.
+- Cross-owner edits are being applied by a documentation-sync agent.
+
+**Monitoring incident:** the three scheduled check-ins (09:26, 10:30, 12:57) failed with `ACCESS_DENIED`. This session
+is limited to the maintainer's trusted devices, so reminders cannot wake it, and about 2 hours were lost after 12:43.
+They are replaced by a local watcher that wakes Agent 1 when an agent branch receives a push.
+
+**Running now (code, disjoint modules, see agent-working-rules.md):**
+- E5-1 engine (Opus).
+- E2-1..3 adapter and inventory (Sonnet).
+- E3-1/E3-4 auth, TOTP and audit (Sonnet).
+- E3-3 profiles and policies plus the CI Ansible job (Sonnet).
