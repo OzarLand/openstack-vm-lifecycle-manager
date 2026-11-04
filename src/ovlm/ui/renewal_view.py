@@ -160,6 +160,15 @@ NEEDS_HUMAN: Mapping[str, tuple[str, list[str]]] = {
         "The old VM is locked by someone other than OVLM.",
         [_ADMIN + " Unlock the server.", _AFTER_FIX],
     ),
+    "snapshot_adoption_refused": (
+        "A snapshot with this run's name exists but does not look like the one OVLM created (wrong source "
+        "volume, missing run marker, or older than OVLM's record). OVLM did not use it and changed nothing.",
+        [
+            "Inspect the snapshot named in the evidence: who created it and from which volume.",
+            "Do not delete it unless you are sure it holds nothing you need.",
+            _AFTER_FIX,
+        ],
+    ),
     "volume_stuck_attaching": (
         "The data volume is stuck in an attaching or reserved state.",
         [_ADMIN + " Typically a Cinder reset-state or force-detach.", _AFTER_FIX],
