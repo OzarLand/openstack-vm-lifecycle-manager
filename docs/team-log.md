@@ -8,7 +8,7 @@ what needs the maintainer. Agent 1 (PM/EM) updates it after every handoff. Agent
 | # | Role | Model | Status | Output |
 |---|---|---|---|---|
 | 1 | Product / Engineering Manager | Opus 5.5 (main session) | Active: coordinating | `product-vision.md`, `functional-requirements.md`, `agent-team.md`, `model-selection-strategy.md`, ADR-0000, this log |
-| 2 | Chief Software Architect | Opus 5.5 | Wave 2 done. **Running: design revision** in its own conversation (link below) | `architecture.md`, `data-model.md`, `api-design.md`, `renewal-workflow.md`, ADRs |
+| 2 | Chief Software Architect | Opus 5.5 | **Design revision done**: all 6 high findings resolved, merged. $3.26 | `architecture.md`, `data-model.md`, `api-design.md`, `renewal-workflow.md`, ADRs |
 | 3 | OpenStack Specialist | Sonnet 5.5 | **Done** (Wave 1): 233,687 tokens, 102 tool calls, 11 min 52 s | `openstack-integration.md` |
 | 4 | Backend Engineer | — | Not activated (no code before approval) | — |
 | 5 | Frontend Engineer / UX | — | Not activated | — |
@@ -17,7 +17,7 @@ what needs the maintainer. Agent 1 (PM/EM) updates it after every handoff. Agent
 | 8 | Security Engineer | Opus 5.5 (author) → Fable 5.1 (review) | Authoring **done**: 115,807 tokens, 11 tool calls, 4 min 34 s. Fable review **done**: accept with required changes (both parts; 6 high in total). $7.17 | `security-model.md` |
 | 9 | QA / Test Automation | Sonnet 5.5 | **Done**: `testing-strategy.md`, 20 engine crash scenarios. $1.03 | `testing-strategy.md` on `claude/ovlm-qa` |
 | 10 | Documentation Engineer | — | Not activated (Agent 1 writes the README) | — |
-| — | **Dev VM session** `ozar-dev` (maintainer's machine) | Opus 5.5 (local) | **EXP-01 done** on Felcloud: 7 of 8 questions answered, every resource deleted. $1.81 including the probe. Standing approval for `ovlm-*` on `ozar-lab` saved there by the maintainer | https://claude.ai/code/session_016ti9w2xkWinTeHFRq3zgS3 |
+| — | **Dev VM session** `ozar-dev` (maintainer's machine) | Opus 5.5 (local) | EXP-01 done (7/8). **EXP-01b running and BLOCKED on a permission prompt the maintainer must approve in that session.** $1.81 so far. Standing approval for `ovlm-*` on `ozar-lab` saved there by the maintainer | https://claude.ai/code/session_016ti9w2xkWinTeHFRq3zgS3 |
 
 ## ✅ Standing authorization (maintainer, 2026-11-04)
 
@@ -67,6 +67,9 @@ reports are below. Backend, Frontend and Docs get their conversations when they 
 | ~~M2~~ | Agent 6 | ✅ **Decided 2026-11-04:** propose the Cinder option upstream to `openstack-quick-lab`. It is filed once the change has run at least once (backlog, Phase 2). | — |
 | ~~M4~~ | Agent 2 | ✅ **Decided 2026-11-04:** MVP scope limits accepted (one data volume, image boot, floating IP required, no temporary FIP); pre-handoff snapshot off by default (subject to the SRE review); the new VM stays stopped after a revert until discarded. Recorded in [ADR-0004](decisions/ADR-0004-mvp-renewal-strategy.md). | — |
 | ~~M5~~ | Agent 1 | ✅ **Authorized 2026-11-04** by the maintainer directly in the `ozar-dev` session: EXP-01 on `ozar-lab`, `ovlm-exp01-*` resources only. | — |
+| M6 | Agent 2 | **Decision D-1:** if something fails at W7–W10, after the service has already written to the data volume on the new VM, should OVLM restore the old VM automatically? A = automatic (fastest, but the old VM may start on data the new one changed); **B = stop for a human unless the pre-handoff snapshot is on (recommended)**; C = automatic only if the profile owner has confirmed the old version can read the new data. A stays in force until you decide. | Final renewal-workflow |
+| M7 | `ozar-dev` | **Approve the pending Bash prompt in `ozar-dev`** for EXP-01b. | Floating-IP cutover measurement |
+| M8 | Agent 9 | CI: may it use privileged containers? Where is lab evidence stored, and who signs it? | CI design |
 | M3 | Agent 1 | **Phase 1 approval.** Work-in-progress drafts are pushed to `claude/openstack-vm-lifecycle-manager-9nf9cc` (authorized 2026-11-04). The final Phase 1 proposal still needs approval before implementation starts. | Publishing the documents |
 
 ## Wave 1 — 2026-11-04 (parallel, independent)
@@ -480,3 +483,30 @@ Cleanup was verified: no `ovlm-*` resource is left.
 - Next: a **design revision**. The Architect resolves the 6 high findings, the §7 contradiction and the EXP-01
   findings. Then the SRE and Security reviewers check only those changes.
 - Commit rule from the maintainer, given in `ozar-dev`: commit messages no longer mention Claude.
+
+## Wave 4 — 2026-11-04: design revision
+
+### Agent 2 — Architect, design revision (Opus 5.5, dedicated conversation) — done, $3.26
+
+All six high findings are resolved in the architecture documents (commit `aa8c1de`, merged):
+- **SRE-R-1:** restore restarts the old VM if it was quiesced but is still running. Units are never disabled, so they
+  come back from fstab.
+- **SRE-R-2:** before every write, launch and commit, the worker checks a local fence deadline measured from when it
+  sent the claim. A takeover of a destructive step waits a fixed delay first.
+- **SRE-R-3:** renewals always pass `first_use=false`, so a volume is never formatted during a renewal.
+- **SEC-R-1:** DB roles are split (`ovlm_api`, `ovlm_worker`). The worker re-validates approval evidence before every
+  destructive step, and the audit is mirrored to the logs. Residual risk: consistent forgery still passes. Signed
+  approvals are planned for V1.
+- **SEC-R-2:** each gate has a requester set, and no operator+approver in the same scope by default. The approval
+  shows the hash inputs and the automation diff.
+- **SEC-R-3:** Ansible artefacts are restricted, diffs are opt-in, and the `no_log` lint is blocking.
+
+Also in this revision:
+- `NoValidHost` is fatal everywhere.
+- ADR-0005 and ADR-0006 are now lab-observed.
+- MVP creates no volumes and no temporary floating IPs.
+- Measured times are recorded as documentation, not as defaults.
+
+The edits needed in files owned by other agents (security model, automation contract, test strategy, OpenStack notes)
+were handed to a documentation-sync agent (Sonnet 5.5). **One maintainer decision: D-1** (see "Needs the
+maintainer"). Next: a re-review by the SRE and Security reviewers of the changes only.
