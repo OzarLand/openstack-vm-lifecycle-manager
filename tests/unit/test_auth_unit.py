@@ -198,8 +198,14 @@ def test_username_and_scope_validation() -> None:
     for bad in ("ab", "-alice", "a b c", "x" * 65, "alice/../x"):
         with pytest.raises(UserError):
             normalise_username(bad)
-    assert check_scope("project:abc-1") == "project:abc-1"
-    for bad in ("project:", "project:a/b", "Global", "project:" + "x" * 65):
+    pid = "0f0e0d0c-0b0a-4908-8706-050403020100"
+    assert check_scope("global") == "global"
+    assert check_scope(f"project:{pid}") == f"project:{pid}"
+    assert (
+        check_scope(f"project:{pid.upper()}") == f"project:{pid}"
+    )  # canonical lower case (SEC-C-8)
+    for bad in ("project:", "project:a/b", "Global", "project:abc-1", "project:" + "x" * 65,
+                f"project: {pid}", f"PROJECT:{pid}"):  # fmt: skip
         with pytest.raises(UserError):
             check_scope(bad)
 
@@ -271,3 +277,19 @@ def test_problem_error_body_has_no_internals() -> None:
         "instance": "/x",
         "next_action": "ask",
     }
+
+
+def test_scope_comparison_is_canonical() -> None:
+    """SEC-C-8: an upper-case project binding (stored before normalisation) covers the same project."""
+    from ovlm.auth.authz import scope_covers
+    from ovlm.auth.principal import canonical_scope
+    from ovlm.auth.sod import binding_conflicts
+    from ovlm.auth.tokens import token_grants
+
+    pid = "0f0e0d0c-0b0a-4908-8706-050403020100"
+    upper, lower = f"project:{pid.upper()}", f"project:{pid}"
+    assert canonical_scope(upper) == lower and canonical_scope("project:a") == "project:a"
+    assert scope_covers(upper, lower) and scope_covers(lower, upper)
+    assert not scope_covers(upper, "project:0f0e0d0c-0b0a-4908-8706-050403020101")
+    assert binding_conflicts([("approver", upper)], "operator", lower) == [upper]
+    assert token_grants([("operator", upper)], ["operate"], lower) >= {("operator", lower)}

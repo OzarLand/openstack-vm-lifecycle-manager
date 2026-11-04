@@ -88,7 +88,7 @@ def test_lists_are_filtered_to_the_callers_projects(two: Two) -> None:
     assert _projects(gv.get("/api/v1/servers")) == {a, str(two.b)}
     assert _ids(gv.get("/api/v1/managed-vms")) == {two.vm_b["id"]}
     # an unscoped user (bound to a project id that is no project connection) sees nothing
-    nobody = two.user("nobody", [("viewer", "project:nothing-here")])
+    nobody = two.user("nobody", [("viewer", f"project:{uuid4()}")])
     assert nobody.get("/api/v1/servers").json()["items"] == []
 
 

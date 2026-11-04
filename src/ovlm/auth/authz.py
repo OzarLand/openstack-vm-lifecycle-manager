@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
-from ovlm.auth.principal import GLOBAL, ROLES, Principal
+from ovlm.auth.principal import GLOBAL, ROLES, Principal, canonical_scope
 
 ROLE_IMPLIES: dict[str, frozenset[str]] = {
     "viewer": frozenset({"viewer"}),
@@ -122,7 +122,7 @@ def scope_covers(granted: str, requested: str | None) -> bool:
     """
     if requested is None or granted == GLOBAL:
         return True
-    return granted == requested
+    return canonical_scope(granted) == canonical_scope(requested)
 
 
 def authorize(principal: Principal, role: str, scope: str | None = None) -> bool:
