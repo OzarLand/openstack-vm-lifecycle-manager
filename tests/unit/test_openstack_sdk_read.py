@@ -206,7 +206,7 @@ def test_parse_helpers() -> None:
         (409, "Cannot associate floating IP: FloatingIPPortAlreadyAssociated", errors.FloatingIpPortAlreadyAssociatedError),
         (409, "Something else", errors.ConflictError),
         (400, "Unable to find any IP address on external network abc.", errors.NoFloatingIpAvailableError),
-        (400, "Invalid volume: volume X already attached", errors.BadRequestError),
+        (400, "Invalid volume: volume X already attached", errors.VolumeAlreadyAttachedError),
         (403, "Quota exceeded for instances", errors.QuotaExceededError),
         (403, "Policy doesn't allow this", errors.ForbiddenError),
         (401, "expired", errors.AuthenticationError),

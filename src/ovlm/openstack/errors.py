@@ -67,7 +67,11 @@ class QuotaExceededError(ForbiddenError):
     """403 ``OverQuota`` at create (DU/AS: not traced in the source)."""
 
 
-class NoValidHostError(OpenStackError):
+class ServerBuildFailedError(OpenStackError):
+    """A server OVLM created ended in ``ERROR`` (any fault). Not an API error: raised by the build check."""
+
+
+class NoValidHostError(ServerBuildFailedError):
     """The scheduler found no host: the server ends in ``ERROR`` with a fault. Not an API error as such."""
 
 
@@ -76,11 +80,55 @@ class NoFloatingIpAvailableError(BadRequestError):
     (LAB-OBSERVED, EXP-01)."""
 
 
+class VolumeAlreadyAttachedError(BadRequestError):
+    """400 ``... is already attached ...`` (SV, LAB-OBSERVED). The write client turns it into success when the
+    volume is attached to the requested server and re-raises it otherwise."""
+
+
+# --- raised by OVLM itself, before any request is sent (E5-2) ------------------------------------------------
+
+
+class WriteNotAllowedError(OpenStackError):
+    """The write allowlist refused a request before sending it (SEC-R-7). A programming error, never retried."""
+
+
+class OwnershipViolationError(OpenStackError):
+    """The ownership guard refused a call before sending it (security-model.md section 4.3).
+
+    ``reason`` is a short machine-readable code (``not_registered``, ``marker_missing``, ``not_deletable``, ...)."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class ForeignLockError(OpenStackError):
+    """The server is locked with a reason OVLM did not set: OVLM neither re-locks nor unlocks it."""
+
+
+class DuplicateResourceError(OpenStackError):
+    """An idempotent lookup (tag + exact name) found more than one match, or found one where none may exist
+    (ADR-0005 section 4: never auto-delete, never pick one)."""
+
+    def __init__(self, message: str, *, matches: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.matches = matches
+
+
+class MarkerLimitError(OpenStackError):
+    """A claim would exceed 50 tags or 128 metadata items (OSI section 2, SV): fatal, with a clear message."""
+
+
+class ForeignMarkerLossError(OpenStackError):
+    """After a claim, a tag or metadata key that existed before is missing or changed (SEC-R-24 condition 2)."""
+
+
 _NO_ROUTER = re.compile(r"External network .+ is not reachable from subnet", re.IGNORECASE)
 _LOCKED = re.compile(r"Instance .*is locked", re.IGNORECASE)
 _ALREADY_ASSOC = re.compile(
     r"already (has|associated)|FloatingIPPortAlreadyAssociated", re.IGNORECASE
 )
+_ALREADY_ATTACHED = re.compile(r"already attached", re.IGNORECASE)
 _NO_FIP = re.compile(r"Unable to find any IP address on external network", re.IGNORECASE)
 _OVER_QUOTA = re.compile(r"OverQuota|Quota exceeded", re.IGNORECASE)
 
@@ -96,6 +144,8 @@ def translate_http_error(status: int, message: str) -> OpenStackError:
         return InstanceLockedError(message, status=status)
     if status == 409 and _ALREADY_ASSOC.search(message):
         return FloatingIpPortAlreadyAssociatedError(message, status=status)
+    if status == 400 and _ALREADY_ATTACHED.search(message):
+        return VolumeAlreadyAttachedError(message, status=status)
     if status == 400 and _NO_FIP.search(message):
         return NoFloatingIpAvailableError(message, status=status)
     if status == 403 and _OVER_QUOTA.search(message):
