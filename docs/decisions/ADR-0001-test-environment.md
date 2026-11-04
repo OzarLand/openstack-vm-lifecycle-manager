@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Accepted |
+| Status | **Superseded by [ADR-0007](ADR-0007-lab-on-felcloud.md)** (2026-11-04) |
 | Date | 2026-11-04 |
 | Deciders | Maintainer (decision), Agent 6 (recommendation), Agent 1 (record) |
 
