@@ -81,7 +81,7 @@ reports are below. Backend, Frontend and Docs get their conversations when they 
 - SEC-R-3: Ansible output goes to a restricted store (operators and admins of the project only, own retention, never exported); diffs opt-in; blocking `no_log` lint.
 - SEC-R-10: **TOTP for approvers and admins in the MVP**.
 - SEC-R-28: readiness never runs repo code on the live VM by default; doing so is an explicit operator action with typed confirmation and audit. | — |
-| M3 | Agent 1 | **Phase 1 approval.** Work-in-progress drafts are pushed to `claude/openstack-vm-lifecycle-manager-9nf9cc` (authorized 2026-11-04). The final Phase 1 proposal still needs approval before implementation starts. | Publishing the documents |
+| ~~M3~~ | Agent 1 | ✅ **Go to the end of the MVP**, maintainer, 2026-11-04 ("tu dois continuer jusqu'à la fin du MVP"). Phases 2–6 are authorized. The backlog is in [roadmap.md](roadmap.md). | — |
 
 ## Wave 1 — 2026-11-04 (parallel, independent)
 
