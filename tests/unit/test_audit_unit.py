@@ -45,13 +45,13 @@ def test_sensitive_looking_fields_cannot_be_allowlisted(field: str) -> None:
 
 
 def test_snapshot_keeps_only_allowlisted_fields() -> None:
-    audit.register_entity("profile", ["name", "automation_sha"])
+    audit.register_entity("sample_entity", ["name", "automation_sha"])
     out = audit.snapshot(
-        "profile",
+        "sample_entity",
         {"name": "web", "automation_sha": "a" * 40, "ssh_private_key": "-----BEGIN", "vault": "x"},
     )
     assert out == {"name": "web", "automation_sha": "a" * 40}
-    assert audit.snapshot("profile", None) is None
+    assert audit.snapshot("sample_entity", None) is None
 
 
 def test_secret_fields_only_leave_a_changed_marker() -> None:
