@@ -663,3 +663,37 @@ Waiting for:
 - Security code review of the write client and RBAC (Fable).
 - SRE code review of the engine (Fable).
 - The automation runner (Sonnet).
+
+## Wave 3 results, fix round, renewal engine — 2026-11-04 17:15 UTC
+
+**Finished and integrated into the working branch** (not yet in `main`):
+- write client and ownership guard (E5-2, Opus);
+- RBAC, separation of duties and scoping (E3-2, Opus);
+- automation runner (E5-3, Sonnet);
+- readiness (E4, Sonnet: 566 tests on its branch).
+
+Agent 1 added the merge migration `0005_merge`. **Verified by Agent 1:** lint clean, 952 unit tests pass (4 runs out of
+5; the first run had 2 failures that did not reproduce, so it is watched as possibly flaky), 271 integration tests
+pass. The 8 automation-container tests cannot run in this sandbox (no `ssh`, Docker Hub limited); CI runs them.
+
+**Independent code reviews (Fable):**
+- **SRE, engine (E5-1):** accept with required changes. Three mediums (SRE-C-1 signal/lock atomicity, SRE-C-2
+  `mark_resolved` without re-probe, SRE-C-3 deadline not checked at claim) and seven lows. No veto.
+- **Security, wave 3:** the write client and RBAC are accepted, with two highs to fix:
+  - SEC-C-1: the login rate limit is keyed on the proxy's address, so one client can lock out everyone.
+  - SEC-C-2: at DEBUG level, keystoneauth would log request bodies, including the injected bootstrap host key.
+
+  Plus two mediums (in-memory write credential, TLS verify enforced) and seven lows.
+
+**Fix round (Opus, disjoint modules):**
+- Engine fixes: https://claude.ai/code/session_016ti9w3k3JuQ6ezbbbb1req (`claude/ovlm-fix-engine`).
+- Security fixes: https://claude.ai/code/session_016ti9vzbPq7VgEgMRtnjjWV (`claude/ovlm-fix-security`).
+
+**Renewal strategy E5-4/E5-5 (Opus):** https://claude.ai/code/session_016ti9w2W4u5bRegw53P7dqM (`claude/ovlm-renewal`).
+
+**Cost observation:** the Fable reviewers' sessions have reached $25 (SRE) and $43 (Security), list-price estimates
+reported by the platform. Long-lived review sessions re-read a growing context, and that accumulates. From now on
+**fix verification** uses short, fresh Opus sessions. Fable is kept for the first independent review of each critical
+component (the renewal strategy next).
+
+The working branch goes to `main` once both fix rounds are merged and CI is green.
