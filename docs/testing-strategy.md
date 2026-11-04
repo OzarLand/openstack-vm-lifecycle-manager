@@ -14,6 +14,9 @@ gates G1–G3), [ADR-0003](decisions/ADR-0003-workflow-engine.md) (leases, fenci
 [ADR-0005](decisions/ADR-0005-ownership-and-idempotency.md) and [data-model.md](data-model.md). **[ALIGN]** = still open
 against a document that has not fixed the detail (list in §10). **ASSUMPTION** = mine, unverified.
 
+> **Revision 2026-11-04**: synced to the architecture revision. Addressed: SEC-R-1 (DB roles `ovlm_api` / `ovlm_worker`, §5, §6 row 14),
+> SEC-R-30 (policy field `auto_restore_in_window`, §4.2 WF-17), SRE-R-11 (`NoValidHost` fatal everywhere; §10 item 2 closed).
+
 ## 1. Principles
 
 1. A test proves only what its level can prove. A pass at one level never earns the label of a higher one.
@@ -154,7 +157,7 @@ Deterministic, no sleeps, no random kills.
 | WF-14 | Waiting steps: `WAIT(poll_after)` frees the lease; backoff `poll.initial_interval`→`poll.max_interval`; `deadline_at` reached | L1 (fake clock) | Deadline → `needs_human` (state unknown), never `fatal`; no thread blocks |
 | WF-15 | Approvals: G2 expired or plan hash changed while down; W1 claimed outside the policy window | L1 | W1 not claimed; re-checked at claim; G3 approver ≠ requester ≠ plan approver |
 | WF-16 | Abort at every step boundary, during restore, during a data phase | L1 + L2 | Build: SIGTERM `configure` → Discarding; window: step finishes then restore; after W10 refused; matrix of 4.1 re-run with abort injected |
-| WF-17 | Auto-restore (S1–S9) only when every resource state is known; otherwise `needs_human`; restore skips satisfied steps; lock set only at R1, unlocked at S1 | L1 | Restore sequence is convergent: crash matrix on S1–S9 reaches blue serving, FIP on blue, green `SHUTOFF` |
+| WF-17 | Auto-restore (S1–S9; switch is the policy field `auto_restore_in_window`) only when every resource state is known; otherwise `needs_human`; restore skips satisfied steps; lock set only at R1, unlocked at S1 | L1 | Restore sequence is convergent: crash matrix on S1–S9 reaches blue serving, FIP on blue, green `SHUTOFF` |
 | WF-18 | Error classes: `OverQuota` → **fatal** (no retry); `NoValidHost`/`ERROR` green → fatal for the attempt, green **kept** until operator rollback (TC), never auto-deleted; retryable exhaustion → `needs_human` | L1 | Exact class per case (renewal-workflow §2.1, §7) |
 | WF-19 | Upgrade: `running` steps drained; `waiting`/`ready` steps of N-1 resume on N; unknown `strategy_version` refuses start with a listing | L2 | architecture.md §9 |
 | WF-20 | Clock safety: lease and `not_before` use DB time, not worker clock | L2 | Skewed worker clock cannot extend its lease |
@@ -162,7 +165,7 @@ Deterministic, no sleeps, no random kills.
 ## 5. Integration tests in CI (L2)
 | Component | Setup | What is tested |
 |---|---|---|
-| PostgreSQL | Container (`postgres:<pinned digest>`) via compose/Testcontainers; fresh database per test module, template-DB clone for speed | Real locks, leases, `SKIP LOCKED`, serialisation errors, connection loss; roles `ovlm_owner`/`ovlm_app` as in security-model §9 |
+| PostgreSQL | Container (`postgres:<pinned digest>`) via compose/Testcontainers; fresh database per test module, template-DB clone for speed | Real locks, leases, `SKIP LOCKED`, serialisation errors, connection loss; roles `ovlm_owner`/`ovlm_api`/`ovlm_worker` as in security-model §9 and data-model.md §12 |
 | Alembic | `upgrade head` on empty DB; `alembic check` (model vs migration, no drift); one-head check; upgrade **N-1 → N with seeded data**, including in-flight `waiting` runs (expand/contract rule); app refuses to start if schema is not at head. Downgrade is **not** a supported path (architecture.md §9: restore backup), so: any revision that does ship a `downgrade()` gets an up/down/up test, and a **backup → restore → resume run** test covers NFR-7 | No drift, no data loss on upgrade, in-flight runs resume, app-role privileges survive upgrade (audit grants, S-14) |
 | ansible-runner | Real `ansible-runner` subprocess, pinned versions, isolated run dir, OVLM-generated one-host inventory | Event capture, timeouts (SIGTERM→SIGKILL), exit-code classification (contract §6), result.json parsing (missing/oversized/malformed → class), secrets files created 0600 and removed, `ANSIBLE_*` env hygiene, `--list-hosts` scope check |
 | Target | Ubuntu 24.04 container with sshd + Python; systemd image (privileged) or `service`-stub for units; throwaway SSH key | SSH path, host-key policy (pinned fingerprint, TOFU opt-in), no root disk writes |
@@ -190,7 +193,7 @@ Automated where possible; "manual" is stated. Names `S-nn` = item number in §10
 | 11 | Old-VM delete refused if `delete_on_termination=true` | Fake |
 | 12 | **Secret canary** | A unique canary string is stored in every secret type; a full renewal (incl. failing ones) runs; then grep logs, audit rows, API/UI responses, error pages, ansible argv (`/proc`-style capture), run dir after the run, DB dump outside secret columns. Zero hits required |
 | 13 | api has no KEK; worker decrypts; KEK rotation | L2 compose: start `api` without the file mount, assert decrypt impossible; rotation test with old-key removal |
-| 14 | `ovlm_app` cannot UPDATE/DELETE/TRUNCATE `audit_event` | L2 against real PostgreSQL, as the app role; also tests the trigger by acting as owner |
+| 14 | `ovlm_api` and `ovlm_worker` cannot UPDATE/DELETE/TRUNCATE `audit_event` | L2 against real PostgreSQL, as each runtime role; also tests the trigger by acting as owner |
 | 15 | Hostile guest output | Fuzz result.json (oversized, wrong schema, YAML tags, `<script>`); decisions unchanged |
 | 16 | Ansible env has no `OS_*`/DB/KEK path; `ovlm-ansible` cannot read KEK | L2: playbook dumps `env` and `id`/read attempt on the container target |
 | 17 | Branch/tag instead of SHA, non-allowlisted repo | Unit |
@@ -344,7 +347,7 @@ split by marker, never by dropping tests. Actions pinned by SHA (security-model 
 | # | Item | Needs |
 |---|---|---|
 | 1 | Adapter interface method names; crash-point phase names (§4.1.1 are proposals mapped to ADR-0003) | Implementation **[ALIGN]** |
-| 2 | `renewal-workflow.md` §7 says `NoValidHost` green is deleted and `B3` retried, but §8 row 16 and the PM say operator-rollback only and fatal; tests follow the latter | Architect to fix §7 |
+| 2 | ~~`renewal-workflow.md` §7 says `NoValidHost` green is deleted and `B3` retried, but §8 row 16 and the PM say operator-rollback only and fatal; tests follow the latter~~ **Closed 2026-11-04**: `NoValidHost` is fatal everywhere; green is deleted only by operator rollback (TC); renewal-workflow.md §2.1 B4 and §7 are now consistent with the tests | none |
 | 3 | RBAC/CSRF tests parametrize over FastAPI's generated OpenAPI route table (api-design.md) | Confirm no routes outside it |
 | 4 | Are privileged containers available in CI (loopback `data_attach` tests)? | Maintainer / CI choice |
 | 5 | Evidence bundle storage and who signs `REVIEW.md` | Maintainer |

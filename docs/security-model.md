@@ -11,6 +11,10 @@ FR-AUD, FR-UI-2), [openstack-integration.md](openstack-integration.md) (Agent 3,
 SOURCE-VERIFIED, DU = DOCUMENTED-UNVERIFIED, AS = ASSUMPTION are kept), [automation-contract.md](automation-contract.md)
 §5. Statements tagged **ASSUMPTION** here are mine and unverified. Every control below is PROPOSED-UNVERIFIED.
 
+> **Revision 2026-11-04**: synced to the architecture revision. Addressed: SEC-R-1 (T7 residual, §8, §9, §10 item 14), SEC-R-2
+> (§3.2, §10), SEC-R-3 (§5.2, §6.4, §10), SEC-R-6, SEC-R-8, SEC-R-25, SEC-R-33 (§7.1), SEC-R-7, SEC-R-23, SEC-R-24 (§4.3,
+> §10), SEC-R-21 (§8 audit mirror).
+
 ## 1. Threat model
 
 ### 1.1 Assets
@@ -47,7 +51,7 @@ SOURCE-VERIFIED, DU = DOCUMENTED-UNVERIFIED, AS = ASSUMPTION are kept), [automat
 | T4 | T/E | OVLM mutates a foreign VM (bug, mis-registration, or a member who adds `ovlm:managed` to another server) | Ownership guard checks the OVLM DB **and** the tag before every mutating call; tags alone are never trusted (§4.3). |
 | T5 | I | Secrets leak into logs, audit diffs, errors, extra-vars, UI | Secrets never enter those paths by design; redaction only as backstop (§5.2). |
 | T6 | I/E | DB dump or backup stolen | Envelope encryption; KEK not in DB, not in api, not in env (§5). |
-| T7 | E | api process (internet-facing) compromised → OpenStack credentials | api never calls OpenStack and cannot decrypt: it only seals to the worker's public key (§5.1). |
+| T7 | E | api process (internet-facing) compromised → OpenStack credentials | api never calls OpenStack and cannot decrypt: it only seals to the worker's public key (§5.1). The DB role split (§9) stops the api from changing run and step state, and the worker re-validates approval evidence before every destructive step (renewal-workflow.md §3.1). **Residual risk**: a compromised api that consistently forges approvals, step-up records and role bindings could still pass the worker's re-validation; closing it needs approvals signed with a key the api does not hold (planned for V1). The audit log-stream mirror (§8) makes such forgeries visible afterwards. |
 | T8 | T | Compromised guest returns crafted healthcheck JSON or Ansible facts (fake "healthy", XSS payload, huge output, prompt-injection text) | Guest output is untrusted data: size cap, strict schema, no eval/templating, autoescaped UI, never used as authorization; cutover health also probed from outside the guest (§6.4). |
 | T9 | T/E | Automation repo changed (force-push, compromised maintainer) → code execution on the worker | Repo allowlist, commit SHA pinned in profile and bound into approval hash; Ansible runs as a separate OS user with a scrubbed env and no read access to KEK or DB secrets (§6.5). |
 | T10 | S | MITM on first SSH to a freshly built VM | Host-key fingerprint read from the console log; TOFU only as a per-profile opt-in (§6.2). |
@@ -117,7 +121,11 @@ Typed confirmation (TC) = FR-UI-2. ✓ = allowed, — = denied.
 | Tokens | Create own API token (≤ own scope, §2.2) | ✓ | ✓ | ✓ | ✓ |
 
 ### 3.2 Separation of duties
-- Requester (plan creator / run starter) can never be the approver of the same gate; enforced in the API, not the UI.
+- **Requester set, per gate**: the profile version author, the plan creator, the run starter, the policy editor (last
+  editor of the policy version in effect) and the requester of the approval. None of them may approve that gate. The
+  worker recomputes the set and checks it (renewal-workflow.md §3.1); the API enforces it too, not the UI.
+- Default: one person cannot hold `operator` and `approver` in the same scope. An admin may allow it (policy
+  `allow_operator_approver`); the allowance is audited and shown on each approval it affects.
 - Policy flag `require_distinct_approvers` (default **on** for retirement, off for plan/cutover): plan approver and
   retirement approver must be different people from each other and from the requester (two-person rule).
 - NFR-4 says SoD is "configurable". Decision: an admin may relax it **only for plan and cutover gates**, per policy;
@@ -180,9 +188,16 @@ Before every mutating call the worker checks, in this order, and stops with `own
 1. The target ID is recorded in the OVLM DB for this run: a registered managed VM (blue), a data volume ID from the
    approved profile version, the FIP recorded at plan time, or a resource created by this run.
 2. The OpenStack resource currently carries `ovlm:managed` (and `ovlm:run:<id>` for created ones). Tags are markers
-   any member can edit (OSI §2, SV), so (2) never suffices alone; it catches DB/cloud divergence.
+   any member can edit (OSI §2, SV), so (2) never suffices alone; it catches DB/cloud divergence. Rule 2 gives no
+   authority over pre-existing resources: a marker on a resource that rule 1 does not list never allows a call.
 3. For delete: target was **created by OVLM** (green on rollback) or is the approved retirement target; attachment
    `delete_on_termination == false` on every data volume (OSI §4, SV) re-read immediately before the call.
+
+**Write allowlist.** The worker's `WriteClient` checks a (method, path-pattern) allowlist limited to the strategy's
+operations (the table in §4.2) and the fence gate before sending any request; anything else raises before it is sent.
+Explicitly refused: `DELETE …/volumes/*`, `POST` and `DELETE …/floatingips*`, any `security-groups*` write and
+`POST …/volumes` (architecture.md §3, SEC-R-7). **OVLM never deletes a volume or a floating IP** and never allocates one.
+The ownership guard and the allowlist are independent: a call must pass both.
 
 ### 4.4 Application credentials and access rules
 - Use Keystone **application credentials**, one per project and purpose, owned by a dedicated Keystone service user
@@ -230,6 +245,13 @@ Ansible command line / `-e` / inventory vars (automation-contract §5), Nova met
 OSI §2, AS), exception tracebacks shown to users, Prometheus labels. Redaction of known values and patterns in logs is
 the backstop (automation-contract §5), tested (§10).
 
+**Automation artefacts may contain workload secrets.** ansible-runner events, stdout and diffs show what playbooks
+template onto the guest, including vault-decrypted values that OVLM never knows in clear and so cannot redact. They are
+restricted artefacts: readable by operator/admin in scope only (viewers see the validated result JSON and per-task
+status), kept under their own retention (`automation.artifact_retention`, separate from audit) and never exported.
+Diffs are stored only when the profile opts in (`store_diffs`, default off); otherwise OVLM keeps only per-task
+changed/unchanged.
+
 ## 6. Guest access
 
 ### 6.1 SSH keys for Ansible
@@ -262,6 +284,7 @@ bastion source address; OVLM's readiness check flags `0.0.0.0/0` on 22 as a warn
 Healthcheck JSON, Ansible facts, stdout and `set_stats` are attacker-controlled once a guest is compromised:
 size cap (e.g. 1 MiB per step), strict JSON schema with allowlisted fields, parsed with a safe parser (no YAML
 tags, no eval, never rendered through Jinja), stored as data, displayed escaped and labelled "reported by guest".
+Ansible events, stdout and diffs are additionally treated as possibly holding workload secrets (§5.2).
 Facts never feed authorization, ownership, or which resource is mutated. Cutover acceptance also uses an external
 probe from the worker (FIP reachability), so a lying guest can delay but not alone cause cutover of a broken service.
 Text in guest or repo output is never treated as instructions by humans or AI tools reading OVLM (OzarLand rule 14).
@@ -283,20 +306,22 @@ automation SHA, target IDs, policy version), audit of attempt + result. TC = typ
 | Operation | Phase | Role | Approval | TC | Note |
 |---|---|---|---|---|---|
 | Stop blue (outage starts) | Cutover | operator starts step | Cutover gate | Yes (at cutover approval) | Default "stop first" (OSI rec. 3) |
-| Detach production data volume from blue | Cutover | operator | Cutover gate | Yes (same) | Preflight: not multiattach, `delete_on_termination=false`, blue unlocked by owner, host up (OSI rec. 4) |
+| Detach production data volume from blue | Cutover | operator | Cutover gate | Yes (same) | Preflight lists only observable facts: `locked == false` (mv 2.73), `ACTIVE` with no `task_state`, `delete_on_termination == false` (mv 2.79), volume `in-use` by blue only, not multiattach (OSI rec. 4). A down compute host and an admin lock are not observable; they are detected only when the stop/detach call fails, which goes to needs_human (SEC-R-6) |
 | Attach data volume to green | Cutover | operator | Cutover gate | — | Green must be OVLM-created in this run |
 | FIP move to green | Cutover | operator | Cutover gate | — (covered above) | Router preflight (OSI §6.1) |
-| Revert (FIP and volume back to blue) | Post-cutover | operator | None (restores prior state) | Yes | Unlock own lock first (OSI §9) |
+| Revert (FIP and volume back to blue) | Post-cutover | operator | None (restores prior state) | Yes | Unlock own lock first (OSI §9). A revert voids every open or granted retirement (G3) approval of the run (SEC-R-8) |
 | Lock / unlock old VM | Retention | system step | Covered by cutover / revert | — | Lock only after handoff (OSI rec. 5) |
-| Delete old VM (retirement) | Retirement | operator starts | **Retirement gate, two-person rule default on** | Yes | Irreversible; re-check `delete_on_termination` immediately before |
+| Delete old VM (retirement) | Retirement | operator starts | **Retirement gate, two-person rule default on** | Yes | Irreversible; re-check `delete_on_termination` immediately before; the worker re-derives the target's state from OpenStack and re-validates the approval evidence (renewal-workflow.md §2.3 X1, §3.1; SEC-R-33) |
 | Delete green on rollback | Rollback | operator (abort) | None | Yes on abort | Only if tagged `ovlm:run:<this run>` and no data volume attached |
-| Delete orphans (ports, snapshots) created by a run | Cleanup | operator | approver | Yes | Never resources OVLM did not create |
+| Orphans (ports, snapshots, anything marked `ovlm:*` outside the ledger) | Cleanup | — | — | — | **Report-only** in MVP: evidence and a suggested CLI command for a human with the rights; no delete endpoint (SEC-R-25) |
 | Delete/rotate credential, SSH key, KEK | Admin | admin | — | Yes | Blocked while a run uses it |
 
 The UI shows blast radius (service, VM, volume, FIP, outage) before every TC (FR-UI-2); the API requires the same field, no "force".
 
 **Approval validity.** Approvals expire (default 24 h for plan, 4 h for cutover); any change to the bound hash voids them; a resumed run
-after a crash re-checks approval validity before a destructive step.
+after a crash re-checks approval validity before a destructive step. Retirement approvals have a default expiry
+(config key `approval.validity.retirement`; the value is set in configuration, not fixed here). A revert voids retirement
+approvals (SEC-R-8).
 
 ### 7.2 Human principals only (agent safety)
 Approvals and typed confirmations are accepted only from an interactive session of a human user with step-up
@@ -308,7 +333,8 @@ destructive action needs a named human owner (OzarLand rule 6). Audit records `p
 
 | Topic | Decision |
 |---|---|
-| Append-only | Table `audit_event` owned by `ovlm_owner` (migrations only). Runtime role `ovlm_app` has `INSERT, SELECT` only — no `UPDATE, DELETE, TRUNCATE`; enforced by GRANTs plus a trigger raising on UPDATE/DELETE (catches mis-grants). |
+| Append-only | Table `audit_event` owned by `ovlm_owner` (migrations only). Runtime roles `ovlm_api` and `ovlm_worker` have `INSERT, SELECT` only — no `UPDATE, DELETE, TRUNCATE`; enforced by GRANTs plus a trigger raising on UPDATE/DELETE (catches mis-grants). |
+| Log-stream mirror | After commit, `audit.record()` also emits each row as an `event=audit` log line from both api and worker to the operator's log collector (architecture.md §2). A DB administrator cannot then rewrite history without a divergence against the collector (SEC-R-21). |
 | Hash chain | **Not in MVP; V1.** A chain only helps if its head is anchored outside the DB (a DB superuser can recompute it). V1: per-row `prev_hash`/`hash` (SHA-256 over canonical JSON), inserts serialized by advisory lock, and a daily signed checkpoint exported to the SIEM. |
 | Logged | Everything in FR-AUD-2 plus: logins (success/failure), step-up re-auth, token create/revoke/use of privileged scope, role changes, SoD relaxations, TC events, ownership violations, KEK rotation, credential validation results, authorization denials on mutating endpoints. |
 | Fields | time (UTC), actor id, principal type, auth method, source IP, project scope, action, target type/id, before/after (allowlisted fields, secrets excluded), result, correlation (run id, step), request id. |
@@ -323,7 +349,7 @@ destructive action needs a named human owner (OzarLand rule 6). Audit records `p
 | CI scanning | `pip-audit` (deps), `bandit` (code), Trivy or Grype (image), secret scanning, GitHub Actions pinned by SHA. High/critical findings block release (Agent 8 veto, agent-team.md). |
 | Image | Slim base pinned by digest; no compilers or SSH server; runs as non-root uid (worker and `ovlm-ansible` distinct uids); read-only root FS, tmpfs for run dirs; `cap_drop: ALL`, `no-new-privileges`. V1: SBOM and signed images. |
 | TLS | OVLM serves HTTP only on the compose network; a reverse proxy terminates TLS ≥ 1.2 with HSTS. Forwarded headers trusted only from the proxy address. |
-| Database | Not published outside the compose network; `scram-sha-256`; separate roles `ovlm_owner` (migrate), `ovlm_app` (runtime), `ovlm_audit_admin` (purge); passwords via Docker secrets files; TLS if the DB is remote. |
+| Database | Not published outside the compose network; `scram-sha-256`; separate roles `ovlm_owner` (migrate; its secret is never mounted into api or worker), `ovlm_api` and `ovlm_worker` (runtime, grants per data-model.md §12), `ovlm_audit_admin` (purge); passwords via Docker secrets files; TLS if the DB is remote. |
 | Disclosure | `SECURITY.md`: private reporting via GitHub Security Advisories, supported versions, acknowledgement target, no public issues for vulnerabilities (OzarLand pattern; ASSUMPTION: the exact OzarLand template was not read). |
 
 ## 10. Security acceptance criteria (QA automates)
@@ -341,9 +367,13 @@ destructive action needs a named human owner (OzarLand rule 6). Audit records `p
 11. Delete of old VM is refused when any data attachment has `delete_on_termination=true`.
 12. Secret canary: a known canary secret placed in every secret type never appears in logs, audit rows, API/UI responses, error pages, ansible command lines or the run-dir after the run.
 13. api container has no KEK file and cannot decrypt a stored secret; worker can. KEK rotation re-wraps all DEKs and old key removal leaves all secrets decryptable.
-14. `ovlm_app` DB role cannot UPDATE/DELETE/TRUNCATE `audit_event`.
+14. `ovlm_api` and `ovlm_worker` DB roles cannot UPDATE/DELETE/TRUNCATE `audit_event`; every committed audit row also appears as an `event=audit` line in the log stream.
 15. Malicious guest output (oversized JSON, wrong schema, `<script>`, YAML tags) is rejected or stored escaped; it never changes run decisions.
 16. Ansible subprocess environment contains no `OS_*`, DB URL or KEK path; `ovlm-ansible` cannot read the KEK file.
 17. Profile with branch or tag instead of a full SHA, or a non-allowlisted repo, fails validation.
 18. SSH with an unverified host key fails unless the profile opted into TOFU; the pinned fingerprint is enforced on later connects.
 19. Container runs as non-root, read-only root FS; image scan and `pip-audit` gate in CI. openstacksdk debug logging cannot be enabled without the explicit env flag; tokens never appear at INFO/DEBUG with the flag off.
+20. A profile version author approving a plan built on their own profile version is rejected, as are the plan creator, run starter, policy editor and approval requester for their gates (parametrized over the requester set); one person holding `operator` and `approver` in the same scope is refused unless an admin allowed it, and the allowance is shown on the approval.
+21. Vault canary: a canary placed in an Ansible vault file (and templated onto the guest) never appears in stored artefacts (events, stdout, diffs, task results), logs, audit rows or API/UI responses; diffs are absent unless the profile has `store_diffs`; a viewer cannot read automation artefacts.
+22. Write allowlist enforced: `WriteClient` raises before sending for a volume delete, volume create, floating IP create/delete and any security-group write, and for any call outside the strategy's operations (fake transport records zero such requests).
+23. Adoption checks of claimed resources: a server found by `tags=ovlm:run:<id>` is adopted only if image, flavor, creation time, attached volumes and creating user match; any mismatch ends in needs_human "adoption refused". Marking uses add/merge forms only, and pre-existing foreign tags and metadata survive.
