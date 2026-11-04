@@ -13,11 +13,26 @@ what needs the maintainer. Agent 1 (PM/EM) updates it after every handoff. Agent
 | 4 | Backend Engineer | — | Not activated (no code before approval) | — |
 | 5 | Frontend Engineer / UX | — | Not activated | — |
 | 6 | Automation Engineer | Sonnet 5.5 | **Done** (Wave 1) | `automation-contract.md`, `test-environment.md` |
-| 7 | SRE / Reliability | Fable 5.1 | Queued: independent review of the architecture | review record |
-| 8 | Security Engineer | Opus 5.5 (author) → Fable 5.1 (review) | Authoring **done**: 115,807 tokens, 11 tool calls, 4 min 34 s. Fable review queued (dedicated session) | `security-model.md` |
-| 9 | QA / Test Automation | Sonnet 5.5 | Queued: after the architecture | `testing-strategy.md` |
+| 7 | SRE / Reliability | Fable 5.1 | **Running** in its own conversation (link below) | `reviews/sre-review-phase1.md` on `claude/ovlm-sre-review` |
+| 8 | Security Engineer | Opus 5.5 (author) → Fable 5.1 (review) | Authoring **done**: 115,807 tokens, 11 tool calls, 4 min 34 s. Fable review **running** in its own conversation (link below) | `security-model.md` |
+| 9 | QA / Test Automation | Sonnet 5.5 | **Running** in its own conversation (link below) | `testing-strategy.md` on `claude/ovlm-qa` |
 | 10 | Documentation Engineer | — | Not activated (Agent 1 writes the README) | — |
 | — | **Dev VM session** (maintainer's machine, Remote Control) | maintainer's local Claude Code | Asked for a **read-only** capability probe (KVM, tools, which OpenStack clouds exist, quick-lab state) to plan where the lab runs | reply pending |
+
+## 💬 Dedicated agent conversations
+
+Each conversation can be opened in the Claude app. You can read everything the agent does and type into it to
+unblock it. Each agent pushes only to its own branch, and Agent 1 reviews the branch and merges it into
+`claude/openstack-vm-lifecycle-manager-9nf9cc`.
+
+| Agent | Model | Conversation | Branch |
+|---|---|---|---|
+| 7 — SRE reliability reviewer (veto holder) | Fable 5.1 | https://claude.ai/code/session_016ti9w2Rhy79ZyTv4fvtUTJ | `claude/ovlm-sre-review` |
+| 8 — Security reviewer | Fable 5.1 | https://claude.ai/code/session_016ti9vzmfDPFJ7HnXMMD5n5 | `claude/ovlm-security-review` |
+| 9 — QA / test strategy | Sonnet 5.5 | https://claude.ai/code/session_016ti9w1BJ2CeCfoC2a47xQT | `claude/ovlm-qa` |
+
+Agents 2, 3, 6 and 8 (authoring) ran as in-session sub-agents before dedicated conversations existed; their briefs and
+reports are below. Backend, Frontend and Docs get their conversations when they are activated after Phase 1 approval.
 
 ## 🔓 Needs the maintainer
 
