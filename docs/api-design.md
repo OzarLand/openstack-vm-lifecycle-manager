@@ -150,7 +150,8 @@ client's copy); mismatch → `422 confirmation-mismatch`. The response of every 
 includes a `blast_radius` object: service, VMs (name, id), volume, FIP, expected outage start, gate validity (FR-UI-2);
 for the cutover gate also the worst-case window (Σ step deadlines W1–W10 + S1–S10), the `max_window_duration` budget,
 whether a pre-handoff snapshot is taken ("no: revert carries green's writes forward") and the automatic-restore
-statement (renewal-workflow.md §3); for the retirement gate the X1 probe evidence (green health age, volume
+statement, including the D-1 rule for failures after the service starts on green: "stops and pages an operator" (no
+snapshot) or "restored automatically, snapshot kept" (renewal-workflow.md §3, §4.1); for the retirement gate the X1 probe evidence (green health age, volume
 attachment, FIP port). No endpoint accepts a `force` flag. There is no orphan delete endpoint (SEC-R-25).
 
 ## 5. Example: start a renewal

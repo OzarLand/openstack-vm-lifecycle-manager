@@ -10,8 +10,9 @@
 > units-enabled precondition), SRE-R-2 (fence gate, via ADR-0003), SRE-R-3 (`first_use` hard-wired `false`), SRE-R-5,
 > -6, -7, -8, -9, -10, -11, -12, -13, -14, -15, -16, -17, -18; SEC-R-1 (approval evidence re-validated by the worker),
 > SEC-R-2 (requester set), SEC-R-8, SEC-R-23, SEC-R-24, SEC-R-26, SEC-R-29, SEC-R-30 (closed auto-restore table, §4.1),
-> SEC-R-33; testing-strategy open point 1 (`NoValidHost` is fatal, §7); EXP-01 results (§10). One maintainer decision
-> is open: **D-1** (§4.1).
+> SEC-R-33; testing-strategy open point 1 (`NoValidHost` is fatal, §7); EXP-01 results (§10). Maintainer decision
+> **D-1 = option B** (2026-11-04, relayed by Agent 1): no automatic restore after the service ran on green unless a
+> pre-handoff snapshot was taken (§4.1).
 
 Decision record: [ADR-0004](decisions/ADR-0004-mvp-renewal-strategy.md). Engine semantics (leases, fencing, waits):
 [ADR-0003](decisions/ADR-0003-workflow-engine.md). Ownership: [ADR-0005](decisions/ADR-0005-ownership-and-idempotency.md).
@@ -118,10 +119,10 @@ destructive steps re-validate the evidence's integrity, not its expiry, so an ap
 | W4 | `snapshot_volume` (optional) | Cinder snapshot of the `available` volume | volume `available` | ledger + name lookup (ADR-0005) | snapshot `available` | `timeouts.snapshot` | failure or deadline → **auto restore** "snapshot failed" (SRE-R-7); a snapshot stuck `creating` is reported as orphan candidate, never deleted | no | none (kept until retirement) |
 | W5 | `attach_volume_green` | `POST /servers/{green}/os-volume_attachments` (hot attach; transitions reserved → attaching → in-use, LO) | volume `available`; green ACTIVE, ours | read `os-volume_attachments` first; "already attached to green" = success (OSI §3, SV; 400 "already attached" LO) | volume `in-use`, attachment to green | `timeouts.volume_attach` | volume `available` with no attachment → auto restore; `error_attaching` / stuck `reserved`/`attaching` → needs_human (OSI §4, SV) | **yes** | restore (S4–S5) |
 | W6 | `data_attach_green` | AC §3.3 on green: locate by-id device (20-char volume-ID prefix, LO), `blkid` decision table, mount by UUID. **`first_use = false` always** (SRE-R-3): this strategy cannot pass `true`; evidence records the value passed | volume attached to green | playbook decision table never reformats existing fs; blank fs → needs_human | result ok, `fs_uuid` = profile, marker checksum = W1 value | `automation.timeout.data_attach` | **needs_human** on any failure (AC §6) | no | restore (S2–S5) |
-| W7 | `start_service_green` | AC §3.5 | W6 ok | idempotent | result ok | `automation.timeout.start_service` | retryable → **D-1** (§4.1) | no | restore |
-| W8 | `healthcheck_green` | AC §3.6 on green (internal), repeated with backoff; waits on the check, never on a fixed delay (EXP-01: ~10 s to listen on 1 vCPU) | W7 ok | read-only | exit 0 and marker checksum equal | `healthcheck.max_attempts`, `healthcheck.interval`, `automation.timeout.healthcheck` | exhausted → **D-1** (§4.1) | no | restore |
-| W9 | `move_fip` | `PUT /floatingips/{id} {port_id: green_port}` (+`fixed_ip_address` if several, OSI §6.1 SV) | FIP on blue's port **or** already on green's | pure state set; repeat-safe (OSI §3, SV). Map 404 `ExternalGatewayForFloatingIPNotFound` text explicitly | FIP `port_id` = green port; FIP `status` ACTIVE (DU) | `timeouts.fip_status` | 4xx and a GET shows `port_id` unchanged → auto restore (OSI §6.1 SV); FIP state unreadable → needs_human | **yes** (cutover) | restore (S8) |
-| W10 | `verify_external` | HTTP probe of `health_check.external` via the FIP from the worker; response must come from green (marker/identity field) | W9 ok | read-only | probe ok `external_verify.required_successes` times | `timeouts.external_verify` | exhausted → auto restore (subject to D-1 scope) | no | restore |
+| W7 | `start_service_green` | AC §3.5 | W6 ok | idempotent | result ok | `automation.timeout.start_service` | retryable → needs_human + page, or auto restore if a W4 snapshot exists (§4.1, D-1) | no | restore |
+| W8 | `healthcheck_green` | AC §3.6 on green (internal), repeated with backoff; waits on the check, never on a fixed delay (EXP-01: ~10 s to listen on 1 vCPU) | W7 ok | read-only | exit 0 and marker checksum equal | `healthcheck.max_attempts`, `healthcheck.interval`, `automation.timeout.healthcheck` | exhausted → needs_human + page, or auto restore if a W4 snapshot exists (§4.1, D-1) | no | restore |
+| W9 | `move_fip` | `PUT /floatingips/{id} {port_id: green_port}` (+`fixed_ip_address` if several, OSI §6.1 SV) | FIP on blue's port **or** already on green's | pure state set; repeat-safe (OSI §3, SV). Map 404 `ExternalGatewayForFloatingIPNotFound` text explicitly | FIP `port_id` = green port; FIP `status` ACTIVE (DU) | `timeouts.fip_status` | 4xx and a GET shows `port_id` unchanged → needs_human + page, or auto restore if a W4 snapshot exists (§4.1, D-1); FIP state unreadable → needs_human | **yes** (cutover) | restore (S8) |
+| W10 | `verify_external` | HTTP probe of `health_check.external` via the FIP from the worker; response must come from green (marker/identity field) | W9 ok | read-only | probe ok `external_verify.required_successes` times | `timeouts.external_verify` | exhausted → needs_human + page, or auto restore if a W4 snapshot exists (§4.1, D-1) | no | restore |
 
 W10 success commit (one transaction): `downtime_ended_at`, managed VM roles (green `current`, blue `retained`), audit.
 
@@ -154,7 +155,9 @@ state, in this order: the outage start; the worst-case window = Σ deadlines(W1�
 from the effective config; the `max_window_duration` budget; whether a pre-handoff snapshot is taken (if not:
 "revert carries green's writes forward"); and the policy's automatic-restore setting with its consequence: "on a
 failure listed in the closed table OVLM automatically restores service to blue (stop green, move volume and FIP back,
-start blue)". The approver approves both directions.
+start blue)", plus, per D-1, either "after the service starts on green a failure stops and pages an operator" (no
+snapshot) or "… is restored automatically; the pre-handoff snapshot is kept" (snapshot on). The approver approves both
+directions.
 
 ### 3.1 Approval evidence re-validated by the worker (SEC-R-1, SEC-R-2)
 
@@ -224,11 +227,11 @@ list and the FIP `port_id`, and never while the OpenStack API is unreachable. An
 | W5 attach not done | volume `available`, no attachment | yes |
 | W5 `error_attaching` / stuck `reserved`/`attaching` | — | **no** → needs_human |
 | W6 `data_attach_green` (any) | — | **no** → needs_human |
-| W7 `start_service_green` exhausted | volume on green; service may have written | **D-1** |
-| W8 `healthcheck_green` exhausted | volume on green; service has run | **D-1** |
-| W9 4xx with FIP `port_id` unchanged by GET | FIP on blue; volume on green; service has run | **D-1** |
-| W10 exhausted | FIP on green; service has run and may have served users | **D-1** |
-| Budget exceeded before W2–W8 | as for that step's precondition probe | yes (W2–W6); W7/W8: **D-1** |
+| W7 `start_service_green` exhausted | volume on green; service may have written | **needs_human + page**, unless a W4 snapshot was taken (then: yes) |
+| W8 `healthcheck_green` exhausted | volume on green; service has run | **needs_human + page**, unless a W4 snapshot was taken (then: yes) |
+| W9 4xx with FIP `port_id` unchanged by GET | FIP on blue; volume on green; service has run | **needs_human + page**, unless a W4 snapshot was taken (then: yes) |
+| W10 exhausted | FIP on green; service has run and may have served users | **needs_human + page**, unless a W4 snapshot was taken (then: yes) |
+| Budget exceeded before W2–W8 | as for that step's precondition probe | yes (W2–W6); W7/W8: **needs_human + page**, unless a W4 snapshot was taken (then: yes) |
 | `api_unreachable` self-resolved (§5) | per the row of the step that failed | per that row |
 
 Rules: **exactly one** automatic restore per run; a restore failure is needs_human; the engine never re-enters the
@@ -236,13 +239,15 @@ window automatically (no such edge; tested invariant). Audit row: `principal_typ
 `action=restore.auto`, failing step, error class, and the G2 approval id as the authority. After W10 success, restore
 runs only on operator `revert` (TC).
 
-**D-1 — maintainer decision (open).** After W7 starts, the service has run on the data volume on green. An automatic
-restore then starts blue on data a half-working green may have changed (schema migration, partial writes), with no
-snapshot unless the profile opted in. The security review names W7/W8; W9/W10 have the same exposure, so the decision
-should cover W7–W10 to stay consistent. Options and consequences are in ADR-0004 "Open maintainer decision D-1".
-Until the maintainer decides, the earlier design stays in force (option A: auto restore on these rows), and
-the step handlers keep the W7–W10 rows behind one policy-bound switch so either answer is a value change, not a
-redesign.
+**D-1 — decided by the maintainer, 2026-11-04: option B** (ADR-0004). After W7 starts, the service has run on the
+data volume on green, so an automatic restore could start blue on data a half-working green changed. Therefore a
+failure at W7–W10 (or a budget breach before W7/W8) stops in `needs_human(reason=post_start_failure)`: the run keeps
+all locks and the current state (no further OpenStack call), the current-truth panel is refreshed, and the alert
+`OvlmPostStartFailure` **pages** an operator (architecture.md §6). The operator chooses retry-step, rollback (TC;
+restore S1–S10) or a manual fix. **Exception:** if W4 took a pre-handoff snapshot (`snapshot_before_handoff` on and
+W4 succeeded) and the policy has `auto_restore_in_window = true`, the row is "yes": OVLM restores automatically and
+keeps the snapshot as the copy of the pre-handoff data until retirement. The G2 text states which of the two applies
+to the run. All other §4.1 rules (one attempt, fresh probe, audit) are unchanged.
 
 ## 5. Interruption and resume
 
@@ -293,8 +298,8 @@ locks, refreshes the run's **current-truth panel** (§6.1) and shows: the stuck 
 | Insufficient capacity | B1 quota pre-check refuses early (advisory: cannot see host capacity, OSI §7 SV). `OverQuota` at create → fatal, BuildFailed. `NoValidHost` (server `ERROR` with fault) → **fatal**, BuildFailed, green **kept** for diagnosis; operator rollback (TC) deletes it. OVLM never deletes a green automatically and never retries `create_green` while a green of the run exists. Blue untouched. |
 | Failed provisioning (bad image/flavor, ERROR) | B3/B4 fatal → BuildFailed with fault evidence; green kept until operator rollback (TC) deletes it (only `ovlm:run:<this run>` resources). Blue untouched. |
 | Failed Ansible configuration | B7 per AC §6: retryable bounded, fatal → BuildFailed. Volume never left blue. |
-| Failed health check | W8 exhausted → per D-1 (§4.1): restore S2–S10 or needs_human. Recorded downtime includes restore. |
-| Failed cutover | W9 4xx with FIP unchanged (single transaction, OSI §6.1 SV) → per D-1. W10 failure → per D-1, restore includes S8. Unknown FIP state → needs_human. |
+| Failed health check | W8 exhausted → needs_human + page (D-1 = B); auto restore S2–S10 only if a W4 snapshot was taken. Recorded downtime includes the wait and any restore. |
+| Failed cutover | W9 4xx with FIP unchanged (single transaction, OSI §6.1 SV) → needs_human + page, or auto restore if a W4 snapshot was taken (D-1 = B). W10 failure → same rule; a restore includes S8. Unknown FIP state → needs_human. |
 | Quiesced but still ACTIVE (W1 ok, W2 refused / abort / crash then rollback) | S6 boot-cycles blue (stop, start); fstab remounts; enabled units start; S7 health. Converges without `rollback_hooks` (SRE-R-1). |
 | DB or worker restart | §5. Resumes from persisted step; fenced commits; waits are timers, not threads. |
 | Detach refused / stuck (extra) | W3 needs_human; blue stays stopped; operator may roll back (S6 start blue) or call an admin (§6). |
