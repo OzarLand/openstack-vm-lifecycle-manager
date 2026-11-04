@@ -141,6 +141,7 @@ def map_server(s: Any) -> ServerInfo:
         host_id=s.host_id,
         attached_volumes=attached,
         is_minimal_construct=status == STATUS_UNKNOWN,
+        user_id=str(s.user_id) if getattr(s, "user_id", None) else None,
     )
 
 

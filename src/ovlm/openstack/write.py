@@ -18,6 +18,7 @@ A ``GuardedWriteClient`` is built per step attempt with that attempt's gate (``c
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from functools import wraps
 from typing import Any, Protocol, cast, runtime_checkable
@@ -92,6 +93,65 @@ def own_lock_reasons(run_id: str) -> frozenset[str]:
     """The full lock reasons of one run. Any other reason, ``ovlm:``-prefixed or not, is a foreign lock: a project
     member can set any reason, so a prefix proves nothing (SEC-C-6)."""
     return frozenset(f"{LOCK_REASON_PREFIX}{kind}:{run_id}" for kind in LOCK_REASON_KINDS)
+
+
+@dataclass(frozen=True)
+class AdoptionExpectation:
+    """What a server found by ``find_run_server`` must match to be adopted as this run's green (SEC-R-23).
+
+    ``image_id`` and ``flavor_name`` are the plan's ``resolved`` values (Nova >= 2.47 shows a server's flavor by
+    name only). ``ledger_committed_at`` is the commit time of the run's ``intended`` ledger row. ``write_user_id``
+    is the Keystone user of OVLM's write credential; ``None`` only when the lab showed that a member cannot see
+    ``user_id`` and the check was dropped and recorded (renewal-workflow.md B3)."""
+
+    run_id: str
+    image_id: str
+    flavor_name: str
+    ledger_committed_at: datetime
+    write_user_id: str | None
+
+
+@dataclass(frozen=True)
+class AdoptionVerdict:
+    reasons: tuple[str, ...]  # empty: adoption allowed
+
+    @property
+    def ok(self) -> bool:
+        return not self.reasons
+
+
+def adopt_checks(
+    server: ServerInfo,
+    expected: AdoptionExpectation,
+    attachments: Iterable[VolumeAttachmentInfo] = (),
+) -> AdoptionVerdict:
+    """Pure adoption check of a server this run may have created (SEC-R-23, SEC-C-10).
+
+    Every check must pass; any refusal means ``needs_human`` "adoption refused", never adopt. The step may record
+    the server as ``origin="created"`` in the ownership registry only when this returns ``ok``. ``attachments``
+    is the server's attachment list, read with it (both sources must show no volume)."""
+    reasons: list[str] = []
+    if server.is_minimal_construct or server.is_deleted:
+        reasons.append("the server is not readable (deleted or minimal construct)")
+    if TAG_MANAGED not in server.tags or run_tag(expected.run_id) not in server.tags:
+        reasons.append("the server does not carry ovlm:managed and this run's tag")
+    if server.image_id != expected.image_id:
+        reasons.append(f"image {server.image_id!r} is not the resolved image {expected.image_id!r}")
+    if server.flavor_original_name != expected.flavor_name:
+        reasons.append(
+            f"flavor {server.flavor_original_name!r} is not the resolved flavor {expected.flavor_name!r}"
+        )
+    if server.created is None or server.created < expected.ledger_committed_at:
+        reasons.append("the server was created before this run's ledger row was committed")
+    if server.attached_volumes or any(True for _ in attachments):
+        reasons.append("the server has attached volumes")
+    if expected.write_user_id is not None and server.user_id != expected.write_user_id:
+        reasons.append(
+            "the server was not created by OVLM's write user"
+            if server.user_id
+            else "the server's user_id is not visible"
+        )
+    return AdoptionVerdict(tuple(reasons))
 
 
 class GuardedWriteClient:
@@ -174,7 +234,8 @@ class GuardedWriteClient:
 
     def find_run_server(self, name: str) -> ServerInfo | None:
         """The server this run created with ``name``: by ``ovlm:run:<run>`` tag + exact name (ADR-0005 s.4).
-        More than one: :class:`DuplicateResourceError`. Adoption checks (SEC-R-23) stay with the step."""
+        More than one: :class:`DuplicateResourceError`. A match is only a candidate: the step adopts it (registers
+        it ``origin="created"``) only when :func:`adopt_checks` passes (SEC-R-23)."""
         return find_server_by_tag_and_name(self._backend, tag=run_tag(self.run_id), name=name)
 
     def build_state(self, server_id: str) -> ServerInfo | None:
