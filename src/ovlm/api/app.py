@@ -31,6 +31,13 @@ _CSP = (
 )
 
 
+def _loggable_path(request: Request) -> str:
+    """The route template (``/enrol/{link}``), not the raw path: path parameters can be secrets (one-time links)."""
+    route = request.scope.get("route")
+    template = getattr(route, "path", None)
+    return template if isinstance(template, str) else "<unmatched>"
+
+
 def create_app(
     settings: Settings,
     *,
@@ -94,7 +101,7 @@ def create_app(
                 "request",
                 extra={
                     "http_method": request.method,
-                    "path": request.url.path,
+                    "path": _loggable_path(request),
                     "status": response.status_code,
                     "duration_ms": round((time.perf_counter() - started) * 1000, 1),
                 },
