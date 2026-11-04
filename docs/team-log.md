@@ -10,9 +10,9 @@ what needs the maintainer. Agent 1 (PM/EM) updates it after every handoff. Agent
 | 1 | Product / Engineering Manager | Opus 5.5 (main session) | Active: coordinating | `product-vision.md`, `functional-requirements.md`, `agent-team.md`, `model-selection-strategy.md`, ADR-0000, this log |
 | 2 | Chief Software Architect | Opus 5.5 | **Design revision done**: all 6 high findings resolved, merged. $3.26 | `architecture.md`, `data-model.md`, `api-design.md`, `renewal-workflow.md`, ADRs |
 | 3 | OpenStack Specialist | Sonnet 5.5 | **Done** (Wave 1): 233,687 tokens, 102 tool calls, 11 min 52 s | `openstack-integration.md` |
-| 4 | Backend Engineer | — | Not activated (no code before approval) | — |
+| 4 | Backend Engineer | Sonnet 5.5 | **Running**: E1 Foundation (E1-1..E1-6) | `src/`, `tests/`, Compose, CI on `claude/ovlm-backend` |
 | 5 | Frontend Engineer / UX | — | Not activated | — |
-| 6 | Automation Engineer | Sonnet 5.5 | **Done** (Wave 1) | `automation-contract.md`, `test-environment.md` |
+| 6 | Automation Engineer | Sonnet 5.5 | Wave 1 done. **Running**: E1-7 reference workload `ovlm-counter` | `automation-contract.md`, `test-environment.md` |
 | 7 | SRE / Reliability | Fable 5.1 | **Done**: accept with required changes, no veto (0 critical, 3 high, 9 medium, 6 low). $5.70 | `reviews/sre-review-phase1.md` on `claude/ovlm-sre-review` |
 | 8 | Security Engineer | Opus 5.5 (author) → Fable 5.1 (review) | Authoring **done**: 115,807 tokens, 11 tool calls, 4 min 34 s. Fable review **done**: accept with required changes (both parts; 6 high in total). $7.17 | `security-model.md` |
 | 9 | QA / Test Automation | Sonnet 5.5 | **Done**: `testing-strategy.md`, 20 engine crash scenarios. $1.03 | `testing-strategy.md` on `claude/ovlm-qa` |
@@ -58,6 +58,8 @@ unblock it. Each agent pushes only to its own branch, and Agent 1 reviews the br
 | Agent | Model | Conversation | Branch |
 |---|---|---|---|
 | 2 — Architect, design revision | Opus 5.5 | https://claude.ai/code/session_016ti9w3B7uuCUrzzL1QrXZW | `claude/ovlm-architect` |
+| 4 — Backend, foundation | Sonnet 5.5 | https://claude.ai/code/session_016ti9w32wY5ZDgLijH6QUnf | `claude/ovlm-backend` |
+| 6 — Automation, reference workload | Sonnet 5.5 | https://claude.ai/code/session_016ti9vzqoWEEXYUi7HZ4qT1 | `claude/ovlm-automation` |
 | 7 — SRE reliability reviewer (veto holder) | Fable 5.1 | https://claude.ai/code/session_016ti9w2Rhy79ZyTv4fvtUTJ | `claude/ovlm-sre-review` |
 | 8 — Security reviewer | Fable 5.1 | https://claude.ai/code/session_016ti9vzmfDPFJ7HnXMMD5n5 | `claude/ovlm-security-review` |
 | 9 — QA / test strategy | Sonnet 5.5 | https://claude.ai/code/session_016ti9w1BJ2CeCfoC2a47xQT | `claude/ovlm-qa` |
@@ -537,3 +539,12 @@ maintainer"). Next: a re-review by the SRE and Security reviewers of the changes
   - **the console log is unreliable**, so ADR-0006 needs a fallback.
 
 **Next:** Architect round 2 for these items, then a short check by the reviewers of their own items only.
+
+## Phase 2 started — 2026-11-04
+
+On the maintainer's go, the backlog is in [roadmap.md](roadmap.md). Running in parallel, on disjoint files:
+- Agent 4: Foundation E1-1..E1-6 (Sonnet).
+- Agent 6: reference workload E1-7 (Sonnet).
+- Agent 2: design round 2, E0-1 (Opus).
+
+The quick-lab Cinder option (E1-8) starts when the engine work starts, so the lab VM does not sit idle at cost.
