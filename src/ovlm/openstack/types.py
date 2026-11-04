@@ -189,6 +189,9 @@ class CreateServerSpec:
     availability_zone: str | None = None
     security_group_names: tuple[str, ...] = ()
     key_name: str | None = None
+    #: cloud-init user-data (plain text; the client base64-encodes it). May hold the per-run bootstrap host key
+    #: (ADR-0006): kept out of ``repr`` and never logged.
+    user_data: str | None = field(default=None, repr=False)
 
 
 # --- payload normalisation (the jsonb stored in observed_* and compared by hash) -----------------------------
