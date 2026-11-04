@@ -14,9 +14,9 @@ This page is everything needed to resume, by this session or a new one. The stor
 |---|---|---|
 | `main` | Design and reviews, foundation, engine core, auth/TOTP/audit, inventory, profiles/policies/deadlines, UI first pages, CI incl. Ansible job | PRs #1–#4 merged, CI green |
 | `claude/openstack-vm-lifecycle-manager-9nf9cc` (working branch) | `main` + write client (E5-2), RBAC (E3-2), Ansible runner (E5-3), readiness (E4), merge migration `0005_merge` | Lint clean, 952 unit and 271 integration tests pass locally. **Not yet PR'd: waiting for the two fix rounds below.** |
-| `claude/ovlm-fix-engine` | Fixes for the SRE engine review SRE-C-1..10 | Paused (WIP pushed if the agent got to it) |
-| `claude/ovlm-fix-security` | Fixes for security review SEC-C-1..11 (two **High**: SEC-C-1 login rate limit keyed on the proxy IP, SEC-C-2 DEBUG logging of request bodies) | Paused (WIP pushed if the agent got to it) |
-| `claude/ovlm-renewal` | Renewal strategy `bluegreen_fip_v1` (E5-4/E5-5) | Paused (WIP pushed if the agent got to it) |
+| `claude/ovlm-fix-engine` (`ba872eb`) | Fixes for the SRE engine review SRE-C-1..10 | **Done** per the agent: all 10 fixed, lint and tests pass. To verify, merge and PR. |
+| `claude/ovlm-fix-security` (`6f85fd9`) | Fixes for security review SEC-C-1..11 (two **High**: SEC-C-1 login rate limit keyed on the proxy IP, SEC-C-2 DEBUG logging of request bodies) | **Done** per the agent, except SEC-C-8, which is partial (needs the `project_connection` table). To verify, merge and PR. |
+| `claude/ovlm-renewal` (`0bd035c`, WIP) | Renewal strategy `bluegreen_fip_v1` (E5-4/E5-5) | **Partial:** steps implemented with 44 integration tests passing. The crash matrix and the REST API are not started. |
 
 Reviews: [sre-review-engine-e5-1.md](reviews/sre-review-engine-e5-1.md) is on branch `claude/ovlm-sre-review`, and
 [security-review-code-wave3.md](reviews/security-review-code-wave3.md) is on branch `claude/ovlm-security-review`.
