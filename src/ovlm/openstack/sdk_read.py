@@ -375,12 +375,32 @@ class SdkReadClient:
             return [map_flavor(f) for f in self._conn.compute.flavors(details=True)]
 
 
+def require_tls_verification(region: Any) -> None:
+    """Refuse a cloud region whose TLS verification is off (security-model.md 4.5, SEC-C-4).
+
+    ``verify: false``, ``insecure: true`` (which wins over ``cacert`` in the SDK) and non-boolean ``verify`` values
+    are refused; ``verify: true`` and a ``cacert`` bundle that exists are accepted. Checked on what the SDK will
+    actually hand to ``requests``, before any request is sent."""
+    verify, _cert = region.get_requests_verify_args()
+    if verify is True:
+        return
+    if isinstance(verify, str) and region.config.get("cacert") == verify and Path(verify).exists():
+        return
+    name = getattr(region, "name", None) or "the cloud"
+    raise UnsupportedCloudError(
+        f"TLS verification to {name} is off (verify: false / insecure: true) or its CA bundle is missing; "
+        "OVLM always verifies the OpenStack endpoints: configure 'cacert' with the cloud's CA bundle instead"
+    )
+
+
 def connect_read_only(cloud: str, clouds_yaml: Path | None = None) -> SdkReadClient:
     """Build a read client from a ``clouds.yaml`` entry. The GET/HEAD guard is installed before any request
-    (authentication happens lazily on the first call). Environment variables are not read."""
+    (authentication happens lazily on the first call). Environment variables are not read. TLS verification
+    off is refused (:func:`require_tls_verification`)."""
     files = [str(clouds_yaml)] if clouds_yaml else None
     config = OpenStackConfig(config_files=files, load_envvars=False)
     region = config.get_one(cloud=cloud)
+    require_tls_verification(region)
     install_read_only_guard(region.get_session())
     conn = openstack.connection.Connection(config=region)
     return SdkReadClient(conn)

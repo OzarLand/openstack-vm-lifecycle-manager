@@ -90,7 +90,9 @@ def configure_logging(
     root.handlers[:] = [handler]
     root.setLevel(level)
     for name in SDK_HTTP_LOGGERS:
-        logging.getLogger(name).setLevel(logging.NOTSET if openstack_http_debug else SDK_HTTP_MIN_LEVEL)
+        logging.getLogger(name).setLevel(
+            logging.NOTSET if openstack_http_debug else SDK_HTTP_MIN_LEVEL
+        )
     if openstack_http_debug:
         logging.getLogger("ovlm.observability").warning(
             "log.openstack_http_debug is on: OpenStack request and response bodies are logged "

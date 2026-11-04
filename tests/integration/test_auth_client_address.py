@@ -93,7 +93,12 @@ def test_a_trusted_proxy_naming_no_client_never_locks_out_another_account(env: E
         assert _login(proxy, "ann", "wrong password 123").status_code == 401
     r = _login(proxy, "bob", PASSWORD)
     assert r.status_code == 200, r.text
-    assert env.sql("SELECT count(*) AS n FROM login_attempt WHERE kind = 'login' AND source_ip IS NOT NULL")[0].n == 0
+    assert (
+        env.sql(
+            "SELECT count(*) AS n FROM login_attempt WHERE kind = 'login' AND source_ip IS NOT NULL"
+        )[0].n
+        == 0
+    )
 
 
 @pytest.mark.parametrize("env", [{"login_failure_threshold": 3}], indirect=True)
@@ -107,7 +112,9 @@ def test_only_the_per_account_limit_escalates(env: Env) -> None:
         r = _login(c, "esc", PASSWORD)
         assert r.status_code == 429
         assert int(r.headers["Retry-After"]) <= env.settings.auth.login_ip_delay_seconds
-        env.sql("UPDATE login_attempt SET ts = ts - interval '1 minute'")  # let the fixed delay pass
+        env.sql(
+            "UPDATE login_attempt SET ts = ts - interval '1 minute'"
+        )  # let the fixed delay pass
     assert _login(c, "esc", PASSWORD).status_code == 200
     # per account: it doubles past the per-source delay (12 recent failures, threshold 3: 2**9 s)
     env.sql(

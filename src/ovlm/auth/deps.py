@@ -23,7 +23,6 @@ from fastapi import Depends, Request
 from sqlalchemy.orm import Session, sessionmaker
 
 from ovlm.auth import csrf as csrf_mod
-from ovlm.auth.clientaddr import ClientAddress, resolve_client
 from ovlm.auth.authz import (
     MATRIX,
     Action,
@@ -33,6 +32,7 @@ from ovlm.auth.authz import (
     decide_in_scope,
     token_may,
 )
+from ovlm.auth.clientaddr import ClientAddress, resolve_client
 from ovlm.auth.errors import ProblemError, forbidden, unauthenticated
 from ovlm.auth.events import record_independent
 from ovlm.auth.login import needs_totp

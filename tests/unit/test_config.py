@@ -81,7 +81,9 @@ def test_missing_and_empty_secret_files(tmp_path: Path) -> None:
 def test_production_api_requires_external_url() -> None:
     with pytest.raises(ValidationError, match="external_url is required"):
         Settings(process_role="api", development_mode=False)
-    ok = Settings(process_role="api", development_mode=False, external_url="https://ovlm.example.org")
+    ok = Settings(
+        process_role="api", development_mode=False, external_url="https://ovlm.example.org"
+    )
     assert ok.external_url == "https://ovlm.example.org"
     # the worker and migrate processes do not serve the UI and do not need it
     assert Settings(process_role="worker", development_mode=False).external_url is None

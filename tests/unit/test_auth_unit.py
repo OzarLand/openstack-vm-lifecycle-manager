@@ -246,7 +246,9 @@ def test_origin_check_with_external_url() -> None:
 
 
 def test_origin_check_without_external_url_compares_host() -> None:
-    s = Settings(development_mode=True)  # production refuses to start without external_url (SEC-C-11)
+    s = Settings(
+        development_mode=True
+    )  # production refuses to start without external_url (SEC-C-11)
     assert csrf.origin_allowed(req({"Origin": "https://ovlm.local", "Host": "ovlm.local"}), s)
     assert not csrf.origin_allowed(req({"Origin": "https://evil.net", "Host": "ovlm.local"}), s)
     assert not csrf.origin_allowed(req({"Host": "ovlm.local"}), s)

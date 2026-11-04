@@ -32,7 +32,7 @@ from ovlm.openstack.allowlist import (
 )
 from ovlm.openstack.guard import install_read_only_guard
 from ovlm.openstack.ownership import InMemoryOwnershipRegistry, ResourceKind, run_tag
-from ovlm.openstack.sdk_write import SdkWriteBackend, connect_write, error_message
+from ovlm.openstack.sdk_write import SdkWriteBackend, error_message
 from ovlm.openstack.types import CreateServerSpec
 from ovlm.openstack.write import GuardedWriteClient
 from ovlm.workflow import FenceLost
@@ -562,29 +562,4 @@ def test_guarded_client_over_the_sdk_refuses_an_unregistered_target_before_any_r
     assert gate.checks == [("openstack:stop_server", 0)]
 
 
-def test_connect_write_exists_only_in_the_worker(tmp_path: Any) -> None:
-    with pytest.raises(errors.WriteNotAllowedError, match="worker"):
-        connect_write(
-            "lab", registry=InMemoryOwnershipRegistry(RUN), gate=lambda _a: None, process_role="api"
-        )
-
-
-def test_connect_write_installs_the_guard_before_any_request(tmp_path: Any) -> None:
-    clouds = tmp_path / "clouds.yaml"
-    clouds.write_text(
-        "clouds:\n  lab:\n    auth_type: v3applicationcredential\n    auth:\n"
-        f"      auth_url: {AUTH_URL}\n      application_credential_id: id\n"
-        "      application_credential_secret: s3cret\n    region_name: R1\n"
-    )
-    client = connect_write(
-        "lab", registry=InMemoryOwnershipRegistry(RUN), gate=lambda _a: None, process_role="worker",
-        clouds_yaml=clouds,
-    )  # fmt: skip
-    backend = client._backend
-    assert isinstance(backend, SdkWriteBackend)
-    assert getattr(backend._conn.session, "_ovlm_write_guard", False)
-    cloud = CannedCloud()
-    backend._conn.session.session.mount("http://", cloud)
-    with pytest.raises(errors.WriteNotAllowedError):  # no gate bound outside the client's own calls
-        backend._conn.compute.delete(f"/servers/{SID}")
-    assert cloud.writes() == []  # only the token request (exempt) went out
+# connect_write / connect_write_from_clouds_yaml: see test_openstack_credentials.py (SEC-C-3, SEC-C-4).
