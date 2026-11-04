@@ -12,6 +12,11 @@
 > carries worst-case window, snapshot statement and automatic-restore statement (SRE-R-6, SEC-R-30) and X1 evidence
 > (SRE-R-10); current truth, read-only probe, available actions, lease fields (SRE-R-9); metrics port (SEC-R-17);
 > credential test specified (SEC-R-32).
+>
+> **Revision 2026-11-04 (round 2)**: TOTP step-up bound to action and target (SEC-R-10, M9); self-approval setting and
+> flag, account provenance, enrolment links (M9, SEC-R-2, SEC-R-11); credential rotation without Keystone writes
+> (SEC-R-13); live-VM assessment as an explicit confirmed action (SEC-R-28); lint waiver grantor rule (SEC-R-36);
+> pending signals and `requested` runs visible (SRE-R-24, -25).
 
 Authentication, roles, step-up re-auth, token scopes and CSRF are defined in [security-model.md](security-model.md)
 (§2, §3, §7); this document applies them. The UI (ADR-0002) calls the same service functions as these endpoints.
@@ -28,7 +33,7 @@ Authentication, roles, step-up re-auth, token scopes and CSRF are defined in [se
 | Pagination | Cursor based: `?limit=` (max `api.max_page_size`, default TBD) and `?cursor=`; response `{"items": [...], "next_cursor": "..." | null}`. Cursor is opaque (encoded sort key + id). Stable order by `(created_at, id)` unless `sort` is one of the documented keys. |
 | Filtering | Explicit query params per resource (e.g. `?status=gone&project=…`); no generic query language. |
 | Errors | RFC 9457 `application/problem+json`: `type` (URI under `https://ovlm.dev/problems/<slug>` — placeholder domain), `title`, `status`, `detail`, `instance`, plus `code` (stable slug), `errors[]` for validation, `run_id`/`step_id` when relevant, and `next_action` (NFR-10: what state things are in, what to do next). Never secrets or raw stack traces. `detail` names only resources the caller may read; otherwise only the run id (SEC-R-31). |
-| Async work | Anything that calls OpenStack, SSH or runs Ansible returns **`202 Accepted`** with `Location: /api/v1/runs/{id}` and the run body. Clients poll the run. A new run is in state `requested` until the worker admits it (locks, approval evidence) or moves it to `rejected` with a reason (ADR-0003). Run actions are recorded as `run_signal`s; the worker re-validates actor, step-up and TC before acting. |
+| Async work | Anything that calls OpenStack, SSH or runs Ansible returns **`202 Accepted`** with `Location: /api/v1/runs/{id}` and the run body. Clients poll the run. A new run is in state `requested` until the worker admits it (locks, approval evidence, concurrency cap) or moves it to `rejected` with a reason (ADR-0003); a `requested` run shows the last worker heartbeat (SRE-R-25). Run actions are recorded as `run_signal`s; the worker re-validates actor, step-up and TC before acting; the run body lists pending signals (SRE-R-24). |
 | Idempotency | `Idempotency-Key` header (client UUID) **required** on POSTs that start work (`/runs`, `/syncs`, `/assessments`, `/plans/{id}/start`, `/runs/{id}/actions/*`). Stored with (principal, method, path, body hash) for `api.idempotency_ttl`; replay returns the original response; same key + different body → `409 idempotency-key-reuse`. |
 | Optimistic concurrency | Profiles, policies, services, plans return `ETag` (row `version`). `PUT`/`PATCH`/`DELETE` require `If-Match`; missing → `428`, stale → `412`. |
 | Rate limits | Login and token endpoints per security-model.md §2.1; others unlimited in MVP. |
@@ -47,7 +52,7 @@ approver). "op" below = operator. SoD (requester ≠ approver; retirement two-pe
 | `GET /clouds`, `GET /clouds/{id}` | viewer | |
 | `POST /clouds`, `PATCH /clouds/{id}` | admin | |
 | `GET/POST /projects`, `GET/PATCH /projects/{id}` | viewer / admin | project connection incl. `guest_access` |
-| `PUT /projects/{id}/credentials/{kind}` | admin + TC on replace | write-only secret; api seals it (security-model.md §5.1); response shows metadata only |
+| `PUT /projects/{id}/credentials/{kind}` `{secret, expires_at}` | admin + TC on replace | write-only secret; api seals it (security-model.md §5.1); response shows metadata only. **Rotation** (SEC-R-13): the cloud admin creates the new application credential out of band; the OVLM admin uploads it with its `expires_at`; a `credential_test` run validates it (project id, role list); on success the worker switches atomically and marks the old one `superseded` with `cloud_deletion_pending` and a reminder. OVLM never creates or deletes application credentials (a restricted one cannot, OSI §8 SV) |
 | `POST /projects/{id}/credentials/{kind}/test` | admin | **202** run (`credential_test`, worker): token issuance plus GET-only probes through the `ReadClient` hook for **both** credential kinds; records in `validation_result` whether the token's project id equals the project record and the role list is the expected one; no token or catalog stored (SEC-R-32) |
 | `DELETE /projects/{id}/credentials/{kind}` | admin + TC | refused `409` while a run uses it |
 
@@ -74,7 +79,7 @@ approver). "op" below = operator. SoD (requester ≠ approver; retirement two-pe
 | `DELETE /managed-vms/{id}` | op | unregister; refused while a run holds the service lock |
 | `GET/POST /services/{id}/profiles`, `GET /profiles/{id}` | viewer / op | |
 | `POST /profiles/{id}/versions` (`If-Match`) | op | creates an immutable version and a worker `automation_lint` run; validation errors as problem+json `errors[]` (unpinned SHA, branch ref, non-allowlisted repo, >1 data volume, `secret_ref` of another service (SEC-R-27) …). A plan on a version whose lint failed is refused unless a waiver exists |
-| `POST /profiles/{id}/versions/{n}/lint-waiver` `{reason}` | approver, human session + step-up | audited, per version; the author of the version cannot grant it (SEC-R-3) |
+| `POST /profiles/{id}/versions/{n}/lint-waiver` `{rule_keys, reason}` | approver, human session + TOTP step-up | audited `lint_waiver` row; refused if the caller is the version author or in the requester set of any plan on that version; the waiver is listed in every later approval's `hash_inputs` (SEC-R-36) |
 | `GET /profiles/{id}/versions`, `/versions/{n}` | viewer | |
 
 ### 3.4 Policies
@@ -91,7 +96,7 @@ approver). "op" below = operator. SoD (requester ≠ approver; retirement two-pe
 
 | Method + path | Role | Notes |
 |---|---|---|
-| `POST /managed-vms/{id}/assessments` | op | **202** run (`readiness`) |
+| `POST /managed-vms/{id}/assessments` `{run_repo_code_on_live_vm?: false, typed_confirmation?}` | op | **202** run (`readiness`). By default runs only OVLM-owned read-only checks and static analysis of the repo; no repo code runs on the live VM or the worker, and checks that need it (`configure --check --diff` drift) report `unknown` (warning). With `run_repo_code_on_live_vm: true`: human session, TOTP step-up and TC of the VM (`name + last 6 ID chars`); audited with the SHA executed (M9, SEC-R-28) |
 | `GET /managed-vms/{id}/assessments`, `GET /assessments/{id}` | viewer | level, checks, evidence, blockers, recommendations |
 | `GET /checks` | viewer | catalogue of check keys + versions |
 
@@ -103,8 +108,8 @@ approver). "op" below = operator. SoD (requester ≠ approver; retirement two-pe
 | `POST /plans` `{managed_vm_id, planned_window_start}` | op | resolves image (unique match, owner, visibility, hash fields), flavor, SG **IDs**, other IDs, capacity (advisory), conflicts; copies `auto_restore_in_window` and `max_window_duration` from the policy version; computes `plan_hash`; starts a worker `automation_diff` run; `201` (no OpenStack call in api: uses latest inventory; the run re-validates live) |
 | `GET /plans/{id}`, `GET /plans` | viewer | |
 | `POST /plans/{id}/approval-requests` | op | creates `approval` request (subject `plan`); `409 diff-pending` until the automation diff is available |
-| `GET /approvals/{id}` | viewer | `hash_inputs` (profile version, SHA, repo URL, target names + ids, data volume id, SG ids, image id + owner, policy version incl. `auto_restore_in_window` and `max_window_duration`), `requester_set` (names), `automation_diff` (or "first approval of this repo"), `sod_allowance` if any, `blast_radius` (§4) |
-| `POST /approvals/{id}/decision` `{decision, typed_confirmation?, comment}` | approver, **human session + step-up** | `typed_confirmation` required for cutover and retirement gates: `<server name> <last 6 chars of server id>` checked server-side; decision bound to current `bound_hash`; `409 approval-voided` if hash changed; `403 sod-violation` if the caller is in the requester set (profile version author, plan creator, run starter, policy editor, requester) or holds `operator` in the same scope without an admin allowance (SEC-R-2) |
+| `GET /approvals/{id}` | viewer | `self_approved` flag, decider `account_provenance` (G3), `hash_inputs` (profile version, SHA, repo URL, target names + ids, data volume id, SG ids, image id + owner, policy version incl. `auto_restore_in_window` and `max_window_duration`), `requester_set` (names), `automation_diff` (or "first approval of this repo"), `sod_allowance` if any, `blast_radius` (§4) |
+| `POST /approvals/{id}/decision` `{decision, typed_confirmation?, comment}` | approver, **human session + TOTP step-up** (single-use, bound to this approval) | `typed_confirmation` required for cutover and retirement gates: `<server name> <last 6 chars of server id>` checked server-side; decision bound to current `bound_hash`; `409 approval-voided` if hash changed; `403 sod-violation` if the caller is in the requester set (profile version author, plan creator, run starter, policy editor, requester) or holds `operator` in the same scope, unless the installation allows it, in which case the approval is recorded `self_approved` (never for retirement) (SEC-R-2, M9) |
 | `GET /approvals?state=open` | viewer | |
 | `POST /plans/{id}/start` | op (requester may start; approval by someone else) | **202** run in `requested`; refuses early if approval missing/expired/voided, locks visibly unavailable (`409 resource-locked`, advisory pre-check), concurrency cap reached (`409 capacity`), readiness not `ready`. The worker's admission is authoritative (run → `rejected` with reason) |
 
@@ -133,7 +138,10 @@ All action POSTs require `Idempotency-Key`, return **202** with the run, and are
 | `GET /audit?actor=&target=&run=&from=&to=` | viewer (scoped) | per-role action allowlist: authentication, token and user/role-management events are admin only (SEC-R-31) |
 | `GET /audit/export` (V1, JSON lines) | admin | |
 | `GET /healthz`, `GET /readyz` | none | architecture.md §6; `/metrics` on the internal port only |
-| `/users`, `/role-bindings`, `/tokens`, `/session`, `/session/reauth` | per security-model.md | |
+| `/users`, `/role-bindings`, `/tokens`, `/session` | per security-model.md | `POST /users` and password reset return a **one-time enrolment link**; the admin never sets or sees a password; first login forces a password change and, for `approver`/`admin`, TOTP enrolment in the user's own session (SEC-R-11) |
+| `POST /session/totp/enrol`, `POST /session/totp/confirm` | the user, own session | TOTP mandatory for `approver` and `admin` in MVP (M9, SEC-R-10) |
+| `POST /session/reauth` `{password, totp_code, action, target_id}` | the user | returns a single-use `stepup_id` valid ≤ 5 min for exactly that action and target; approvals and TCs must present it (SEC-R-10) |
+| `GET/PUT /settings/auth` `{allow_operator_approver}` | admin, human session + TOTP step-up + TC | installation setting (default false, M9); history kept, audited |
 
 ## 4. Destructive endpoints and confirmation
 

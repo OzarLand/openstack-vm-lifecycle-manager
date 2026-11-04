@@ -10,6 +10,13 @@
 > automatic restore is a policy field with a closed trigger table and one attempt (SEC-R-30, SRE Q5); snapshot failure
 > restores (SRE-R-7); window budget enforced (SRE-R-6); EXP-01 results (lab-observed tags, no volume creation, no
 > temporary FIP confirmed). Maintainer decision **D-1: B** (below).
+>
+> **Revision 2026-11-04 (round 2)**: green proven ready before T0 (step B9, EXP-01b); no settle delay after the FIP
+> move (EXP-01b, LAB-OBSERVED 1.1–1.3 s); snapshot described as a manual way back and kept after a restore (SRE-R-30,
+> -31); evidence-invalid and `api_unreachable` rows (SRE-R-23, SEC-R-34, SRE-R-26). One deliberate deviation:
+> SEC-R-34 item (2) asks that self-resolution never moves forward; renewal-workflow.md §5.1 rule 1 lets a run continue
+> when the failed call is proven to have landed (exact expected post-state), inside the approved budget, and never for
+> W9/W10, because SRE-R-26 shows that restoring there would undo a completed step for no safety gain.
 
 ## Context
 
@@ -69,8 +76,10 @@ FR-REN-2 fixes one MVP strategy. Tags below are Agent 3's (openstack-integration
 | Root disk | Green boots **from image** (local root disk). Blue may be boot-from-volume: its root volume is never touched by handoff; at retirement OVLM reports a leftover root volume (`delete_on_termination=false`) and does not delete it. Boot-from-volume **green** = V1. | Simplest; but see risk below (clouds with only zero-disk flavors). |
 | Network | Green gets a **new port** on blue's network/subnet (same router path); new fixed IP and MAC; FIP is the stable address. FIP required: VMs without FIP are not renewable in MVP (readiness blocker). | §6.1, §9 |
 | AZ | Green is created in the data volume's AZ. | §4 same-AZ rule |
-| Snapshot before handoff | Optional per profile (`data_volume.snapshot_before_handoff`, default false), taken while the volume is `available` between detach and attach; deleted at retirement. When on: B1 checks Cinder `snapshots`/`gigabytes` quota; W4 failure or deadline → automatic restore, never an open-ended outage (SRE-R-7). When off: G2 states "revert carries green's writes forward". A policy-level mandate is V1 (SRE-R-19). | Backup is the workload owner's job; adds downtime. |
+| Snapshot before handoff | Optional per profile (`data_volume.snapshot_before_handoff`, default false), taken while the volume is `available` between detach and attach; deleted at retirement; kept after a restore (policy `snapshot_retain_after_restore`). It is a **manual** way back for a human with Cinder rights; OVLM never restores from it (SRE-R-30). When on: B1 checks Cinder `snapshots`/`gigabytes` quota; W4 failure or deadline → automatic restore, never an open-ended outage (SRE-R-7). When off: G2 states "revert carries green's writes forward". A policy-level mandate is V1 (SRE-R-19). | Backup is the workload owner's job; adds downtime. |
 | Anti-affinity | Best effort `different_host` hint only if configured per project; plan states "same host possible". | §7 (AS on filter availability) |
+| Green readiness before the outage | Step B9 proves green reachable over SSH on the pinned key and healthy without data (cloud-init done, `preflight.yml`) after G2 and immediately before T0; W1 is not claimed otherwise. | EXP-01b: Nova ACTIVE came ~85 s before SSH answered; starting the window then added ~55 s of outage (R3, LAB-OBSERVED). |
+| FIP move | One PUT, then W10 starts at once; no settle delay. | EXP-01b: 1.1–1.3 s API time, effective at once (LAB-OBSERVED, hairpin probe path). Documentation, not a default. |
 | Guest access | Worker reaches green's fixed IP **directly** (routed) or through a per-project **jump host**. No temporary FIP. | OVLM never creates FIPs in MVP (§6.1); avoids public-IP leftovers. **Confirmed by EXP-01**: the FIP pool was empty while the FIP quota was unlimited (allocation → 400), so a design that allocated FIPs would fail on quota-green clouds; direct SSH to a fixed IP worked (LAB-OBSERVED). The write-session allowlist excludes FIP create/delete (SEC-R-7). |
 | Volume creation | OVLM creates **no Cinder volume** in MVP (green boots from image; the data volume pre-exists). Any future strategy that creates one (boot-from-volume green, V1) passes an explicit `volume_type` resolved to an ID at plan time and in the plan hash, and preflight checks it exists. | EXP-01: `volume create` without a type → HTTP 500 (`__DEFAULT__` not found) on Felcloud; a working default type cannot be assumed (LAB-OBSERVED). |
 
@@ -83,8 +92,8 @@ fixed-IP or MAC preservation, Octavia/Designate cutover, hot-detach, blue locked
 
 - Downtime = quiesce + stop + detach + attach + data_attach + start + healthcheck + FIP propagation. It is **measured**,
   not promised (renewal-workflow.md §3). First real-cloud observation (EXP-01, one run, 1 vCPU): ~45 s from unmount
-  to green serving, excluding the FIP move (not yet measured). This informs documentation only; it is not a default
-  and not a promise (renewal-workflow.md §10).
+  to green serving, excluding the FIP move; EXP-01b measured 40.6 s and 46.1 s total outage through the FIP when green
+  was ready at T0. This informs documentation only; it is not a default and not a promise (renewal-workflow.md §10).
 - Quota must cover one extra server (cores, RAM, instances, port) during the build phase and retention.
 - Old VM stays stopped and locked (FR-REN-7), consuming instance quota (cores/RAM accounting of stopped servers is
   cloud-dependent, ASSUMPTION) until retirement.

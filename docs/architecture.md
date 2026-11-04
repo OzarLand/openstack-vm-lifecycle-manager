@@ -15,6 +15,11 @@ Status: Designed.
 > (SEC-R-17); migrate secret isolation (SEC-R-18); core dumps and SSH agent hardening (SEC-R-14); session key purpose
 > and credential test (SEC-R-32); `auto_restore_in_window` moved from config to policy (SEC-R-30); mandatory paging
 > for post-start failures (D-1 = B).
+>
+> **Revision 2026-11-04 (round 2)**: TOTP for approver/admin and action-bound step-up (M9, SEC-R-10, -11); readiness
+> never runs repo code on the live VM by default (M9, SEC-R-28); lint and diff are static analysis only, every Ansible
+> invocation on repo content happens inside a run after G1 (SEC-R-35); host-key default `injected` (ADR-0006); new
+> alerts and keys (SRE-R-23, -24, -25); EXP-01b timings are documentation only.
 
 Related: [data-model.md](data-model.md), [api-design.md](api-design.md), [renewal-workflow.md](renewal-workflow.md),
 [security-model.md](security-model.md) (Agent 8, authoritative for authN/Z, secrets, audit integrity),
@@ -106,17 +111,17 @@ flowchart TB
 | `db` | SQLAlchemy engine/session, Alembic, `fencing_seq` | `config` | contain domain logic |
 | `observability` | JSON logging, context vars (run/step/request id), Prometheus registry | `config` | — |
 | `audit` | `record(event)` in caller's transaction; after commit emits the row as an `event=audit` log line (log-stream mirror, SEC-R-1); read/query | `db`, `observability` | update/delete rows (DB grants enforce) |
-| `auth` | Users, sessions, tokens, RBAC, step-up, SoD checks (per security-model.md) | `db`, `audit` | call OpenStack |
+| `auth` | Users, sessions, tokens, RBAC, SoD checks and `self_approved` flag, TOTP (mandatory for `approver`/`admin`, pyotp-class library), single-use step-up bound to (session, action, target), enrolment links (admin never sets passwords) (per security-model.md) | `db`, `audit` | call OpenStack |
 | `inventory` | Sync jobs (worker), observed-state tables, `gone` marking, orphan report | `openstack.read`, `db`, `audit` | use the WriteClient |
 | `registry` | Services, managed VMs, registration (links observed server → managed VM) | `inventory` (read service), `db`, `audit` | — |
 | `profiles` | Profile + immutable versions, schema validation (incl. automation block), ETag | `db`, `audit` | — |
 | `policies` | Policies, bindings, effective-policy resolution, deadline + window computation, exceptions (V1) | `registry`, `db`, `audit` | — |
-| `readiness` | Versioned checks, assessments, level rules (FR-RDY-3) | `profiles`, `inventory`, `registry`; check-mode Ansible runs only as worker jobs (whether a check-mode run on blue needs a prior approval is the open maintainer decision SEC-R-28) | mutate OpenStack |
+| `readiness` | Versioned checks, assessments, level rules (FR-RDY-3) | `profiles`, `inventory`, `registry`; by default only OVLM-owned read-only probes and static repo analysis; a check-mode run of repo code on the live VM only as an explicit operator action with TC, as a worker job in run containment, audited with the SHA (M9, SEC-R-28) | mutate OpenStack |
 | `planning` | Due list, capacity pre-check (quota, advisory), conflict check, plan + approval requests, plan hash | `readiness`, `policies`, `profiles`, `registry`, `inventory`, `workflow` (start run) | — |
 | `workflow` | Generic durable step executor, run admission, resource locks, `run_signal` consumption, approval waits, scheduler, `api_unreachable` re-probe (ADR-0003) | `db`, `audit`, `observability` | know any strategy |
 | `renewal` | Strategy `bluegreen_fip_v1`: step handlers, restore sequence, closed auto-restore table, approval-evidence re-validation, current-truth panel, ownership guard calls | `workflow`, `openstack`, `automation`, `secrets`, `registry`, `profiles`, `auth` (read-only SoD/role queries) | be imported by `api`/`ui` except its read-only views |
 | `openstack` | `ReadClient`: GET/HEAD-only hook at the **service-request layer** (SDK adapter / `Session.request` for service endpoints) with one explicit, tested exemption for the auth plugin's token request (SEC-R-5). `WriteClient` (worker + step context only): request hook that (1) checks the **fence deadline** (ADR-0003), (2) checks a **(method, path-pattern) allowlist** limited to the strategy's operations; anything else raises before sending, explicitly `DELETE …/volumes/*`, `POST`/`DELETE …/floatingips*`, any `security-groups*` write, `POST …/volumes` (SEC-R-7). Error mapping (e.g. FIP 404 text), microversion pinning, ownership guard | `secrets`, `config` | be imported in the api process (import guard) |
-| `automation` | Run-level verified checkout (once per run), per-attempt local copy, blocking lint (`no_log` on secret-handling tasks, no `mkfs`/`wipefs`, no playbook-level `ansible_ssh_*`/`-A`; per-profile audited waiver), ansible-runner subprocess as `ovlm-ansible` in its own process group with parent-death signal, OVLM-owned SSH config (`ForwardAgent no`, `IdentitiesOnly yes`, per-run control path), result JSON validation, redaction, restricted artefact storage (`store_diffs` opt-in), known_hosts | `secrets`, `config` | receive OpenStack credentials |
+| `automation` | Run-level verified checkout (once per run), per-attempt local copy, blocking lint as **pure static analysis** (YAML/git parsing and rule matching; no Ansible process, no plugin loading, no Jinja evaluation, SEC-R-35): `no_log` on secret-handling tasks, templated task names flagged, no `mkfs`/`wipefs`, no playbook-level `ansible_ssh_*`/`-A`, `check_mode: false`, `always_run`, `delegate_to`/`local_action` in `configure.yml`; audited waiver rows. Every `ansible-playbook`/`ansible-inventory` invocation on repo content (incl. `--syntax-check`, `--list-hosts`) runs only inside a run (B6 or later, after G1) in phase containment, ansible-runner subprocess as `ovlm-ansible` in its own process group with parent-death signal, OVLM-owned SSH config (`ForwardAgent no`, `IdentitiesOnly yes`, per-run control path), result JSON validation, redaction, restricted artefact storage (`store_diffs` opt-in), known_hosts | `secrets`, `config` | receive OpenStack credentials |
 | `secrets` | Envelope encryption: seal (api, public key) / unseal (worker, KEK) | `config` | — |
 | `api`, `ui` | HTTP adapters: parse, call service, render | domain `service.py`, `auth` | contain business rules, query tables |
 
@@ -154,12 +159,13 @@ Background jobs that are not renewals (inventory sync, readiness run, credential
 Key groups (all timeouts and limits are named keys; **defaults TBD in lab** unless a doc states otherwise):
 `worker.{slots, lease_duration, heartbeat_interval, fence_margin, shutdown_grace}`,
 `poll.{initial_interval, max_interval}`, `retry.max_attempts.<step_key>`, `timeouts.<step_key>`,
-`worker.takeover_delay`, `automation.{run_root, timeout.<phase>, idle_timeout.<phase>, result_max_bytes,
+`worker.takeover_delay`, `green_ready.max_age`, `timeouts.green_ready`, `admission.alert_after`, `signal.alert_after`, `automation.{run_root, timeout.<phase>, idle_timeout.<phase>, result_max_bytes,
 log_max_bytes, artifact_retention}`, `inventory.{sync_interval, gone_after_missed_syncs}`,
-`renewal.max_concurrent_runs`, `retire.health_max_age`, `approval.validity.{plan, cutover, retirement}`,
+`renewal.max_concurrent_runs` (checked at admission), `retire.health_max_age`, `approval.validity.{plan, cutover, retirement}`,
 `ui.poll_interval`, `external_url`.
 `auto_restore_in_window` and `max_window_duration` are **policy** fields, not config keys (bound into the plan hash,
-SEC-R-30, SRE-R-6). EXP-01 lab times (renewal-workflow.md §10) are documentation, never defaults.
+SEC-R-30, SRE-R-6). `auth.allow_operator_approver` is an installation setting in the DB (admin, TC, audited, M9), not
+a file key. EXP-01/EXP-01b lab times (renewal-workflow.md §10) are documentation, never defaults.
 
 ## 6. Observability
 
@@ -167,7 +173,7 @@ SEC-R-30, SRE-R-6). EXP-01 lab times (renewal-workflow.md §10) are documentatio
 |---|---|
 | Logs | JSON lines to stdout. Context fields: `ts, level, process, request_id, actor, run_id, step_id, step_key, attempt, fencing_token, project_id, openstack_request_id` (from `x-openstack-request-id`). Secrets never logged (security-model.md §5.2). |
 | Metrics (Prometheus, `/metrics` on a separate internal port of api and worker, reachable only on the Compose network or behind proxy auth, SEC-R-17) | `ovlm_workflow_runs{kind,state}` gauge; `ovlm_step_attempts_total{step_key,outcome,error_class}`; `ovlm_step_duration_seconds{step_key}`; `ovlm_lease_takeovers_total`; `ovlm_fenced_commit_rejected_total`; `ovlm_openstack_requests_total{service,method,status}` + latency histogram; `ovlm_ansible_phase_duration_seconds{phase,outcome}`; `ovlm_inventory_sync_age_seconds{project}`; `ovlm_renewal_downtime_seconds` histogram; `ovlm_runs_needing_attention{phase,reason}`; `ovlm_window_budget_exceeded_total`; `ovlm_worker_heartbeat_age_seconds`; `ovlm_auto_restore_total{trigger}`; `ovlm_approval_evidence_invalid_total`. No IDs or names as labels. |
-| Alert rules | A sample Prometheus rule file ships with each release (SRE-R-9 e): needs_human while `phase=window`; window budget exceeded; worker heartbeat age; increase of `ovlm_fenced_commit_rejected_total`, `ovlm_lease_takeovers_total`, `ovlm_approval_evidence_invalid_total`; any run in needs_human > 15 min; **`OvlmPostStartFailure`**: needs_human with `reason=post_start_failure` (W7–W10 failure without snapshot, D-1 = B). In MVP these alerts are the paging path (the notification channel is V1, SRE-R-20). **Paging is mandatory**: a deployment must route at least `OvlmPostStartFailure` and "needs_human while `phase=window`" to an on-call pager; the install guide and readiness of the installation state this, because after D-1 the service stays down in that state until a human acts. |
+| Alert rules | A sample Prometheus rule file ships with each release (SRE-R-9 e): needs_human while `phase=window`; window budget exceeded; worker heartbeat age; increase of `ovlm_fenced_commit_rejected_total`, `ovlm_lease_takeovers_total`, `ovlm_approval_evidence_invalid_total`; any run in needs_human > 15 min; needs_human with `reason=approval_evidence_invalid` while `phase=window` (pages, SRE-R-23); run in `requested` longer than `admission.alert_after` (SRE-R-25); `run_signal` pending longer than `signal.alert_after` (SRE-R-24); **`OvlmPostStartFailure`**: needs_human with `reason=post_start_failure` (W7–W10 failure without snapshot, D-1 = B). In MVP these alerts are the paging path (the notification channel is V1, SRE-R-20). **Paging is mandatory**: a deployment must route at least `OvlmPostStartFailure` and "needs_human while `phase=window`" to an on-call pager; the install guide and readiness of the installation state this, because after D-1 the service stays down in that state until a human acts. |
 | Health | api `/healthz` (process alive), `/readyz` (DB reachable, schema at head, worker heartbeat younger than `worker.heartbeat_interval × k`). Worker writes `worker_heartbeat` rows; its `/healthz` on the internal port. |
 | Audit vs logs | Audit (`audit_event`) is the accountable record; logs are diagnostics. Every audit row carries the correlation ids so both can be joined. |
 | Evidence | Each step stores structured `evidence` (OpenStack states before/after, request ids, Ansible result summary) displayed in the run timeline. Ansible logs, events and diffs are restricted artefacts (operator/admin, own retention, SEC-R-3). |
