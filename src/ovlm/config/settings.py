@@ -128,9 +128,50 @@ class AlertSettings(_Section):
     after: float = Field(default=300.0, gt=0)
 
 
+class RenewalGreenReady(_Section):
+    #: ``green_ready.max_age``: B9 success must be younger than this when W1 is claimed. Default TBD in lab.
+    max_age: float | None = Field(default=None, gt=0)
+
+
+class RenewalHealthcheck(_Section):
+    #: ``healthcheck.max_attempts`` / ``healthcheck.interval`` (W8). Defaults TBD in lab.
+    max_attempts: int | None = Field(default=None, ge=1)
+    interval: float | None = Field(default=None, ge=0)
+
+
+class RenewalExternalVerify(_Section):
+    #: ``external_verify.required_successes`` / ``external_probe.interval`` (W10, S9). Defaults TBD in lab.
+    required_successes: int | None = Field(default=None, ge=1)
+    interval: float | None = Field(default=None, ge=0)
+
+
+class RenewalRetire(_Section):
+    #: ``retire.health_max_age``: X1 needs a green healthcheck younger than this. Default TBD in lab.
+    health_max_age: float | None = Field(default=None, gt=0)
+
+
+class RenewalApprovalValidity(_Section):
+    #: ``approval.validity.*`` in seconds. Plan 24 h and cutover 4 h are the security-model.md 7.1 defaults; the
+    #: retirement validity has no documented default and must be configured.
+    plan: float = Field(default=24 * 3600, gt=0)
+    cutover: float = Field(default=4 * 3600, gt=0)
+    retirement: float | None = Field(default=None, gt=0)
+
+
 class RenewalSettings(_Section):
     #: Global cap on admitted (non-terminal, non-requested) renewal runs (NFR-9). Checked at admission.
     max_concurrent_runs: int = Field(default=5, ge=1)
+    #: ``timeouts.<key>`` of renewal-workflow.md (seconds). **No defaults** (TBD in lab): a run whose strategy
+    #: needs a key that is not configured is rejected at admission with the list of missing keys.
+    timeouts: dict[str, float] = Field(default_factory=dict)
+    #: ``automation.timeout.<phase>`` (seconds) as the renewal uses them for step deadlines, leases and the
+    #: worst-case window shown at G2. No defaults (renewal-workflow.md section 8 item 11: TBD in lab).
+    automation_timeouts: dict[str, float] = Field(default_factory=dict)
+    green_ready: RenewalGreenReady = RenewalGreenReady()
+    healthcheck: RenewalHealthcheck = RenewalHealthcheck()
+    external_verify: RenewalExternalVerify = RenewalExternalVerify()
+    retire: RenewalRetire = RenewalRetire()
+    approval_validity: RenewalApprovalValidity = RenewalApprovalValidity()
 
 
 class AuthSettings(_Section):
