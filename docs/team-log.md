@@ -8,7 +8,7 @@ what needs the maintainer. Agent 1 (PM/EM) updates it after every handoff. Agent
 | # | Role | Model | Status | Output |
 |---|---|---|---|---|
 | 1 | Product / Engineering Manager | Opus 5.5 (main session) | Active: coordinating | `product-vision.md`, `functional-requirements.md`, `agent-team.md`, `model-selection-strategy.md`, ADR-0000, this log |
-| 2 | Chief Software Architect | Opus 5.5 | **Done** (Wave 2). Token count lost in a container restart: not reported | `architecture.md`, `data-model.md`, `api-design.md`, `renewal-workflow.md`, ADRs |
+| 2 | Chief Software Architect | Opus 5.5 | Wave 2 done. **Running: design revision** in its own conversation (link below) | `architecture.md`, `data-model.md`, `api-design.md`, `renewal-workflow.md`, ADRs |
 | 3 | OpenStack Specialist | Sonnet 5.5 | **Done** (Wave 1): 233,687 tokens, 102 tool calls, 11 min 52 s | `openstack-integration.md` |
 | 4 | Backend Engineer | — | Not activated (no code before approval) | — |
 | 5 | Frontend Engineer / UX | — | Not activated | — |
@@ -51,6 +51,7 @@ unblock it. Each agent pushes only to its own branch, and Agent 1 reviews the br
 
 | Agent | Model | Conversation | Branch |
 |---|---|---|---|
+| 2 — Architect, design revision | Opus 5.5 | https://claude.ai/code/session_016ti9w3B7uuCUrzzL1QrXZW | `claude/ovlm-architect` |
 | 7 — SRE reliability reviewer (veto holder) | Fable 5.1 | https://claude.ai/code/session_016ti9w2Rhy79ZyTv4fvtUTJ | `claude/ovlm-sre-review` |
 | 8 — Security reviewer | Fable 5.1 | https://claude.ai/code/session_016ti9vzmfDPFJ7HnXMMD5n5 | `claude/ovlm-security-review` |
 | 9 — QA / test strategy | Sonnet 5.5 | https://claude.ai/code/session_016ti9w1BJ2CeCfoC2a47xQT | `claude/ovlm-qa` |
