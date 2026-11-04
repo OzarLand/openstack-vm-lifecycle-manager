@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Owner | Agent 1 (plan); run by the maintainer's dev VM session (`ozar-dev`) |
-| Status | **Proposed**: needs the maintainer's direct authorization in the `ozar-dev` session |
+| Status | **Run 2026-11-04**: lab-observed on Felcloud. Q1–Q3 and Q5–Q8 answered; Q4 not measured (no floating IP free) |
 | Cloud | Felcloud, `clouds.yaml` entry `ozar-lab` (OpenStack release reported by the cloud, recorded at run time) |
 | Last updated | 2026-11-04 |
 
@@ -60,4 +60,40 @@ into this file under **Results**, with status `lab-observed on Felcloud, <date>,
 
 ## Results
 
-Not run yet.
+**Lab-observed on Felcloud, 2026-11-04.** The OpenStack release is not exposed; compute microversion 2.100
+suggests Nova 2025.1 or later, block storage 3.71. Run by the `ozar-dev` session after the maintainer authorized it
+directly. It took about 15 minutes, and every `ovlm-exp01-*` resource was deleted.
+
+**Setup:** credential is a project user, not admin (HTTP 403 on `identity:list_role_assignments`). Flavor
+`G0.basic.1c1g`, image "Ubuntu 24.04 LTS" (guest 24.04.4, kernel 6.8), volume type `NVMe`, project network shared
+with the dev VM.
+
+| # | Observed result | Evidence (redacted) |
+|---|---|---|
+| Q1 | **Yes.** This credential can read the console log. cloud-init prints `BEGIN SSH HOST KEY FINGERPRINTS` (ECDSA, ED25519, RSA) and the full `BEGIN SSH HOST KEY KEYS` block. The fingerprint matched first SSH contact. Green's key was pinned from the console log alone, then SSH worked with `StrictHostKeyChecking=yes`. The block appeared about 190 s after `server create`. | `cloud-init: 256 SHA256:<redacted> root@<host> (ED25519)` |
+| Q2 | `/dev/disk/by-id/virtio-<first 20 characters of the volume ID>` → `vdb`: only a truncated ID. The API's device hint was `/dev/vdb`. Mounting on green by filesystem UUID worked. | `virtio-<volid[0:20]> -> ../../vdb` |
+| Q3 | **States:** attach goes reserved → attaching → in-use; detach goes detaching → available. **Times:**<br>• stop to SHUTOFF: 13.4 s<br>• detach to available: 5.0 s<br>• attach to in-use: 9.3 s (6.7 s for the first attach)<br>• mount by UUID plus service start: 6.0 s<br>• HTTP answering: 10.4 s later (1 vCPU guest)<br>**Best-case outage:** about 45 s from unmount to green serving, excluding the floating-IP move and the time spent pinning a host key. | Event timeline with timestamps in the `ozar-dev` transcript |
+| Q4 | **Not measured.** Floating IP allocation failed twice: HTTP 400 "Unable to find any IP address on external network", even though the project quota is unlimited. The maintainer's one floating IP is in use by `ozar-dev` and was not touched. | `BadRequestException: 400` |
+| Q5 | Tags set at create (microversion 2.52) work: `tags=` and `tags-any=` returned exactly the 2 servers, and a tag matching nothing returned 0. The **metadata filter is silently ignored** for this credential: HTTP 200 with *every* server in the project, including one that is not ours. | raw `GET /servers?...` |
+| Q6 | A locked server **refused detach and stop** (HTTP 409 "Instance is locked"). Attaching a volume that is in use elsewhere was refused (HTTP 400 "already attached"). The same credential could unlock. | 409 on `os-volume_attachments` DELETE |
+| Q7 | Compute 2.100, block storage 3.71. Limits: 50 instances, 128 cores, 256 GB RAM, 48 volumes, 4096 GB of volumes; floating IPs and security groups unlimited. Catalog: keystone, nova, neutron, glance, cinderv3, placement, heat, swift, octavia, skyline. | `limits show --absolute` |
+| Q8 | **Yes.** SSH from the dev VM to a fixed IP worked without a floating IP, and so did HTTP. The security group was restricted to the dev VM's addresses. | `ssh-ok` |
+
+**Differences from [openstack-integration.md](../openstack-integration.md), and new findings:**
+
+1. **No working default volume type:** `volume create` without a type returns HTTP 500 (`__DEFAULT__` not found).
+   OVLM must always pass an explicit volume type, and preflight must check it.
+2. **The floating IP pool can be empty while the quota is unlimited.** A quota check is not enough: allocation failure
+   needs its own error path, and the MVP design (no temporary floating IPs) is confirmed as the right choice.
+3. **Metadata filter ignored:** confirmed, and it returns other people's servers with no error. This confirms ADR-0005
+   (tags, never metadata).
+4. **by-id path:** confirms recommendation 11 (a 20-character prefix). Mounting by UUID works.
+5. **Readiness:** the service needed about 10 s to listen on a 1 vCPU guest. Cutover waits on the health check, never on
+   a fixed delay.
+
+**Status changes:**
+- ADR-0006: console-log host keys → **lab-observed** (Felcloud, member-equivalent credential, Ubuntu 24.04).
+- Tag lookup, the metadata filter and lock behaviour → **lab-observed** (previously source-verified only).
+
+**Still open:** the floating-IP move time (Q4). It needs a free floating IP, so it runs as EXP-01b when one is
+available.

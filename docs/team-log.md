@@ -13,11 +13,11 @@ what needs the maintainer. Agent 1 (PM/EM) updates it after every handoff. Agent
 | 4 | Backend Engineer | — | Not activated (no code before approval) | — |
 | 5 | Frontend Engineer / UX | — | Not activated | — |
 | 6 | Automation Engineer | Sonnet 5.5 | **Done** (Wave 1) | `automation-contract.md`, `test-environment.md` |
-| 7 | SRE / Reliability | Fable 5.1 | **Running** in its own conversation (link below) | `reviews/sre-review-phase1.md` on `claude/ovlm-sre-review` |
-| 8 | Security Engineer | Opus 5.5 (author) → Fable 5.1 (review) | Authoring **done**: 115,807 tokens, 11 tool calls, 4 min 34 s. Fable review **running** in its own conversation (link below) | `security-model.md` |
-| 9 | QA / Test Automation | Sonnet 5.5 | **Running** in its own conversation (link below) | `testing-strategy.md` on `claude/ovlm-qa` |
+| 7 | SRE / Reliability | Fable 5.1 | **Done**: accept with required changes, no veto (0 critical, 3 high, 9 medium, 6 low). $5.70 | `reviews/sre-review-phase1.md` on `claude/ovlm-sre-review` |
+| 8 | Security Engineer | Opus 5.5 (author) → Fable 5.1 (review) | Authoring **done**: 115,807 tokens, 11 tool calls, 4 min 34 s. Fable review **done**: accept with required changes (both parts; 6 high in total). $7.17 | `security-model.md` |
+| 9 | QA / Test Automation | Sonnet 5.5 | **Done**: `testing-strategy.md`, 20 engine crash scenarios. $1.03 | `testing-strategy.md` on `claude/ovlm-qa` |
 | 10 | Documentation Engineer | — | Not activated (Agent 1 writes the README) | — |
-| — | **Dev VM session** `ozar-dev` (maintainer's machine, Remote Control) | maintainer's local Claude Code | Probe done (read-only): 2 vCPU / 7 GB, KVM nested, openstack CLI, cloud `ozar-lab` (Felcloud). Too small to host the lab itself, but a good control host. **Needs the maintainer's direct authorization in that session** to create `ovlm-exp01-*` resources ([EXP-01](experiments/EXP-01-design-assumptions-on-felcloud.md)) | https://claude.ai/code/session_016ti9w2xkWinTeHFRq3zgS3 |
+| — | **Dev VM session** `ozar-dev` (maintainer's machine) | Opus 5.5 (local) | **EXP-01 done** on Felcloud: 7 of 8 questions answered, every resource deleted. $1.81 including the probe. Standing approval for `ovlm-*` on `ozar-lab` saved there by the maintainer | https://claude.ai/code/session_016ti9w2xkWinTeHFRq3zgS3 |
 
 ## ✅ Standing authorization (maintainer, 2026-11-04)
 
@@ -412,3 +412,70 @@ Approvals come only from humans, never from AI agents. Its independent review (F
   running.
 - The residual risks go to the maintainer at the Phase 1 milestone. The most important is that the write credential
   can reach the whole project, which is why ADR-0001 requires a dedicated OpenStack project.
+
+## Wave 3 — 2026-11-04: independent reviews, test strategy, real-cloud experiment
+
+The costs below are what the platform reports per session (list price, estimates). Full documents:
+[SRE review](reviews/sre-review-phase1.md), [Security review](reviews/security-review-phase1.md),
+[testing strategy](testing-strategy.md), [EXP-01](experiments/EXP-01-design-assumptions-on-felcloud.md).
+
+### Agent 7 — SRE reviewer (Fable 5.1, dedicated conversation) — done, $5.70
+
+**Verdict: accept with required changes, no veto.** The reviewer found no state where two VMs write the same data
+volume, and no step that repeats a destructive action blindly after a crash. Three **high** findings must be fixed in
+the design before the downtime-window and restore steps are implemented:
+- **SRE-R-1:** the restore sequence does not converge from "quiesced but still running".
+- **SRE-R-2:** fencing only reacts to a missed heartbeat, so a paused worker can still issue a mutating call after
+  another worker has taken over.
+- **SRE-R-3:** the only `mkfs` path is not closed off for renewals.
+
+Build-phase and engine work can proceed in parallel. Counts: 0 critical, 3 high, 9 medium, 6 low, and 4 V1 items.
+
+### Agent 8 — Security reviewer (Fable 5.1, dedicated conversation) — done, $7.17
+
+**Verdict: accept with required changes**, for both the security model and the architecture. The high findings:
+- **SEC-R-1:** a compromised api can forge approvals in the database. Fix: split the DB roles (`ovlm_api` and
+  `ovlm_worker`), have the worker re-validate approval evidence before every destructive step, and mirror audit rows
+  to the log stream.
+- **SEC-R-2:** separation of duties ignores the profile author, who chooses the code that runs. Fix: a per-gate
+  requester set; by default no operator+approver in the same scope; the approval shows the automation diff.
+- **SEC-R-3:** stored Ansible output can copy workload secrets into the OVLM database and UI. Fix: restricted
+  artefacts, diffs opt-in only, and a blocking `no_log` lint.
+
+Rulings asked for by the Architect:
+- **(a) automatic in-window rollback:** yes, under conditions. The approval must state it, the setting is bound to
+  the approval, there is a list of "unambiguous" cases, a single attempt, and audit. A **maintainer decision** is
+  needed on the W7/W8 case (finding SEC-R-30).
+- **(b) `claim_resources` tag exemption:** yes, under conditions.
+
+### Agent 9 — QA (Sonnet 5.5, dedicated conversation) — done, $1.03
+
+`testing-strategy.md` is aligned with the real step keys (B1–X1, W1–W10, S1–S9). It contains:
+- 20 engine crash scenarios (WF-01 to WF-20), including a stale worker whose OpenStack call lands after takeover;
+- lab tests mapped to gates G1–G3;
+- a migration test N-1 → N with runs in flight, replacing the up/down test because downgrade is not supported.
+
+Issues raised:
+- `renewal-workflow.md` §7 contradicts §8 on `NoValidHost`; the Architect must fix §7.
+- For the maintainer: may CI use privileged containers? Where is lab evidence stored, and who signs it?
+
+### `ozar-dev` — EXP-01 on Felcloud (Opus 5.5, maintainer's machine) — done, about 15 minutes of cloud time
+
+7 of 8 questions answered on a real cloud:
+- Console-log host keys work for a non-admin, which confirms ADR-0006.
+- The `/dev/disk/by-id` path holds a truncated volume ID; mounting by UUID works.
+- **Best-case outage is about 45 s**, before the floating-IP move.
+- Tags work, and the metadata filter returns *everyone's* servers.
+- A lock blocks detach.
+
+Not measured: the floating-IP move, because no free floating IP was available. New findings:
+- the cloud has **no working default volume type**, so OVLM must always pass one;
+- the floating IP pool can be empty even with an unlimited quota.
+
+Cleanup was verified: no `ovlm-*` resource is left.
+
+**Agent 1 disposition:**
+- All three branches are merged into the working branch, and the EXP-01 results are recorded.
+- Next: a **design revision**. The Architect resolves the 6 high findings, the §7 contradiction and the EXP-01
+  findings. Then the SRE and Security reviewers check only those changes.
+- Commit rule from the maintainer, given in `ozar-dev`: commit messages no longer mention Claude.
