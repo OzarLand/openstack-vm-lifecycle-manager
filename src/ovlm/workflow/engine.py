@@ -34,6 +34,16 @@ their audit events each commit in a single transaction.
 
 **S7 - time.** Leases, ``not_before`` and ``deadline_at`` are computed with the DB's ``now()`` only; the worker
 never sends a timestamp (WF-20).
+
+**S8 - deadlines (SRE-C-3).** The claim returns whether ``deadline_at`` has passed (DB clock) and how long is left;
+the local view of the remaining time is ``t_send + remaining`` on the monotonic clock, which is never later than the
+real deadline (``t_send`` precedes the DB's ``now()``). An attempt past its deadline still probes (``Done`` stays
+allowed) but never acts: ``Act`` becomes ``needs_human(deadline_exceeded)``.
+
+**S9 - needs_human always has a target (SRE-C-1).** A run in ``needs_human`` has exactly one open step, itself in
+``needs_human``. A transition that hits a lock conflict (outcome commit *or* signal) is rolled back to a savepoint
+and the step is kept open in ``needs_human``; ``mark_resolved`` re-queues the step so the engine re-probes before
+continuing (SRE-C-2).
 """
 
 from __future__ import annotations
@@ -81,6 +91,7 @@ from ovlm.workflow.fence import Fence, FencedCommitRejected, FenceLost
 from ovlm.workflow.ids import new_id
 from ovlm.workflow.registry import Registry
 from ovlm.workflow.requests import request_run
+from ovlm.workflow.workers import LIVE_WORKER_BEATS, count_live_workers
 
 log = logging.getLogger("ovlm.workflow.engine")
 
@@ -115,6 +126,9 @@ class EngineConfig:
     retry_backoff_max: float = 300.0
     admission_alert_after: float = 300.0
     signal_alert_after: float = 300.0
+    #: Upper bound (real seconds) between two watchdog checks of a step's fence; near the deadline the watchdog
+    #: polls at ``remaining / 2`` with a 50 ms floor (SRE-C-9). Tests with a fake clock set it low.
+    watchdog_interval: float = 1.0
 
     @classmethod
     def from_settings(cls, s: Settings) -> EngineConfig:
@@ -147,6 +161,10 @@ class Claim:
     takeover: bool
     timeout_seconds: float | None
     retry_floor: int
+    #: ``deadline_at <= now()`` at claim time (DB clock), SRE-C-3.
+    late: bool = False
+    #: Seconds from the claim's DB ``now()`` to ``deadline_at``; None without a deadline.
+    deadline_in: float | None = None
 
 
 class LockConflict(Exception):
@@ -213,6 +231,19 @@ class _StepContext:
         self.takeover = claim.takeover
         self.fence = fence
         self._stopping = stopping
+        #: Set when this attempt persisted an intent (decided to act): resets the poll backoff (SRE-C-5).
+        self.acted = False
+
+    @property
+    def deadline_passed(self) -> bool:
+        """True when ``deadline_at`` had passed at claim time (DB clock), or has passed since on the local
+        monotonic clock (conservative: the local view of the deadline is never later than the DB's)."""
+        c = self._claim
+        if c.late:
+            return True
+        return (
+            c.deadline_in is not None and self._engine.clock.monotonic() >= c.t_send + c.deadline_in
+        )
 
     @property
     def params(self) -> Mapping[str, Any]:
@@ -246,11 +277,14 @@ class _StepContext:
 
     @contextmanager
     def read(self) -> Iterator[Connection]:
+        """A pooled connection for short reads. Never hold it across network I/O: the pool is sized for the
+        worker's slots and heartbeats wait on it at most ``pool_timeout`` (SRE-C-4)."""
         with self._engine.db.connect() as conn:
             yield conn
 
     def persist_intent(self, intent: Mapping[str, Any]) -> None:
         self.checkpoint(intent=intent)
+        self.acted = True
 
     def checkpoint(
         self, *, intent: Mapping[str, Any] | None = None, evidence: Mapping[str, Any] | None = None
@@ -321,12 +355,14 @@ class _Heartbeater:
                 return
 
     def _watch_loop(self) -> None:
+        cap = self._engine.config.watchdog_interval
         while not self._stop.is_set():
             self._fence.poll_deadline()
             if self._fence.stopped.is_set():
                 return
-            # Real time on purpose: with a fake clock the deadline is polled at least every 50 ms.
-            self._stop.wait(min(0.05, max(self._fence.remaining(), 0.001)))
+            # Real time on purpose. Far from the deadline: every ``watchdog_interval``; close to it: half the
+            # remaining time, with a 50 ms floor (SRE-C-9: no 20 Hz polling per running step).
+            self._stop.wait(min(cap, max(self._fence.remaining() / 2, 0.05)))
 
 
 # ---- engine -----------------------------------------------------------------------------------------------
@@ -351,27 +387,37 @@ class WorkflowEngine:
         self.clock: Clock = clock or SystemClock()
         self.audit: AuditSink = audit or LogAuditSink()
         self.stopping = threading.Event()
+        self._version = "unknown"
 
     # ---- worker registration ---------------------------------------------------------------------------
 
     def register_worker(self, version: str) -> None:
-        with self.db.begin() as c:
-            c.execute(
-                text(
-                    "INSERT INTO worker_heartbeat (worker_id, hostname, version) VALUES (:w, :h, :v) "
-                    "ON CONFLICT (worker_id) DO UPDATE SET last_seen_at = now(), draining = false"
-                ),
-                {"w": self.worker_id, "h": socket.gethostname(), "v": version},
-            )
+        self._version = version
+        self.beat_worker()
 
     def beat_worker(self, draining: bool = False) -> None:
+        """Upsert: a worker whose row was swept (e.g. paused for long) re-creates it on its next beat."""
         with self.db.begin() as c:
             c.execute(
                 text(
-                    "UPDATE worker_heartbeat SET last_seen_at = now(), draining = :d WHERE worker_id = :w"
+                    "INSERT INTO worker_heartbeat (worker_id, hostname, version, draining) "
+                    "VALUES (:w, :h, :v, :d) "
+                    "ON CONFLICT (worker_id) DO UPDATE SET last_seen_at = now(), draining = :d"
                 ),
-                {"w": self.worker_id, "d": draining},
+                {"w": self.worker_id, "h": socket.gethostname(), "v": self._version, "d": draining},
             )
+
+    def sweep_worker_rows(self, older_than: float) -> int:
+        """Delete ``worker_heartbeat`` rows not seen for ``older_than`` seconds (DB clock), never our own
+        (SRE-C-10). Liveness is read from recent rows only: :func:`ovlm.workflow.workers.count_live_workers`."""
+        with self.db.begin() as c:
+            return c.execute(
+                text(
+                    "DELETE FROM worker_heartbeat WHERE worker_id <> :w "
+                    "AND last_seen_at < now() - make_interval(secs => :age)"
+                ),
+                {"w": self.worker_id, "age": older_than},
+            ).rowcount
 
     # ---- claims ----------------------------------------------------------------------------------------
 
@@ -407,7 +453,9 @@ class WorkflowEngine:
                   heartbeat_at = now(), attempt = s.attempt + 1,
                   fencing_token = nextval('fencing_seq'), updated_at = now()
                 FROM c WHERE s.id = c.id
-                RETURNING {_STEP_COLS}, c.prev_state, c.prev_owner
+                RETURNING {_STEP_COLS}, c.prev_state, c.prev_owner,
+                  (s.deadline_at IS NOT NULL AND s.deadline_at <= now()) AS late,
+                  EXTRACT(EPOCH FROM s.deadline_at - now()) AS deadline_in
                 """
                     ),
                     {
@@ -484,6 +532,10 @@ class WorkflowEngine:
                         takeover=takeover,
                         timeout_seconds=r["timeout_seconds"],
                         retry_floor=r["retry_floor"],
+                        late=bool(r["late"]),
+                        deadline_in=(
+                            float(r["deadline_in"]) if r["deadline_in"] is not None else None
+                        ),
                     )
                 )
         return claims
@@ -567,7 +619,10 @@ class WorkflowEngine:
                     # + kill grace + margin, so no takeover starts while an orphan could still run. Set by a
                     # guarded heartbeat before anything is probed or spawned.
                     fence.set_lease(step_lease)
-                    if self.heartbeat(claim, fence) is False:
+                    if self.heartbeat(claim, fence) is not True:
+                        # 0 rows: revoked. DB error: ownership unknown, re-confirmed (or refused) by the
+                        # check's synchronous heartbeat. Either way nothing is probed or spawned before the
+                        # DB holds the step lease (SRE-C-8).
                         fence.check("lease")
                 if claim.takeover and (
                     claim.step.destructive or claim.run.phase in TAKEOVER_DELAY_PHASES
@@ -586,7 +641,7 @@ class WorkflowEngine:
                     )
                     outcome = step_impl.classify(ctx, exc)
             ctx.crashpoint("after_verify_before_commit")
-            label = self._commit_outcome(claim, fence, defn, outcome)
+            label = self._commit_outcome(claim, fence, defn, outcome, acted=ctx.acted)
             ctx.crashpoint("after_commit")
             return label
         except FenceLost as exc:
@@ -615,7 +670,13 @@ class WorkflowEngine:
     # ---- outcome commit --------------------------------------------------------------------------------
 
     def _commit_outcome(
-        self, claim: Claim, fence: Fence, defn: WorkflowDefinition | None, outcome: Outcome
+        self,
+        claim: Claim,
+        fence: Fence,
+        defn: WorkflowDefinition | None,
+        outcome: Outcome,
+        *,
+        acted: bool = False,
     ) -> str:
         fence.check("commit:outcome")
         with self.db.begin() as c:
@@ -631,7 +692,8 @@ class WorkflowEngine:
             row = (
                 c.execute(
                     text(
-                        f"SELECT {_STEP_COLS}, (s.deadline_at IS NOT NULL AND s.deadline_at <= now()) AS late "
+                        f"SELECT {_STEP_COLS}, (s.deadline_at IS NOT NULL AND s.deadline_at <= now()) AS late, "
+                        "EXTRACT(EPOCH FROM s.deadline_at - now()) AS deadline_in "
                         "FROM workflow_step s WHERE s.id = :id AND s.fencing_token = :tok "
                         "AND s.lease_owner = :owner AND s.state = 'running' FOR UPDATE"
                     ),
@@ -646,6 +708,7 @@ class WorkflowEngine:
             run = _run_view(run_row)
             step = _step_view(row)
             late = bool(row["late"])
+            remaining = float(row["deadline_in"]) if row["deadline_in"] is not None else None
             tctx = TxContext(conn=c, run=run, step=step)
             outcome = self._normalise(c, claim, outcome, late)
 
@@ -705,10 +768,11 @@ class WorkflowEngine:
                 if outcome.until_signal:
                     not_before_sql = "NULL"
                 else:
-                    params["delay"] = self._poll_delay(outcome, claim.step.attempt)
+                    waits = 0 if acted else self._consecutive_waits(c, claim)
+                    params["delay"] = self._poll_delay(outcome, waits, remaining)
                     not_before_sql = "now() + make_interval(secs => :delay)"
             elif step_state == "ready":
-                params["delay"] = self._retry_delay(c, claim)
+                params["delay"] = _clamp(self._retry_delay(c, claim), remaining)
                 not_before_sql = "now() + make_interval(secs => :delay)"
 
             n = c.execute(
@@ -760,8 +824,12 @@ class WorkflowEngine:
                     },
                 ),
             )
-            if transition is not None:
-                self._apply_transition_safely(c, run, step, transition, defn)
+            if transition is not None and self._apply_transition_safely(
+                c, run, step, transition, defn, attempt=claim.step.attempt
+            ):
+                attempt_outcome = "parked"
+            # Everything written, COMMIT not yet sent (a lost COMMIT is tested here, SRE-C-8).
+            crashpoint("outcome.before_commit")
         m.STEP_ATTEMPTS.labels(step.step_key, attempt_outcome, params["ecls"] or "none").inc()
         return attempt_outcome
 
@@ -801,11 +869,31 @@ class WorkflowEngine:
                 )
         return outcome
 
-    def _poll_delay(self, wait: Wait, attempt: int) -> float:
+    def _poll_delay(self, wait: Wait, consecutive_waits: int, remaining: float | None) -> float:
+        """Backoff by the number of *consecutive* waits before this attempt (an attempt that acted resets it;
+        takeovers and retries do not advance it), clamped to the time left before ``deadline_at`` so the step
+        is re-probed at its deadline rather than after it (SRE-C-5)."""
         if wait.poll_after is not None:
-            return max(0.0, wait.poll_after)
-        exp = min(max(attempt - 1, 0), 30)
-        return float(min(self.config.poll_max, self.config.poll_initial * (2**exp)))
+            delay = max(0.0, wait.poll_after)
+        else:
+            exp = min(max(consecutive_waits, 0), 30)
+            delay = float(min(self.config.poll_max, self.config.poll_initial * (2**exp)))
+        return _clamp(delay, remaining)
+
+    def _consecutive_waits(self, c: Connection, claim: Claim) -> int:
+        """Earlier attempts of this step that ended ``waiting``, since the last attempt that ended otherwise
+        (``lost`` attempts, i.e. takeovers, are transparent)."""
+        return int(
+            c.execute(
+                text(
+                    "SELECT count(*) FROM workflow_step_attempt WHERE step_id = :sid AND attempt < :att "
+                    "AND outcome = 'waiting' AND attempt > COALESCE((SELECT max(attempt) "
+                    "  FROM workflow_step_attempt WHERE step_id = :sid AND attempt < :att "
+                    "  AND outcome IS DISTINCT FROM 'waiting' AND outcome IS DISTINCT FROM 'lost'), 0)"
+                ),
+                {"sid": claim.step.id, "att": claim.step.attempt},
+            ).scalar_one()
+        )
 
     def _retry_delay(self, c: Connection, claim: Claim) -> float:
         n = int(
@@ -832,22 +920,106 @@ class WorkflowEngine:
         step: StepView | None,
         t: Transition,
         defn: WorkflowDefinition | None,
-    ) -> None:
-        """Apply ``t``; on a lock conflict park the run in needs_human instead (the step stays open)."""
+        *,
+        attempt: int | None = None,
+    ) -> bool:
+        """Apply ``t`` after an outcome commit; on a lock conflict keep the step open in needs_human and park
+        the run instead. Returns True when parked on a conflict."""
         try:
             with c.begin_nested():
                 self._apply_transition(c, run, t, defn)
         except LockConflict as exc:
-            log.warning("lock conflict in transition; parking run", extra={"run_id": run.id})
-            if step is not None:
+            self._park_on_conflict(c, run, step, exc, defn, attempt=attempt)
+            return True
+        return False
+
+    def _close_and_transition(
+        self,
+        c: Connection,
+        run: RunView,
+        step: StepView | None,
+        close_state: str,
+        t: Transition,
+        defn: WorkflowDefinition | None,
+    ) -> bool:
+        """Signal-driven transition (abort, strategy kinds), atomic with its lock acquisition (SRE-C-1).
+
+        Closing the open step and applying ``t`` share one savepoint: on a lock conflict both roll back, the
+        step stays open in ``needs_human`` and the run is parked, so retry-step, mark-resolved and re-sending
+        the signal keep working. A parking transition keeps the step open in ``needs_human`` (S9)."""
+        try:
+            with c.begin_nested():
+                if t.park_reason is not None:
+                    self._step_needs_human(c, step, {"reason": f"parked: {t.park_reason}"})
+                else:
+                    self._close_open_step(c, step, close_state)
+                self._apply_transition(c, run, t, defn)
+        except LockConflict as exc:
+            self._park_on_conflict(c, run, step, exc, defn)
+            return True
+        return False
+
+    def _step_needs_human(
+        self, c: Connection, step: StepView | None, error: Mapping[str, Any]
+    ) -> None:
+        if step is None:
+            return
+        n = c.execute(
+            text(
+                "UPDATE workflow_step SET state = 'needs_human', finished_at = NULL, not_before = NULL, "
+                "lease_owner = NULL, lease_expires_at = NULL, error_class = 'needs_human', "
+                "error = CAST(:e AS jsonb), updated_at = now() WHERE id = :id AND state <> 'running'"
+            ),
+            {"id": step.id, "e": _j(error)},
+        ).rowcount
+        if n != 1:
+            raise _LeavePending  # cannot happen: the step row is locked and not running
+
+    def _park_on_conflict(
+        self,
+        c: Connection,
+        run: RunView,
+        step: StepView | None,
+        exc: LockConflict,
+        defn: WorkflowDefinition | None,
+        *,
+        attempt: int | None = None,
+    ) -> None:
+        lock = f"{exc.lock.resource_type}/{exc.lock.resource_key}"
+        log.warning(
+            "lock conflict in transition; step kept open, run parked",
+            extra={"run_id": run.id, "lock": lock},
+        )
+        if step is not None:
+            self._step_needs_human(
+                c, step, {"reason": str(exc), "lock": lock, "holder": exc.holder}
+            )
+            if attempt is not None:
                 c.execute(
                     text(
-                        "UPDATE workflow_step SET state = 'needs_human', finished_at = NULL, "
-                        "error_class = 'needs_human', error = CAST(:e AS jsonb) WHERE id = :id"
+                        "UPDATE workflow_step_attempt SET outcome = 'parked' "
+                        "WHERE step_id = :sid AND attempt = :att"
                     ),
-                    {"id": step.id, "e": _j({"reason": str(exc)})},
+                    {"sid": step.id, "att": attempt},
                 )
-            self._apply_transition(c, run, Transition(park_reason="lock_conflict"), defn)
+            self.audit.record(
+                c,
+                AuditEvent(
+                    action="step.parked",
+                    target_type="workflow_step",
+                    target_id=step.id,
+                    run_id=run.id,
+                    step_id=step.id,
+                    result="lock_conflict",
+                    after={
+                        "step_key": step.step_key,
+                        "attempt": attempt,
+                        "lock": lock,
+                        "holder_run_id": exc.holder,
+                    },
+                ),
+            )
+        self._apply_transition(c, run, Transition(park_reason="lock_conflict"), defn)
 
     def _apply_transition(
         self, c: Connection, run: RunView, t: Transition, defn: WorkflowDefinition | None
@@ -1242,38 +1414,44 @@ class WorkflowEngine:
             t = defn.on_abort(TxContext(conn=c, run=run2, step=step, signal=sig), None)
             if t is None:
                 return "abort requested; deferred by the strategy", True
-            self._close_open_step(c, step, "cancelled")
-            self._apply_transition_safely(c, run2, None, t, defn)
+            if self._close_and_transition(c, run2, step, "cancelled", t, defn):
+                return "abort: lock conflict in the abort transition; run parked", True
             return "aborted at boundary", True
 
         if sig.kind in ("retry_step", "mark_resolved"):
             if run.state != "needs_human" or step is None or step.state != "needs_human":
                 return "rejected: no step in needs_human", False
+            # Both re-queue the step with a fresh retry budget and deadline. mark_resolved records the
+            # operator's attestation as evidence but does not close the step: the next attempt probes and
+            # must reach Done by itself ("the engine re-probes before continuing", renewal-workflow.md
+            # section 6; SRE-C-2).
+            evidence = (
+                {"mark_resolved": {"actor_id": sig.actor_id, "payload": dict(sig.payload)}}
+                if sig.kind == "mark_resolved"
+                else None
+            )
+            c.execute(
+                text(
+                    "UPDATE workflow_step SET state = 'ready', not_before = now(), error_class = NULL, "
+                    "error = NULL, retry_floor = attempt, "
+                    "evidence = CASE WHEN CAST(:ev AS jsonb) IS NULL THEN evidence "
+                    "  ELSE COALESCE(evidence, '{}'::jsonb) || CAST(:ev AS jsonb) END, "
+                    "deadline_at = CASE WHEN timeout_seconds IS NULL THEN NULL "
+                    "  ELSE now() + make_interval(secs => timeout_seconds) END, updated_at = now() "
+                    "WHERE id = :id AND state = 'needs_human'"
+                ),
+                {"id": step.id, "ev": _j(evidence)},
+            )
+            c.execute(
+                text(
+                    "UPDATE workflow_run SET state = 'running', needs_human_reason = NULL, "
+                    "updated_at = now(), version = version + 1 WHERE id = :id"
+                ),
+                {"id": run.id},
+            )
             if sig.kind == "retry_step":
-                c.execute(
-                    text(
-                        "UPDATE workflow_step SET state = 'ready', not_before = now(), error_class = NULL, "
-                        "error = NULL, retry_floor = attempt, "
-                        "deadline_at = CASE WHEN timeout_seconds IS NULL THEN NULL "
-                        "  ELSE now() + make_interval(secs => timeout_seconds) END, updated_at = now() "
-                        "WHERE id = :id AND state = 'needs_human'"
-                    ),
-                    {"id": step.id},
-                )
-                c.execute(
-                    text(
-                        "UPDATE workflow_run SET state = 'running', needs_human_reason = NULL, "
-                        "updated_at = now(), version = version + 1 WHERE id = :id"
-                    ),
-                    {"id": run.id},
-                )
                 return f"step {step.step_key} re-queued", True
-            evidence = {"mark_resolved": {"actor_id": sig.actor_id, "payload": dict(sig.payload)}}
-            self._close_open_step(c, step, "succeeded", evidence)
-            done_step = _replace_step(step, state="succeeded")
-            t = defn.next(TxContext(conn=c, run=run, step=done_step, signal=sig), Done(evidence))
-            self._apply_transition_safely(c, run, None, t, defn)
-            return f"step {step.step_key} marked resolved", True
+            return f"step {step.step_key} re-queued for verification (mark_resolved)", True
 
         # Strategy-specific kinds and wake-ups need a step boundary.
         if step is not None and step.state == "running":
@@ -1294,8 +1472,8 @@ class WorkflowEngine:
                 {"id": step.id},
             )
             return f"step {step.step_key} woken", True
-        self._close_open_step(c, step, "cancelled")
-        self._apply_transition_safely(c, run, None, res, defn)
+        if self._close_and_transition(c, run, step, "cancelled", res, defn):
+            return f"{sig.kind}: lock conflict; step kept open, run parked", True
         return f"{sig.kind} applied", True
 
     def _close_open_step(
@@ -1379,6 +1557,7 @@ class WorkflowEngine:
                 ),
                 {"a": self.config.signal_alert_after},
             ).one()
+            live = count_live_workers(c, LIVE_WORKER_BEATS * self.config.heartbeat_interval)
             hb = c.execute(
                 text(
                     "SELECT COALESCE(EXTRACT(EPOCH FROM now() - min(heartbeat_at)), 0), "
@@ -1398,6 +1577,7 @@ class WorkflowEngine:
         m.SIGNALS_PENDING_OVERDUE.set(sig[1])
         m.STEP_HEARTBEAT_AGE.set(float(hb[0]))
         m.EXPIRED_LEASES.set(hb[1])
+        m.LIVE_WORKERS.set(live)
 
     # ---- convenience for a synchronous loop (tests, single-slot) ---------------------------------------
 
@@ -1411,16 +1591,17 @@ class WorkflowEngine:
         return len(claims)
 
 
+def _clamp(delay: float, remaining: float | None) -> float:
+    """Never schedule past ``deadline_at``: a timer beyond it is cut to the deadline (SRE-C-5)."""
+    if remaining is None:
+        return delay
+    return max(0.0, min(delay, remaining))
+
+
 def _replace_run(run: RunView, **kw: Any) -> RunView:
     from dataclasses import replace
 
     return replace(run, **kw)
-
-
-def _replace_step(step: StepView, **kw: Any) -> StepView:
-    from dataclasses import replace
-
-    return replace(step, **kw)
 
 
 __all__ = [
