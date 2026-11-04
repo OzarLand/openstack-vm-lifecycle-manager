@@ -97,3 +97,17 @@ with the dev VM.
 
 **Still open:** the floating-IP move time (Q4). It needs a free floating IP, so it runs as EXP-01b when one is
 available.
+
+## EXP-01b — floating-IP cutover time (Q4) and the full window
+
+**Planned 2026-11-04**, after the maintainer reported a free floating IP. It runs under `ozar-dev`'s standing approval
+for `ovlm-*` resources on `ozar-lab`.
+
+| # | Step | Type |
+|---|---|---|
+| 1 | Use the free floating IP. If it is already allocated and unassociated, use that one and leave it allocated but unassociated at the end. Otherwise allocate one and release it at the end. Never touch the floating IP that `ozar-dev` itself uses. | ⚠️ |
+| 2 | Recreate `ovlm-exp01b-blue`, `ovlm-exp01b-green` (smallest flavor, Ubuntu 24.04, explicit volume type) and `ovlm-exp01b-data` (1 GB). Pin both host keys from the console log. | ⚠️ |
+| 3 | On blue, serve the marker over HTTP from the mounted volume. Associate the floating IP with blue. Start a probe loop (HTTP every 0.5 s with timestamps) **through the floating IP**. | ⚠️ |
+| 4 | Run the full window three times. Run 1: blue → green, with every state change timestamped (unmount, SHUTOFF, available, in-use, mount, service listening, floating IP updated, first successful probe through the floating IP). Run 2: back to blue (as a revert). Run 3: blue → green again. | ⚠️ |
+| 5 | Report per run: the API time of the floating-IP update; the time from the update to the first good probe; and the **total outage seen by the probe**. Note where the probe ran from. | read-only |
+| 6 | 🛑 Delete all `ovlm-exp01b-*` resources, handle the floating IP as in step 1, and prove nothing is left. | 🛑 own resources only |
