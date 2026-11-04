@@ -16,7 +16,9 @@ class FakeProbe:
 
 
 def client(ok: bool = True) -> TestClient:
-    return TestClient(create_app(Settings(), probe=FakeProbe(ok), start_metrics_server=False))
+    return TestClient(
+        create_app(Settings(development_mode=True), probe=FakeProbe(ok), start_metrics_server=False)
+    )
 
 
 def test_healthz() -> None:

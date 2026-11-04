@@ -18,6 +18,7 @@ A ``GuardedWriteClient`` is built per step attempt with that attempt's gate (``c
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from functools import wraps
 from typing import Any, Protocol, cast, runtime_checkable
@@ -82,6 +83,75 @@ def _gated[F: Callable[..., Any]](fn: F) -> F:
             return fn(self, *args, **kwargs)
 
     return cast(F, wrapper)
+
+
+#: Kinds of lock OVLM sets on blue: ``ovlm:retained:<run>`` (after cut-over), ``ovlm:restored:<run>`` (rollback).
+LOCK_REASON_KINDS = ("retained", "restored")
+
+
+def own_lock_reasons(run_id: str) -> frozenset[str]:
+    """The full lock reasons of one run. Any other reason, ``ovlm:``-prefixed or not, is a foreign lock: a project
+    member can set any reason, so a prefix proves nothing (SEC-C-6)."""
+    return frozenset(f"{LOCK_REASON_PREFIX}{kind}:{run_id}" for kind in LOCK_REASON_KINDS)
+
+
+@dataclass(frozen=True)
+class AdoptionExpectation:
+    """What a server found by ``find_run_server`` must match to be adopted as this run's green (SEC-R-23).
+
+    ``image_id`` and ``flavor_name`` are the plan's ``resolved`` values (Nova >= 2.47 shows a server's flavor by
+    name only). ``ledger_committed_at`` is the commit time of the run's ``intended`` ledger row. ``write_user_id``
+    is the Keystone user of OVLM's write credential; ``None`` only when the lab showed that a member cannot see
+    ``user_id`` and the check was dropped and recorded (renewal-workflow.md B3)."""
+
+    run_id: str
+    image_id: str
+    flavor_name: str
+    ledger_committed_at: datetime
+    write_user_id: str | None
+
+
+@dataclass(frozen=True)
+class AdoptionVerdict:
+    reasons: tuple[str, ...]  # empty: adoption allowed
+
+    @property
+    def ok(self) -> bool:
+        return not self.reasons
+
+
+def adopt_checks(
+    server: ServerInfo,
+    expected: AdoptionExpectation,
+    attachments: Iterable[VolumeAttachmentInfo] = (),
+) -> AdoptionVerdict:
+    """Pure adoption check of a server this run may have created (SEC-R-23, SEC-C-10).
+
+    Every check must pass; any refusal means ``needs_human`` "adoption refused", never adopt. The step may record
+    the server as ``origin="created"`` in the ownership registry only when this returns ``ok``. ``attachments``
+    is the server's attachment list, read with it (both sources must show no volume)."""
+    reasons: list[str] = []
+    if server.is_minimal_construct or server.is_deleted:
+        reasons.append("the server is not readable (deleted or minimal construct)")
+    if TAG_MANAGED not in server.tags or run_tag(expected.run_id) not in server.tags:
+        reasons.append("the server does not carry ovlm:managed and this run's tag")
+    if server.image_id != expected.image_id:
+        reasons.append(f"image {server.image_id!r} is not the resolved image {expected.image_id!r}")
+    if server.flavor_original_name != expected.flavor_name:
+        reasons.append(
+            f"flavor {server.flavor_original_name!r} is not the resolved flavor {expected.flavor_name!r}"
+        )
+    if server.created is None or server.created < expected.ledger_committed_at:
+        reasons.append("the server was created before this run's ledger row was committed")
+    if server.attached_volumes or any(True for _ in attachments):
+        reasons.append("the server has attached volumes")
+    if expected.write_user_id is not None and server.user_id != expected.write_user_id:
+        reasons.append(
+            "the server was not created by OVLM's write user"
+            if server.user_id
+            else "the server's user_id is not visible"
+        )
+    return AdoptionVerdict(tuple(reasons))
 
 
 class GuardedWriteClient:
@@ -164,7 +234,8 @@ class GuardedWriteClient:
 
     def find_run_server(self, name: str) -> ServerInfo | None:
         """The server this run created with ``name``: by ``ovlm:run:<run>`` tag + exact name (ADR-0005 s.4).
-        More than one: :class:`DuplicateResourceError`. Adoption checks (SEC-R-23) stay with the step."""
+        More than one: :class:`DuplicateResourceError`. A match is only a candidate: the step adopts it (registers
+        it ``origin="created"``) only when :func:`adopt_checks` passes (SEC-R-23)."""
         return find_server_by_tag_and_name(self._backend, tag=run_tag(self.run_id), name=name)
 
     def build_state(self, server_id: str) -> ServerInfo | None:
@@ -241,20 +312,28 @@ class GuardedWriteClient:
             return
         self._backend.start_server(server_id)
 
+    def own_lock_reasons(self) -> frozenset[str]:
+        """The only lock reasons this run sets and recognises as its own (SEC-C-6)."""
+        return own_lock_reasons(self.run_id)
+
+    def _foreign_lock(self, server_id: str, server: ServerInfo) -> ForeignLockError:
+        return ForeignLockError(
+            f"server {server_id} is locked with reason {server.locked_reason!r}, not one of this run's",
+            locked_reason=server.locked_reason,
+        )
+
     @_gated
     def lock_server(self, server_id: str, reason: str | None = None) -> None:
-        if not reason or not reason.startswith(LOCK_REASON_PREFIX):
+        if reason not in self.own_lock_reasons():
             raise WriteNotAllowedError(
-                f"lock_server: OVLM locks carry a reason starting {LOCK_REASON_PREFIX!r}"
+                f"lock_server: the reason must be one of this run's ({sorted(self.own_lock_reasons())})"
             )
         server = self._owned_server(server_id, "lock_server")
         if server.locked:
             if server.locked_reason == reason:
                 return
-            if not (server.locked_reason or "").startswith(LOCK_REASON_PREFIX):
-                raise ForeignLockError(
-                    f"server {server_id} is locked by someone else ({server.locked_reason!r})"
-                )
+            if server.locked_reason not in self.own_lock_reasons():
+                raise self._foreign_lock(server_id, server)
         self._backend.lock_server(server_id, reason)
 
     @_gated
@@ -262,10 +341,8 @@ class GuardedWriteClient:
         server = self._owned_server(server_id, "unlock_server")
         if not server.locked:
             return
-        if not (server.locked_reason or "").startswith(LOCK_REASON_PREFIX):
-            raise ForeignLockError(
-                f"server {server_id} is locked by someone else ({server.locked_reason!r})"
-            )
+        if server.locked_reason not in self.own_lock_reasons():
+            raise self._foreign_lock(server_id, server)
         self._backend.unlock_server(server_id)
 
     # --- claim_resources: add / merge only (rule 1 only, see ownership.py) ---------------------------------

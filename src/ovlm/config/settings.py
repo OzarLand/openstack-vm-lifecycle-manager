@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -48,10 +49,32 @@ class HttpSettings(_Section):
     #: Internal listener for /metrics (SEC-R-17). Never published by the Compose file.
     metrics_host: str = "127.0.0.1"
     metrics_port: int = Field(default=9100, ge=1, le=65535)
+    #: Addresses or networks of the TLS reverse proxies in front of the api (security-model.md section 9). Only a
+    #: request whose peer is in this list may name the client with ``X-Forwarded-For``; from anyone else the header
+    #: is ignored and the peer address is the client. The default trusts a proxy on the same host (loopback).
+    #: A containerised proxy on the Compose network must be listed here, or every client looks like the proxy.
+    trusted_proxies: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
+        ipaddress.IPv4Network("127.0.0.1/32"),
+        ipaddress.IPv6Network("::1/128"),
+    )
+
+    @field_validator("trusted_proxies", mode="before")
+    @classmethod
+    def _parse_networks(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = [v for v in (p.strip() for p in value.split(",")) if v]
+        if isinstance(value, list | tuple):
+            return tuple(ipaddress.ip_network(str(v), strict=False) for v in value)
+        return value
 
 
 class LogSettings(_Section):
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    #: Let the openstacksdk / keystoneauth / HTTP client loggers follow ``level`` (curl lines with request and
+    #: response bodies at DEBUG). Off: they are pinned to WARNING whatever ``level`` says (security-model.md 4.5,
+    #: SEC-C-2). Refused unless ``development_mode`` is on, so it can never be switched on in production by a
+    #: config key alone. Even when on, the server-create request (``user_data``) is sent with logging disabled.
+    openstack_http_debug: bool = False
 
 
 class WorkerSettings(_Section):
@@ -161,6 +184,10 @@ class AuthSettings(_Section):
     login_failure_threshold: int = Field(default=5, ge=1)
     login_ip_failure_threshold: int = Field(default=20, ge=1)
     login_window_minutes: int = Field(default=15, ge=1)
+    #: Delay applied per source address once ``login_ip_failure_threshold`` is reached. It is fixed and never
+    #: escalates: only the per-account backoff doubles (up to 15 minutes), so a shared or misattributed source
+    #: address can slow other users for seconds, never lock them out (SEC-C-1).
+    login_ip_delay_seconds: int = Field(default=10, ge=1, le=60)
 
 
 class Settings(BaseSettings):
@@ -172,6 +199,11 @@ class Settings(BaseSettings):
     )
 
     process_role: ProcessRole = "api"
+    #: Development / test installation. Off (the default) means production: the api refuses to start without
+    #: ``external_url`` and ``log.openstack_http_debug`` is refused. Never set it on a real installation.
+    development_mode: bool = False
+    #: Public origin of the UI/API behind the TLS proxy (``https://ovlm.example.org``). Required in production for
+    #: the api: the CSRF Origin check and the enrolment links use it (SEC-C-11).
     external_url: str | None = None
     migrations_dir: Path = Path("migrations")
     db: DatabaseSettings = DatabaseSettings()
@@ -191,6 +223,17 @@ class Settings(BaseSettings):
             raise ValueError(
                 "http.port and http.metrics_port must differ (metrics use a separate port)"
             )
+        if not self.development_mode:
+            if self.process_role == "api" and not self.external_url:
+                raise ValueError(
+                    "external_url is required for the api (CSRF Origin check, enrolment links); "
+                    "set development_mode = true only on a development installation"
+                )
+            if self.log.openstack_http_debug:
+                raise ValueError(
+                    "log.openstack_http_debug logs OpenStack request and response bodies (credentials, "
+                    "bootstrap keys) and is refused unless development_mode is on"
+                )
         return self
 
     @classmethod

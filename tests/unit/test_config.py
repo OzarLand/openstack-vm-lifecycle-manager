@@ -15,6 +15,8 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         if key.startswith("OVLM_"):
             monkeypatch.delenv(key)
     monkeypatch.setenv("OVLM_CONFIG_FILE", str(tmp_path / "absent.toml"))
+    # Default api settings have no external_url; production checks are tested explicitly below.
+    monkeypatch.setenv("OVLM_DEVELOPMENT_MODE", "true")
 
 
 def test_defaults_and_role_mapping() -> None:
@@ -71,3 +73,38 @@ def test_missing_and_empty_secret_files(tmp_path: Path) -> None:
     empty.write_text("\n")
     with pytest.raises(SecretFileError):
         read_secret_file(empty)
+
+
+# --- production checks (SEC-C-11, SEC-C-2) --------------------------------------------------------------------
+
+
+def test_production_api_requires_external_url() -> None:
+    with pytest.raises(ValidationError, match="external_url is required"):
+        Settings(process_role="api", development_mode=False)
+    ok = Settings(
+        process_role="api", development_mode=False, external_url="https://ovlm.example.org"
+    )
+    assert ok.external_url == "https://ovlm.example.org"
+    # the worker and migrate processes do not serve the UI and do not need it
+    assert Settings(process_role="worker", development_mode=False).external_url is None
+    # an explicit development installation may run without it (Host-header fallback, warned once)
+    assert Settings(process_role="api", development_mode=True).external_url is None
+
+
+def test_development_mode_is_off_unless_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OVLM_DEVELOPMENT_MODE")
+    assert Settings(process_role="worker").development_mode is False
+    with pytest.raises(ValidationError):
+        Settings(process_role="api")
+
+
+def test_openstack_http_debug_is_refused_in_production() -> None:
+    with pytest.raises(ValidationError, match="openstack_http_debug"):
+        Settings(process_role="worker", development_mode=False, log={"openstack_http_debug": True})
+    s = Settings(process_role="worker", development_mode=True, log={"openstack_http_debug": True})
+    assert s.log.openstack_http_debug
+
+
+def test_trusted_proxies_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OVLM_HTTP__TRUSTED_PROXIES", '["172.18.0.0/16"]')
+    assert [str(n) for n in Settings().http.trusted_proxies] == ["172.18.0.0/16"]

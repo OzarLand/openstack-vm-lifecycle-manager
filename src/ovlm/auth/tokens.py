@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from ovlm.auth.authz import ROLE_IMPLIES
 from ovlm.auth.dbutil import rowcount
 from ovlm.auth.ids import new_id
-from ovlm.auth.principal import GLOBAL, TOKEN_SCOPE_ROLES, TOKEN_SCOPES
+from ovlm.auth.principal import GLOBAL, TOKEN_SCOPE_ROLES, TOKEN_SCOPES, canonical_scope
 from ovlm.auth.sessions import sha256_hex
 
 MAX_DAYS = 90
@@ -50,7 +50,9 @@ def parse_token(raw: str) -> tuple[UUID, str] | None:
 
 
 def _covers(binding_scope: str, project_scope: str) -> bool:
-    return binding_scope in (GLOBAL, project_scope)
+    return binding_scope == GLOBAL or canonical_scope(binding_scope) == canonical_scope(
+        project_scope
+    )
 
 
 def token_grants(

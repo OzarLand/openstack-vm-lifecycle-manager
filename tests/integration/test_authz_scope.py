@@ -25,7 +25,7 @@ class Two:
         self.env = env
         self.a = env.project
         self.b = uuid4()
-        fake = FakeOpenStack()
+        fake = FakeOpenStack(strict_gate=False)  # cloud set-up, not OVLM writes
         fake._ids = 50_000  # distinct OpenStack ids from project A's fake
         net = fake.add_network("tenant-b")
         self.b_server = fake.add_server("b-server")
@@ -88,7 +88,7 @@ def test_lists_are_filtered_to_the_callers_projects(two: Two) -> None:
     assert _projects(gv.get("/api/v1/servers")) == {a, str(two.b)}
     assert _ids(gv.get("/api/v1/managed-vms")) == {two.vm_b["id"]}
     # an unscoped user (bound to a project id that is no project connection) sees nothing
-    nobody = two.user("nobody", [("viewer", "project:nothing-here")])
+    nobody = two.user("nobody", [("viewer", f"project:{uuid4()}")])
     assert nobody.get("/api/v1/servers").json()["items"] == []
 
 

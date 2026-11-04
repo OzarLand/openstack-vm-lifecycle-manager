@@ -35,6 +35,7 @@ TEST_CONFIG = EngineConfig(
     retry_max_attempts=3,
     retry_backoff_initial=0.0,
     retry_backoff_max=0.0,
+    watchdog_interval=0.05,  # fake clocks do not move with real time: poll the fence often
 )
 
 
@@ -163,6 +164,20 @@ class WfDb:
         return [(r["resource_type"], r["resource_key"]) for r in rows]
 
 
+def assert_open_step_invariant(wf: WfDb) -> None:
+    """Engine invariant (SRE-C-1): a run in ``needs_human`` has exactly one open step, itself in
+    ``needs_human``, so retry-step and mark-resolved always have a target."""
+    bad = wf.q(
+        "SELECT r.id, r.needs_human_reason, "
+        "  (SELECT count(*) FROM workflow_step s WHERE s.run_id = r.id "
+        "     AND s.state IN ('ready', 'running', 'waiting', 'needs_human')) AS open_steps, "
+        "  (SELECT count(*) FROM workflow_step s WHERE s.run_id = r.id AND s.state = 'needs_human') AS nh "
+        "FROM workflow_run r WHERE r.state = 'needs_human'"
+    )
+    bad = [dict(b) for b in bad if b["open_steps"] != 1 or b["nh"] != 1]
+    assert not bad, f"runs in needs_human without exactly one open needs_human step: {bad}"
+
+
 def drive(engine: WorkflowEngine, run_id: str, wf: WfDb, max_passes: int = 100) -> Any:
     """Run synchronous passes until the run is terminal or parked (needs_human / waiting on a signal)."""
     for _ in range(max_passes):
@@ -208,6 +223,7 @@ def wf(admin_url: URL, fresh_db: str, secrets_dir: Path) -> Iterator[WfDb]:
     dummy.REVOKED.clear()
     try:
         yield db
+        assert_open_step_invariant(db)
     finally:
         crashpoint.install(None)
         crashpoint.record(None)

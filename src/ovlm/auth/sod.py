@@ -44,7 +44,7 @@ from sqlalchemy.orm import Session
 from ovlm.auth import installation
 from ovlm.auth.authz import authorize, scope_covers
 from ovlm.auth.errors import ProblemError
-from ovlm.auth.principal import GLOBAL, Principal
+from ovlm.auth.principal import GLOBAL, Principal, canonical_scope
 
 STEPUP_VALIDITY = timedelta(minutes=5)
 INTERACTIVE_AUTH = "password+totp"
@@ -279,7 +279,7 @@ def account_provenance(db: Session, user_id: UUID) -> dict[str, Any]:
 
 
 def _overlap(a: str, b: str) -> bool:
-    return GLOBAL in (a, b) or a == b
+    return GLOBAL in (a, b) or canonical_scope(a) == canonical_scope(b)
 
 
 def binding_conflicts(existing: Collection[tuple[str, str]], role: str, scope: str) -> list[str]:

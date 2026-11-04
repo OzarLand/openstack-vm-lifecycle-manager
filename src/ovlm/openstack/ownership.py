@@ -68,7 +68,12 @@ class Registration:
 class OwnershipRegistry(Protocol):
     """The DB view the guard consults. E5-4 provides the DB-backed implementation (ledger, plan, managed VM).
 
-    Implementations must read the database on every call (no cache) and must only answer for ``run_id``."""
+    Implementations must read the database on every call (no cache) and must only answer for ``run_id``.
+
+    A server is recorded with ``origin="created"`` (which, with ``deletable``, lets rule 3 delete it) only when
+    this run created it from an ``intended`` ledger row, or when a server found by
+    ``GuardedWriteClient.find_run_server`` passed :func:`ovlm.openstack.write.adopt_checks` (SEC-R-23, SEC-C-10);
+    never on the strength of its tags alone."""
 
     @property
     def run_id(self) -> str: ...

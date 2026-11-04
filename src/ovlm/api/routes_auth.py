@@ -38,7 +38,7 @@ from ovlm.auth.deps import (
     require_role,
 )
 from ovlm.auth.errors import ProblemError, ProblemRoute, forbidden
-from ovlm.auth.principal import GLOBAL, Principal
+from ovlm.auth.principal import GLOBAL, Principal, canonical_scope
 from ovlm.auth.sessions import create_session, delete_session, delete_user_sessions
 from ovlm.auth.stepup import consume_stepup
 from ovlm.auth.totp import TotpUnavailableError, TotpVault
@@ -546,9 +546,9 @@ def api_token_create(
     who: Annotated[Principal, Depends(require_role("viewer", human_only=True))],
 ) -> dict[str, Any]:
     try:
-        users.check_scope(body.project_scope)
+        project_scope = users.check_scope(body.project_scope)  # canonical form (SEC-C-8)
         tokens.validate_request(
-            sorted(who.grants), body.scopes, body.project_scope, body.expires_in_days
+            sorted(who.grants), body.scopes, project_scope, body.expires_in_days
         )
     except ValueError as exc:
         raise ProblemError(422, "token-scope-exceeded", "Token not allowed", str(exc)) from None
@@ -557,7 +557,7 @@ def api_token_create(
         user_id=who.user_id,
         name=body.name,
         scopes=body.scopes,
-        project_scope=body.project_scope,
+        project_scope=project_scope,
         days=body.expires_in_days,
     )
     _audit(
@@ -569,7 +569,7 @@ def api_token_create(
         after={
             "name": body.name,
             "scopes": body.scopes,
-            "project_scope": body.project_scope,
+            "project_scope": project_scope,
             "expires_at": expires_at,
             "owner_id": str(who.user_id),
         },
@@ -686,6 +686,11 @@ def api_user_create(body: UserBody, db: Db, settings: Cfg, who: HumanAdmin) -> d
             created_via="admin",
             bindings=[(r.role, r.scope) for r in body.roles],
         )
+    except users.ScopeNotFoundError:
+        db.rollback()
+        raise ProblemError(
+            404, "not-found", "Project not found", "No such project connection."
+        ) from None
     except users.UserError as exc:
         db.rollback()
         raise ProblemError(422, "invalid-user", "User not created", str(exc)) from None
@@ -700,7 +705,7 @@ def api_user_create(body: UserBody, db: Db, settings: Cfg, who: HumanAdmin) -> d
             "display_name": body.display_name,
             "state": "pending_enrolment",
             "created_via": "admin",
-            "roles": [f"{r.role}@{r.scope}" for r in body.roles],
+            "roles": [f"{r.role}@{canonical_scope(r.scope)}" for r in body.roles],
         },
     )
     result = _issue_link_response(db, settings, who, user_id, "enrol")
@@ -797,32 +802,45 @@ def _guard_own_bindings(db: Session, who: Principal, user_id: UUID) -> bool:
 
 
 @router.post("/api/v1/role-bindings", status_code=201)
-def api_binding_create(body: BindingBody, db: Db, who: HumanAdmin) -> dict[str, str]:
+def api_binding_create(
+    body: BindingBody, db: Db, who: HumanAdmin, response: Response
+) -> dict[str, Any]:
     if _user_state(db, body.user_id) in (None, "disabled"):
         raise ProblemError(404, "not-found", "User not found", "No such active user.")
     own = _guard_own_bindings(db, who, body.user_id)
     try:
-        users.check_scope(body.scope)
+        scope = users.check_scope(body.scope)  # UUID project scopes in canonical form (SEC-C-8)
+        users.check_project_exists(db, scope)
+    except users.ScopeNotFoundError:
+        raise ProblemError(
+            404, "not-found", "Project not found", "No such project connection."
+        ) from None
     except users.UserError as exc:
         raise ProblemError(422, "invalid-binding", "Binding not created", str(exc)) from None
-    sod.check_binding_sod(db, users.load_bindings(db, body.user_id), body.role, body.scope)
+    sod.check_binding_sod(db, users.load_bindings(db, body.user_id), body.role, scope)
     try:
-        binding_id = users.add_binding(
-            db, user_id=body.user_id, role=body.role, scope=body.scope, created_by=who.user_id
+        result = users.add_binding(
+            db, user_id=body.user_id, role=body.role, scope=scope, created_by=who.user_id
         )
     except users.UserError as exc:
         raise ProblemError(422, "invalid-binding", "Binding not created", str(exc)) from None
+    if (
+        not result.created
+    ):  # an identical active binding exists: nothing changed, nothing audited (SEC-C-9)
+        db.rollback()
+        response.status_code = 200
+        return {"id": str(result.id), "created": False}
     _audit(
         db,
         who,
         "role_binding.create.own" if own else "role_binding.create",
         "role_binding",
-        str(binding_id),
-        after={"user_id": str(body.user_id), "role": body.role, "scope": body.scope},
+        str(result.id),
+        after={"user_id": str(body.user_id), "role": body.role, "scope": result.scope},
     )
     delete_user_sessions(db, body.user_id)  # privilege change: new session id at next login
     db.commit()
-    return {"id": str(binding_id)}
+    return {"id": str(result.id), "created": True}
 
 
 @router.get("/api/v1/role-bindings")

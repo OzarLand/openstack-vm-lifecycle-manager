@@ -32,7 +32,7 @@ from ovlm.openstack.allowlist import (
 )
 from ovlm.openstack.guard import install_read_only_guard
 from ovlm.openstack.ownership import InMemoryOwnershipRegistry, ResourceKind, run_tag
-from ovlm.openstack.sdk_write import SdkWriteBackend, connect_write, error_message
+from ovlm.openstack.sdk_write import SdkWriteBackend, error_message
 from ovlm.openstack.types import CreateServerSpec
 from ovlm.openstack.write import GuardedWriteClient
 from ovlm.workflow import FenceLost
@@ -138,6 +138,13 @@ REFUSED = {
     "create with block devices": ("POST", "/servers", kw(C, {"server": {
         **CREATE_BODY["server"], "block_device_mapping_v2": [{"source_type": "blank"}]}})),
     "create several": ("POST", "/servers", kw(C, {"server": {**CREATE_BODY["server"], "max_count": 3}})),
+    # SEC-C-5: only allow-listed create keys
+    **{f"create with {k}": ("POST", "/servers", kw(C, {"server": {**CREATE_BODY["server"], k: v}}))
+       for k, v in (("adminPass", "chosen"), ("config_drive", True), ("OS-DCF:diskConfig", "MANUAL"),
+                    ("return_reservation_id", True), ("trusted_image_certificates", ["x"]),
+                    ("min_count", 1), ("block_device_mapping", []), ("personality", []),
+                    ("hostname", "h"), ("host", "compute-1"), ("hypervisor_hostname", "h"))},
+    "create with an unknown top-level key": ("POST", "/servers", kw(C, {**CREATE_BODY, "extra": {}})),
     "create with auto network": ("POST", "/servers", kw(C, {"server": {**CREATE_BODY["server"], "networks": "auto"}})),
     "attach with delete_on_termination": ("POST", f"/servers/{SID}/os-volume_attachments",
         kw(C, {"volumeAttachment": {"volumeId": VID, "delete_on_termination": True}})),
@@ -159,6 +166,14 @@ REFUSED = {
     "token request via a proxy": ("POST", f"{AUTH_URL}/auth/tokens",
                                   {"authenticated": False, "endpoint_filter": {"service_type": "identity"}}),
 }  # fmt: skip
+
+
+def test_create_accepts_every_allow_listed_key() -> None:
+    full = {**CREATE_BODY["server"], "metadata": {"ovlm.role": "green"}, "availability_zone": "az1",
+            "security_groups": [{"name": "sg"}], "key_name": "k", "user_data": "I2Nsb3Vk"}  # fmt: skip
+    assert classify_write("POST", "/servers", kw(C, {"server": full})) == "create_server"
+    hints = {"server": CREATE_BODY["server"], "os:scheduler_hints": {"group": SID}}
+    assert classify_write("POST", "/servers", kw(C, hints)) == "create_server"
 
 
 @pytest.mark.parametrize("case", list(REFUSED), ids=list(REFUSED))
@@ -562,29 +577,4 @@ def test_guarded_client_over_the_sdk_refuses_an_unregistered_target_before_any_r
     assert gate.checks == [("openstack:stop_server", 0)]
 
 
-def test_connect_write_exists_only_in_the_worker(tmp_path: Any) -> None:
-    with pytest.raises(errors.WriteNotAllowedError, match="worker"):
-        connect_write(
-            "lab", registry=InMemoryOwnershipRegistry(RUN), gate=lambda _a: None, process_role="api"
-        )
-
-
-def test_connect_write_installs_the_guard_before_any_request(tmp_path: Any) -> None:
-    clouds = tmp_path / "clouds.yaml"
-    clouds.write_text(
-        "clouds:\n  lab:\n    auth_type: v3applicationcredential\n    auth:\n"
-        f"      auth_url: {AUTH_URL}\n      application_credential_id: id\n"
-        "      application_credential_secret: s3cret\n    region_name: R1\n"
-    )
-    client = connect_write(
-        "lab", registry=InMemoryOwnershipRegistry(RUN), gate=lambda _a: None, process_role="worker",
-        clouds_yaml=clouds,
-    )  # fmt: skip
-    backend = client._backend
-    assert isinstance(backend, SdkWriteBackend)
-    assert getattr(backend._conn.session, "_ovlm_write_guard", False)
-    cloud = CannedCloud()
-    backend._conn.session.session.mount("http://", cloud)
-    with pytest.raises(errors.WriteNotAllowedError):  # no gate bound outside the client's own calls
-        backend._conn.compute.delete(f"/servers/{SID}")
-    assert cloud.writes() == []  # only the token request (exempt) went out
+# connect_write / connect_write_from_clouds_yaml: see test_openstack_credentials.py (SEC-C-3, SEC-C-4).

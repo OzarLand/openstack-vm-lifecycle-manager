@@ -19,6 +19,18 @@ TOKEN_SCOPE_ROLES: dict[str, frozenset[str]] = {
     "operate": frozenset({"viewer", "operator"}),
 }
 GLOBAL = "global"
+PROJECT_PREFIX = "project:"
+
+
+def canonical_scope(scope: str) -> str:
+    """``project:<uuid>`` in canonical lower-case form; anything else unchanged (SEC-C-8). Used on both sides of
+    every scope comparison, so a binding stored before normalisation still compares correctly."""
+    if scope.startswith(PROJECT_PREFIX):
+        try:
+            return PROJECT_PREFIX + str(UUID(scope.removeprefix(PROJECT_PREFIX)))
+        except ValueError:
+            return scope
+    return scope
 
 
 @dataclass(frozen=True)

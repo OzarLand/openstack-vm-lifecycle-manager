@@ -136,12 +136,13 @@ def test_needs_human_class_parks_and_mark_resolved_moves_on(wf: WfDb) -> None:
     eng = wf.make_engine()
     run_id = wf.request(
         [
-            plan_step("fail", cls="needs_human", reason="ambiguous_state"),
+            plan_step("fail", cls="needs_human", reason="ambiguous_state", res="m"),
             plan_step("set", res="z", value="Z"),
         ]
     )
     r = drive(eng, run_id, wf)
     assert r["state"] == "needs_human" and r["needs_human_reason"] == "ambiguous_state"
+    wf.x("INSERT INTO fake_resource (key, value) VALUES ('m', 'resolved')")  # the admin's fix
     wf.signal(run_id, "mark_resolved", note="fixed by hand")
     r = drive(eng, run_id, wf)
     assert r["state"] == "completed"

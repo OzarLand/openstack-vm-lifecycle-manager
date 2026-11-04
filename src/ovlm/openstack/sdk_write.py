@@ -1,6 +1,6 @@
 """openstacksdk-backed write backend and ``connect_write`` (E5-2).
 
-* Uses the **write credential** (its own ``clouds.yaml`` entry) on a session that carries the write guard
+* Uses the **write credential**, passed in memory by the worker (``WriteCredential``, SEC-C-3), on a session that carries the write guard
   (``allowlist.install_write_guard``) before its first request. Reads reuse ``SdkReadClient`` on that session
   (GET passes the guard), so read behaviour is the read client's, unchanged.
 * Every mutating call is an explicit request (method, relative path, JSON body) through the SDK's service
@@ -21,6 +21,7 @@ import base64
 import json
 import logging
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ import openstack
 from openstack.config import OpenStackConfig
 from openstack.network.v2.floating_ip import FloatingIP as SdkFloatingIP
 
+from ovlm.config.secrets import register_secret
 from ovlm.openstack.allowlist import Gate, GateBinding, install_write_guard
 from ovlm.openstack.errors import (
     NotFoundError,
@@ -43,6 +45,7 @@ from ovlm.openstack.sdk_read import (
     map_floating_ip,
     map_port,
     parse_version,
+    require_tls_verification,
     translated,
 )
 from ovlm.openstack.types import (
@@ -191,10 +194,14 @@ class SdkWriteBackend:
 
     # --- writes --------------------------------------------------------------------------------------------
 
-    def _compute(self, method: str, path: str, body: Any = None) -> Any:
+    def _compute(self, method: str, path: str, body: Any = None, *, log_http: bool = True) -> Any:
         self._require_compute()
         call: Callable[..., Any] = getattr(self._conn.compute, method)
         kwargs: dict[str, Any] = {"microversion": COMPUTE_WRITE_MICROVERSION}
+        if not log_http:
+            kwargs["log"] = (
+                False  # keystoneauth: neither the request nor the response is logged, at any level
+            )
         if body is not None:
             kwargs["json"] = body
         with translated():
@@ -222,7 +229,9 @@ class SdkWriteBackend:
             server["key_name"] = spec.key_name
         if spec.user_data is not None:
             server["user_data"] = base64.b64encode(spec.user_data.encode()).decode()
-        resp = self._compute("post", "/servers", {"server": server})
+        # The body carries user_data (the bootstrap host key, ADR-0006) and the response adminPass: this request
+        # is never logged by keystoneauth, even with log.openstack_http_debug in development (SEC-C-2).
+        resp = self._compute("post", "/servers", {"server": server}, log_http=False)
         created = resp.json().get("server") or {}  # carries adminPass: never logged, never returned
         server_id = str(created.get("id") or "")
         if not server_id:
@@ -303,26 +312,94 @@ class SdkWriteBackend:
             )
 
 
-def connect_write(
-    cloud: str,
-    *,
-    registry: OwnershipRegistry,
-    gate: Gate,
-    process_role: str,
-    clouds_yaml: Path | None = None,
-) -> GuardedWriteClient:
-    """Build the write client of one step attempt from the **write** credential's ``clouds.yaml`` entry.
+@dataclass(frozen=True)
+class WriteCredential:
+    """The write application credential of one project, **in memory** (security-model.md 5.1, SEC-C-3).
 
-    Refuses outside the worker process (architecture.md section 3). The write guard is installed on the session
-    before any request (authentication happens lazily on the first call). Environment variables are not read."""
-    if process_role != "worker":
-        raise WriteNotAllowedError(
-            f"the write client exists only in the worker, not in {process_role!r}"
-        )
-    files = [str(clouds_yaml)] if clouds_yaml else None
-    config = OpenStackConfig(config_files=files, load_envvars=False)
-    region = config.get_one(cloud=cloud)
+    The worker unseals it from the database and hands it over as this object; it is never written to a
+    ``clouds.yaml`` or read from one. The secret is excluded from ``repr``."""
+
+    auth_url: str
+    application_credential_id: str
+    application_credential_secret: str = field(repr=False)
+    region_name: str
+    interface: str = "public"
+    #: CA bundle of the cloud's endpoints (TLS verification itself is always on).
+    cacert: Path | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("auth_url", "application_credential_id", "application_credential_secret"):
+            if not getattr(self, name):
+                raise WriteNotAllowedError(f"write credential: {name} is empty")
+        if not self.region_name:
+            raise WriteNotAllowedError("write credential: region_name is empty")
+
+
+def _write_client(region: Any, registry: OwnershipRegistry, gate: Gate) -> GuardedWriteClient:
+    require_tls_verification(region)
     binding = GateBinding()
     install_write_guard(region.get_session(), binding)
     conn = openstack.connection.Connection(config=region)
     return GuardedWriteClient(SdkWriteBackend(conn, binding), registry, gate)
+
+
+def _require_worker(process_role: str) -> None:
+    if process_role != "worker":
+        raise WriteNotAllowedError(
+            f"the write client exists only in the worker, not in {process_role!r}"
+        )
+
+
+def connect_write(
+    credential: WriteCredential,
+    *,
+    registry: OwnershipRegistry,
+    gate: Gate,
+    process_role: str,
+) -> GuardedWriteClient:
+    """Build the write client of one step attempt from the in-memory write credential. The worker's only path.
+
+    Refuses outside the worker process (architecture.md section 3). Nothing ambient is read: no ``clouds.yaml``,
+    ``secure.yaml`` or vendor file from the SDK's search paths, no ``OS_*`` environment variable. TLS verification
+    is on (a ``cacert`` bundle may be given). The secret is registered with the log redaction backstop. The write
+    guard is installed on the session before any request (authentication happens lazily on the first call)."""
+    _require_worker(process_role)
+    register_secret(credential.application_credential_secret)
+    config = OpenStackConfig(load_yaml_config=False, load_envvars=False)
+    extra: dict[str, Any] = {"cacert": str(credential.cacert)} if credential.cacert else {}
+    region = config.get_one(
+        auth_type="v3applicationcredential",
+        auth={
+            "auth_url": credential.auth_url,
+            "application_credential_id": credential.application_credential_id,
+            "application_credential_secret": credential.application_credential_secret,
+        },
+        region_name=credential.region_name,
+        interface=credential.interface,
+        verify=True,
+        **extra,
+    )
+    return _write_client(region, registry, gate)
+
+
+def connect_write_from_clouds_yaml(
+    cloud: str,
+    clouds_yaml: Path,
+    *,
+    registry: OwnershipRegistry,
+    gate: Gate,
+    process_role: str,
+) -> GuardedWriteClient:
+    """Lab / CLI only: the write client from one explicitly named ``clouds.yaml`` file.
+
+    Only that file is read (no default search path, no ``secure.yaml``, no vendor file, no environment). The worker
+    never uses this: it passes the credential in memory (:func:`connect_write`)."""
+    _require_worker(process_role)
+    config = OpenStackConfig(
+        config_files=[str(clouds_yaml)], vendor_files=[], secure_files=[], load_envvars=False
+    )
+    region = config.get_one(cloud=cloud)
+    secret = (region.config.get("auth") or {}).get("application_credential_secret")
+    if secret:
+        register_secret(str(secret))
+    return _write_client(region, registry, gate)

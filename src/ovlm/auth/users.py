@@ -19,16 +19,19 @@ from sqlalchemy.orm import Session
 from ovlm.auth import passwords
 from ovlm.auth.dbutil import rowcount
 from ovlm.auth.ids import new_id
-from ovlm.auth.principal import GLOBAL, ROLES
+from ovlm.auth.principal import GLOBAL, PROJECT_PREFIX, ROLES
 from ovlm.auth.sessions import delete_user_sessions, sha256_hex
 from ovlm.config import Settings
 
 USERNAME = re.compile(r"^[a-z0-9][a-z0-9._@-]{2,63}$")
-_SCOPE = re.compile(r"^(global|project:[A-Za-z0-9-]{1,64})$")
 
 
 class UserError(ValueError):
     """Invalid request (message safe to show)."""
+
+
+class ScopeNotFoundError(UserError):
+    """The binding names a project connection that does not exist (answered 404)."""
 
 
 class LinkInvalidError(Exception):
@@ -45,9 +48,37 @@ def normalise_username(value: str) -> str:
 
 
 def check_scope(scope: str) -> str:
-    if not _SCOPE.match(scope):
-        raise UserError("scope must be 'global' or 'project:<id>'")
-    return scope
+    """``global`` or ``project:<project connection UUID>``, returned in canonical form (lower case, SEC-C-8).
+
+    Any other string is refused: a binding that matches no project would grant nothing, silently."""
+    if scope == GLOBAL:
+        return scope
+    if scope.startswith(PROJECT_PREFIX):
+        raw = scope.removeprefix(PROJECT_PREFIX)
+        if len(raw) <= 64:
+            try:
+                return PROJECT_PREFIX + str(UUID(raw))
+            except ValueError:
+                pass
+    raise UserError("scope must be 'global' or 'project:<project connection id (UUID)>'")
+
+
+def check_project_exists(db: Session, scope: str) -> None:
+    """A project scope must name an existing project connection (:class:`ScopeNotFoundError` otherwise).
+
+    The ``project_connection`` table belongs to the cloud-connection module; until its migration exists the check
+    cannot run and only the UUID form is enforced (:func:`check_scope`)."""
+    if not scope.startswith(PROJECT_PREFIX):
+        return
+    table = db.execute(text("SELECT to_regclass('project_connection') IS NOT NULL")).scalar_one()
+    if not table:
+        return
+    found = db.execute(
+        text("SELECT 1 FROM project_connection WHERE id = CAST(:id AS uuid)"),
+        {"id": scope.removeprefix(PROJECT_PREFIX)},
+    ).first()
+    if found is None:
+        raise ScopeNotFoundError("no such project connection")
 
 
 def create_user(
@@ -220,21 +251,44 @@ def load_bindings(db: Session, user_id: UUID) -> list[tuple[str, str]]:
     return [(r.role, r.scope) for r in rows]
 
 
+@dataclass(frozen=True)
+class BindingResult:
+    id: UUID
+    #: False when an identical active binding already existed: nothing was inserted (and nothing is audited).
+    created: bool
+    scope: str
+
+
 def add_binding(
     db: Session, *, user_id: UUID, role: str, scope: str, created_by: UUID | None
-) -> UUID:
+) -> BindingResult:
+    """Insert an active binding, or return the identical active one that already exists (SEC-C-9).
+
+    The scope is validated and normalised (:func:`check_scope`) and a project scope must exist
+    (:func:`check_project_exists`, :class:`ScopeNotFoundError`)."""
     if role not in ROLES:
         raise UserError(f"role must be one of {list(ROLES)}")
-    check_scope(scope or GLOBAL)
-    binding_id = new_id()
-    db.execute(
+    scope = check_scope(scope or GLOBAL)
+    check_project_exists(db, scope)
+    params = {"u": user_id, "r": role, "s": scope}
+    inserted = db.execute(
         text(
             "INSERT INTO role_binding (id, user_id, role, scope, created_by) "
-            "VALUES (:id, :u, :r, :s, :by) ON CONFLICT DO NOTHING"
+            "VALUES (:id, :u, :r, :s, :by) "
+            "ON CONFLICT (user_id, role, scope) WHERE revoked_at IS NULL DO NOTHING RETURNING id"
         ),
-        {"id": binding_id, "u": user_id, "r": role, "s": scope, "by": created_by},
-    )
-    return binding_id
+        {**params, "id": new_id(), "by": created_by},
+    ).scalar_one_or_none()
+    if inserted is not None:
+        return BindingResult(inserted, True, scope)
+    existing = db.execute(
+        text(
+            "SELECT id FROM role_binding "
+            "WHERE user_id = :u AND role = :r AND scope = :s AND revoked_at IS NULL"
+        ),
+        params,
+    ).scalar_one()
+    return BindingResult(existing, False, scope)
 
 
 def revoke_binding(

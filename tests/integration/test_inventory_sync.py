@@ -55,7 +55,8 @@ def clock() -> Clock:
 
 def _world(clock: Clock | None = None) -> tuple[FakeOpenStack, dict[str, str]]:
     """The fake shares the sync clock's timeline (both are wall clocks in real life)."""
-    fake = FakeOpenStack(now=clock.t if clock else None)
+    # cloud set-up and changes made by people in the project, not OVLM writes (the sync is read-only)
+    fake = FakeOpenStack(now=clock.t if clock else None, strict_gate=False)
     ext = fake.add_network("ext", external=True)
     net = fake.add_network("tenant")
     fake.add_image("ubuntu")
