@@ -37,6 +37,10 @@ class CloudPort(Protocol):
         """``expires_at`` of the write application credential (entered by the admin); ``None`` if unknown."""
         ...
 
+    def write_user_id(self) -> str | None:
+        """Keystone user of the write credential (B3 adoption: ``user_id`` must match, SEC-R-23)."""
+        ...
+
     def token_expires_at(self) -> datetime | None:
         """Expiry of a Keystone token obtained now (pre-warmed before the W1 claim transaction, SRE-R-28 b)."""
         ...

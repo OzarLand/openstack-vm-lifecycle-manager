@@ -395,7 +395,7 @@ def build_world(admin_url: URL, db: str, secrets_dir: Path, *, snapshot: bool = 
         role_url(admin_url, db, "ovlm_worker", WORKER_PW), pool_size=10, max_overflow=10
     )
     api = create_engine(role_url(admin_url, db, "ovlm_api", API_PW))
-    cloud = RenewalFake()
+    cloud = RenewalFake(now=datetime.now(UTC), strict_gate=False)  # seeding the cloud; strict after
     ids, users = _seed(admin, cloud, snapshot=snapshot, policy=policy or {})
     port = FakeCloudPort(cloud, FakeSnapshots() if snapshot else None,
                          datetime.now(UTC) + timedelta(days=30), datetime.now(UTC) + timedelta(hours=8))  # fmt: skip

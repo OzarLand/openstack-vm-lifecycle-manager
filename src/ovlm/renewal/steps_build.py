@@ -13,6 +13,7 @@ from ovlm.openstack.allowlist import TAG_MANAGED, VOLUME_MARKER_KEY, VOLUME_MARK
 from ovlm.openstack.errors import DuplicateResourceError, NotFoundError
 from ovlm.openstack.ownership import run_tag
 from ovlm.openstack.types import CreateServerSpec, ServerInfo
+from ovlm.openstack.write import AdoptionExpectation, adopt_checks
 from ovlm.policies.windows import next_window, rule_from_dict
 from ovlm.renewal import metrics
 from ovlm.renewal.base import RStep, StepRefusal
@@ -208,32 +209,9 @@ class ClaimResources(RStep):
         return self.fail(ctx, E.RETRYABLE, "markers_missing", markers=observed)
 
 
-def adoption_problems(
-    server: ServerInfo, resolved: Mapping[str, Any], intent_committed_at: datetime | None
-) -> list[str]:
-    """SEC-R-23: a server found by run tag + name is adopted only if every check passes."""
-    out = []
-    if server.image_id != resolved["image"]["id"]:
-        out.append("image differs")
-    if server.flavor_original_name != resolved["flavor"]["name"]:
-        out.append("flavor differs")
-    if (
-        intent_committed_at is None
-        or server.created is None
-        or server.created < intent_committed_at
-    ):
-        out.append("created before the ledger intent")
-    if server.attached_volumes:
-        out.append("has attached volumes")
-    user_id = getattr(server, "user_id", None)
-    if user_id is None:
-        # The adapter does not expose ``user_id`` (visibility AS -> lab): unverifiable, so refused (safest reading).
-        out.append("user_id not observable")
-    return out
-
-
 class CreateGreen(RStep):
-    """B3: ledger ``intended`` first; lookup by run tag + exact name: 0 create, 1 adopt (checks), >1 needs_human."""
+    """B3: ledger ``intended`` first; lookup by run tag + exact name: 0 create, 1 adopt only if
+    :func:`~ovlm.openstack.write.adopt_checks` passes (SEC-R-23), >1 needs_human."""
 
     key = "create_green"
 
@@ -257,8 +235,21 @@ class CreateGreen(RStep):
             ) from None
         if found is None:
             return {"name": name, "found": None}
-        problems = adoption_problems(found, r, g["intent_committed_at"] if g is not None else None)
-        return {"name": name, "found": found.openstack_id, "problems": problems}
+        if g is None:  # a run-tagged server without our ledger row: never adopt
+            return {
+                "name": name,
+                "found": found.openstack_id,
+                "problems": ["no intended ledger row"],
+            }
+        verdict = adopt_checks(
+            found,
+            AdoptionExpectation(
+                run_id=ctx.run.id, image_id=r["image"]["id"], flavor_name=r["flavor"]["name"],
+                ledger_committed_at=g["intent_committed_at"], write_user_id=self.d.cloud.write_user_id(),
+            ),
+            self.wc(ctx).list_server_volume_attachments(found.openstack_id),
+        )  # fmt: skip
+        return {"name": name, "found": found.openstack_id, "problems": list(verdict.reasons)}
 
     def decide(self, ctx: StepContext, observed: Any) -> Decision:
         if "present" in observed:

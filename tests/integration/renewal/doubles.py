@@ -229,6 +229,9 @@ class FakeCloudPort:
     def write_credential_expires_at(self) -> datetime | None:
         return self.credential_expires
 
+    def write_user_id(self) -> str | None:
+        return self.cloud.user_id
+
     def token_expires_at(self) -> datetime | None:
         return self.token_expires
 

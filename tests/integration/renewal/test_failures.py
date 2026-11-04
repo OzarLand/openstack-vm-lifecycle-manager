@@ -83,16 +83,41 @@ def test_no_valid_host_green_kept_until_operator_rollback(world: World) -> None:
     assert w.cloud.snapshot()["servers"][w.ids["blue"]]["status"] == "ACTIVE"  # blue untouched
 
 
-def test_lost_create_response_never_duplicates(world: World) -> None:
-    """WF-02 for create_green: the create landed, the response was lost. Lookup by run tag + name finds it; adoption
-    needs ``user_id`` (not exposed by the adapter) so it is refused -> needs_human; no second server."""
+def test_lost_create_response_adopts_never_duplicates(world: World) -> None:
+    """WF-02 for create_green: the create landed, the response was lost. Lookup by run tag + exact name finds it,
+    ``adopt_checks`` passes (image, flavor, created after the ledger row, no volumes, OVLM's write user): adopted."""
     w = world
     w.cloud.fail("create_server", ServerError("lost", status=502), when="after_apply")
     w.start()
-    w.drive()
-    parked(w, "adoption_refused")
+    w.drive(until="await_cutover")
     servers = [s for s in w.cloud.snapshot()["servers"] if s != w.ids["blue"]]
     assert len(servers) == 1 and calls(w, "create_server") == 1
+    ev = next(
+        s for s in w.steps() if s["step_key"] == "create_green" and s["state"] == "succeeded"
+    )["evidence"]
+    assert ev["adopted"] is True and ev["green_id"] == servers[0]
+
+
+def test_adoption_refused_for_a_server_of_another_user(world: World) -> None:
+    """SEC-R-23: a server carrying this run's tag and name but created by someone else is never adopted."""
+    w = world
+    w.cloud.fail("create_server", ServerError("lost", status=502), when="after_apply")
+    orig = w.cloud.create_server
+
+    def create(spec: Any) -> Any:
+        info = orig(spec)  # (the injected fault fires after this returns)
+        return info
+
+    w.cloud.user_id = (
+        "00000000-0000-0000-0000-0000000000ee"  # the "creator" is not OVLM's write user ...
+    )
+    w.port.cloud = w.cloud
+    w.cloud.create_server = create  # type: ignore[method-assign]
+    w.port.write_user_id = lambda: "00000000-0000-0000-0000-0000000000a1"  # type: ignore[method-assign]
+    w.start()
+    w.drive()
+    parked(w, "adoption_refused")
+    assert calls(w, "create_server") == 1
 
 
 def test_green_active_but_ssh_late_waits_on_reachability(world: World) -> None:
