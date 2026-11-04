@@ -1,0 +1,8 @@
+---
+# Pinned, per docs/automation-contract.md section 1. OVLM does NOT run ansible-galaxy at run time
+# (section 2): these collections must be vendored in the repo at the pinned SHA or shipped in the
+# OVLM image. This file is the version-pin source for that check and for CI/image builds.
+collections:
+  - name: ansible.posix
+    version: 2.2.2
+roles: []

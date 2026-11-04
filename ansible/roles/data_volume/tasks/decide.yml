@@ -1,0 +1,35 @@
+---
+# Pure decision table of automation-contract.md 3.3 (no I/O, safe in CI with canned input).
+# Input : dv_blkid_rc (int), dv_blkid_out (string, `blkid -o export -p` output), ovlm_fs_type, ovlm_first_use
+# Output: dv_decision = {action: mount|stop, classification: ok|fatal|needs_human, message, props}
+- name: Parse the blkid export output
+  ansible.builtin.set_fact:
+    dv_props: >-
+      {{ dict((dv_blkid_out | default('')).splitlines()
+              | select('match', '^[A-Z_]+=')
+              | map('split', '=', 1) | list) }}
+
+- name: Apply the decision table
+  ansible.builtin.set_fact:
+    dv_decision: >-
+      {%- set p = dv_props -%}
+      {%- if dv_blkid_rc | int == 2 or (p | length == 0) -%}
+        {%- if ovlm_first_use | bool -%}
+          {{ {'action': 'stop', 'classification': 'fatal', 'props': p,
+              'message': 'blank volume with first_use=true: data_attach never formats a volume; initial setup is a separate lab-only procedure'} }}
+        {%- else -%}
+          {{ {'action': 'stop', 'classification': 'needs_human', 'props': p,
+              'message': 'volume is blank but first_use=false: wrong device or data loss, not formatting'} }}
+        {%- endif -%}
+      {%- elif p.PTTYPE is defined or (p.TYPE | default('')) in ['LVM2_member', 'linux_raid_member', 'crypto_LUKS', 'swap'] -%}
+        {{ {'action': 'stop', 'classification': 'needs_human', 'props': p,
+            'message': 'partition table or LVM/RAID/LUKS signature found: operator decision needed'} }}
+      {%- elif p.TYPE is defined and p.TYPE != ovlm_fs_type -%}
+        {{ {'action': 'stop', 'classification': 'needs_human', 'props': p,
+            'message': 'filesystem type ' ~ p.TYPE ~ ' differs from expected ' ~ ovlm_fs_type ~ ': not touching it'} }}
+      {%- elif p.TYPE is defined and p.UUID is defined -%}
+        {{ {'action': 'mount', 'classification': 'ok', 'props': p, 'message': 'expected filesystem found'} }}
+      {%- else -%}
+        {{ {'action': 'stop', 'classification': 'needs_human', 'props': p,
+            'message': 'unrecognised blkid output (no TYPE/UUID)'} }}
+      {%- endif -%}

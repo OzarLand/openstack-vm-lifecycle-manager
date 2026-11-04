@@ -1,0 +1,18 @@
+---
+# Stop the service. STATE-CHANGING on the target VM (quiesce phase). Units are STOPPED, NEVER DISABLED
+# (contract 3.4): a restore boots the old VM again and relies on enabled units.
+- name: Stop the units (STATE-CHANGING; never disables)
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+  loop: "{{ ovlm_service_units }}"
+  when: not ovlm_test_mode | bool
+
+- name: TEST MODE ONLY - stop the service started without systemd (STATE-CHANGING)
+  ansible.builtin.command: >-
+    start-stop-daemon --stop --retry TERM/15/KILL/5
+    --pidfile {{ counter_run_dir }}/ovlm-counter.pid
+  register: counter_tm_stop
+  changed_when: counter_tm_stop.rc == 0
+  failed_when: counter_tm_stop.rc not in [0, 1]   # rc 1 = nothing to stop (already stopped)
+  when: ovlm_test_mode | bool

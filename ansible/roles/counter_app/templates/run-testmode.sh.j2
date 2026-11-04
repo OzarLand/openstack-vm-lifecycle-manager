@@ -1,0 +1,7 @@
+#!/bin/sh
+# CI test-mode launcher (no systemd). Managed by Ansible. Not installed on real VMs.
+set -eu
+set -a
+. {{ counter_env_dir }}/ovlm-counter.env
+set +a
+exec /usr/bin/python3 {{ counter_app_dir }}/ovlm_counter.py

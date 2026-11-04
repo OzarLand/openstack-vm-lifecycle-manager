@@ -1,0 +1,34 @@
+---
+# OVLM phase: data_attach  (STATE-CHANGING (mount + fstab), new VM, after OVLM attached the volume)
+# No formatting here, ever. Decision table = roles/data_volume/tasks/decide.yml.
+# Contract: docs/automation-contract.md section 3.3. Writes ovlm.result/1 to ovlm_result_path.
+# Failure handling: any failure is caught, classified, written to the result file, then re-raised
+# (ansible-playbook exit 2). Planned failures set ovlm_class; unplanned ones get the phase default.
+- name: "OVLM phase data_attach"
+  hosts: ovlm_target        # the only pattern the contract allows
+  become: true
+  gather_facts: false
+  vars:
+    ovlm_phase: data_attach
+    ovlm_default_class: needs_human
+  tasks:
+    - name: "Run the data_attach phase"
+      block:
+        - name: "Role data_volume"
+          ansible.builtin.include_role:
+            name: data_volume
+      rescue:
+        - name: Remember the failure
+          ansible.builtin.set_fact:
+            ovlm_failed: true
+            ovlm_message: "{{ (ansible_failed_task.name | default('task')) ~ ': ' ~ (ansible_failed_result.msg | default('failed')) }}"
+      always:
+        - name: Write the ovlm.result/1 document
+          ansible.builtin.include_role:
+            name: ovlm_result
+            tasks_from: write
+
+    - name: Fail the play when the phase failed (exit code 2)
+      ansible.builtin.fail:
+        msg: "{{ ovlm_message }}"
+      when: ovlm_failed | default(false) | bool

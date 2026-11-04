@@ -1,0 +1,102 @@
+---
+# ############################################################################
+# LAB / INITIAL DEPLOYMENT ONLY.  NOT A RENEWAL PHASE.  OVLM NEVER CALLS THIS.
+# ############################################################################
+# This is the ONLY place in this repository that formats a volume. It sets up the lab's
+# first data volume (EXP-style: a new blank Cinder volume attached to a fresh VM) before the
+# first renewal. It lives outside playbooks/ so a profile's `playbook_dir` cannot reach it,
+# and it is not part of the phase list in docs/automation-contract.md.
+#
+# STATE-CHANGING and DESTRUCTIVE if misused. Guards:
+#   1. needs `-e bootstrap_confirm=FORMAT-<volume id>` typed by a human;
+#   2. refuses if blkid finds ANY signature (filesystem, partition table, LVM, ...);
+#   3. device found via /dev/disk/by-id/virtio-<first 20 chars of the volume id>, never /dev/vdb.
+#
+# Usage (lab):
+#   ansible-playbook -i <inventory with host group ovlm_target> lab/bootstrap_data.yml \
+#     -e bootstrap_volume_id=<cinder volume uuid> -e bootstrap_confirm=FORMAT-<cinder volume uuid>
+- name: "LAB ONLY - first-time initialisation of the data volume"
+  hosts: ovlm_target
+  become: true
+  gather_facts: false
+  vars:
+    bootstrap_mount_point: /srv/data
+    bootstrap_fs_type: ext4
+    bootstrap_uid: 9101   # must equal counter_uid in playbooks/group_vars/all.yml
+    bootstrap_gid: 9101
+  tasks:
+    - name: Require the typed confirmation
+      ansible.builtin.assert:
+        that:
+          - bootstrap_volume_id is defined
+          - bootstrap_confirm is defined
+          - bootstrap_confirm == 'FORMAT-' ~ bootstrap_volume_id
+        fail_msg: "Refusing: pass -e bootstrap_volume_id=<id> -e bootstrap_confirm=FORMAT-<id> (lab only)"
+        quiet: true
+
+    - name: Find the device by its virtio by-id link (read-only)
+      ansible.builtin.find:
+        paths: /dev/disk/by-id
+        patterns: "virtio-{{ bootstrap_volume_id[:20] }}*"
+        file_type: link
+      register: bs_find
+      check_mode: false
+
+    - name: Require exactly one device
+      ansible.builtin.assert:
+        that: (bs_find.files | rejectattr('path', 'search', '-part[0-9]+$') | list | length) == 1
+        fail_msg: "expected exactly one by-id match for the volume"
+        quiet: true
+
+    - name: Resolve the device (read-only)
+      ansible.builtin.command: readlink -f {{ (bs_find.files | rejectattr('path', 'search', '-part[0-9]+$') | first).path | quote }}
+      register: bs_dev
+      changed_when: false
+      check_mode: false
+
+    - name: Probe for ANY existing signature (read-only)
+      ansible.builtin.command: blkid -o export -p {{ bs_dev.stdout | quote }}
+      register: bs_blkid
+      changed_when: false
+      failed_when: bs_blkid.rc not in [0, 2]
+      check_mode: false
+
+    - name: Refuse to touch a volume that already has any signature
+      ansible.builtin.assert:
+        that: bs_blkid.rc == 2
+        fail_msg: "the volume has a signature ({{ bs_blkid.stdout_lines | select('match', '^(TYPE|PTTYPE)=') | join(' ') }}); not formatting"
+        quiet: true
+
+    - name: Create the filesystem, label = volume id (STATE-CHANGING, DESTRUCTIVE, lab only)
+      ansible.builtin.command: mkfs.{{ bootstrap_fs_type }} -L {{ bootstrap_volume_id[:16] | quote }} {{ bs_dev.stdout | quote }}
+      changed_when: true
+
+    - name: Read the new filesystem UUID (read-only)
+      ansible.builtin.command: blkid -o value -s UUID -p {{ bs_dev.stdout | quote }}
+      register: bs_uuid
+      changed_when: false
+
+    - name: Create the empty mount point (STATE-CHANGING)
+      ansible.builtin.file:
+        path: "{{ bootstrap_mount_point }}"
+        state: directory
+        mode: "0755"
+
+    - name: Mount by UUID and write fstab by UUID (STATE-CHANGING)
+      ansible.posix.mount:
+        src: "UUID={{ bs_uuid.stdout }}"
+        path: "{{ bootstrap_mount_point }}"
+        fstype: "{{ bootstrap_fs_type }}"
+        opts: defaults,nofail
+        state: mounted
+
+    - name: Hand the volume root to the service uid/gid (STATE-CHANGING)
+      ansible.builtin.file:
+        path: "{{ bootstrap_mount_point }}"
+        owner: "{{ bootstrap_uid }}"
+        group: "{{ bootstrap_gid }}"
+        mode: "0750"
+
+    - name: Report the UUID the harness must record
+      ansible.builtin.debug:
+        msg: "volume formatted; fs_uuid={{ bs_uuid.stdout }} (record it for the survival test)"
