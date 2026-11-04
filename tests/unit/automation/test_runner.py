@@ -291,7 +291,11 @@ def test_timeouts_are_bounded_by_the_ovlm_maximum(env: Any) -> None:
 
 def test_missing_playbook_is_fatal_before_anything_is_created(env: Any) -> None:
     runner, prepared, tmp = env
-    shutil.rmtree(prepared.checkout / "playbooks")  # (read-only tree: remove via chmod)
+    # The checkout is read-only by design: a non-root user must restore write permission before removing it.
+    os.chmod(prepared.checkout, 0o700)
+    for path in [prepared.checkout / "playbooks", *(prepared.checkout / "playbooks").rglob("*")]:
+        os.chmod(path, 0o700 if path.is_dir() else 0o600)
+    shutil.rmtree(prepared.checkout / "playbooks")
     with pytest.raises(AutomationError, match="missing") as exc:
         runner.run_phase(prepared, request())
     assert (

@@ -22,6 +22,7 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Protocol
@@ -116,11 +117,18 @@ class AutomationRunner:
     def ansible_core_version(self) -> str:
         if self._core_version is None:
             try:
-                out = subprocess.run(  # noqa: S603
-                    [self._bin("ansible"), "--version"],
-                    capture_output=True, text=True, timeout=60, check=True,
-                    env=scrubbed_env({"HOME": "/nonexistent"}, bin_dirs=[self.cfg.ansible_bin_dir]),
-                ).stdout  # fmt: skip
+                # ansible creates ~/.ansible/tmp even for --version: a throw-away, writable HOME is required for
+                # a non-root worker (an unwritable HOME made it crash; root could create it, so tests hid it).
+                with tempfile.TemporaryDirectory(prefix="ovlm-ansible-version-") as home:
+                    out = subprocess.run(  # noqa: S603
+                        [self._bin("ansible"), "--version"],
+                        capture_output=True, text=True, timeout=60, check=True,
+                        env=scrubbed_env(
+                            {"HOME": home, "ANSIBLE_HOME": str(Path(home, ".ansible")),
+                             "ANSIBLE_LOCAL_TEMP": str(Path(home, "ansible-local"))},
+                            bin_dirs=[self.cfg.ansible_bin_dir],
+                        ),
+                    ).stdout  # fmt: skip
             except (OSError, subprocess.SubprocessError):
                 raise AutomationError("cannot determine the ansible-core version") from None
             m = re.search(r"core ([0-9][0-9A-Za-z.\-]*)", out)
