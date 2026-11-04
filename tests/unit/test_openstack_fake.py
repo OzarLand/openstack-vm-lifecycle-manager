@@ -360,3 +360,98 @@ def test_snapshot_shows_plain_state() -> None:
     fake, srv, vol = _attached_pair()
     snap = fake.snapshot()
     assert snap["volumes"][vol] == {"status": "in-use", "attached_to": [srv]}
+
+
+# --- E5-2 additions: claim forms, faults, gate boundary --------------------------------------------------------
+
+
+def test_fip_tag_add_keeps_other_tags_and_has_a_limit() -> None:
+    fake = FakeOpenStack()
+    fip = fake.add_floating_ip(fake.add_network("ext", external=True), tags=["dns:web"])
+    fake.add_floating_ip_tag(fip, "ovlm:managed")
+    fake.add_floating_ip_tag(fip, "ovlm:managed")  # set semantics
+    assert fake.get_floating_ip(fip).tags == ("dns:web", "ovlm:managed")
+    full = fake.add_floating_ip(
+        fake.add_network("ext2", external=True), tags=[f"t{i}" for i in range(50)]
+    )
+    with pytest.raises(errors.BadRequestError):
+        fake.add_floating_ip_tag(full, "ovlm:managed")
+
+
+def test_volume_metadata_merge_keeps_foreign_keys() -> None:
+    fake = FakeOpenStack()
+    vol = fake.add_volume("v", metadata={"owner": "team"})
+    fake.merge_volume_metadata(vol, {"ovlm.managed": "true"})
+    assert fake.get_volume(vol).metadata == {"owner": "team", "ovlm.managed": "true"}
+
+
+def test_server_tag_limit_is_50() -> None:
+    fake = FakeOpenStack()
+    srv = fake.add_server("x", tags=[f"t{i}" for i in range(50)])
+    with pytest.raises(errors.BadRequestError, match="limit"):
+        fake.add_server_tag(srv, "ovlm:managed")
+
+
+def test_no_valid_host_exposes_the_fault_message() -> None:
+    fake = FakeOpenStack()
+    fake.force_no_valid_host = True
+    created = fake.create_server(
+        CreateServerSpec("g", fake.add_image(), fake.add_flavor(), network_id="n", tags=("a",))
+    )
+    assert fake.get_server_fault(created.openstack_id) is None  # still BUILD
+    fake.tick(60)
+    assert fake.get_server(created.openstack_id).status == "ERROR"
+    assert fake.get_server_fault(created.openstack_id) == "No valid host was found."
+
+
+def test_fip_on_a_port_with_several_fixed_ips_needs_the_address() -> None:
+    fake = FakeOpenStack()
+    net, ext = fake.add_network("n"), fake.add_network("e", external=True)
+    fake.add_router_path(net, ext)
+    port = fake.add_port(net, device_id="d")
+    p = fake._ports[port]
+    fake._ports[port] = type(p)(
+        **{**p.__dict__, "fixed_ips": (("10.0.0.5", "s"), ("10.0.0.6", "s"))}
+    )
+    fip = fake.add_floating_ip(ext)
+    with pytest.raises(errors.BadRequestError, match="multiple fixed"):
+        fake.update_floating_ip(fip, port)
+    assert fake.update_floating_ip(fip, port, "10.0.0.6").fixed_ip_address == "10.0.0.6"
+
+
+def test_same_server_second_attach_is_typed_already_attached() -> None:
+    fake, srv, vol = _attached_pair()
+    with pytest.raises(errors.VolumeAlreadyAttachedError):
+        fake.attach_volume(srv, vol)
+
+
+def test_gate_runs_before_the_fake_applies_or_injects_anything() -> None:
+    fake = FakeOpenStack()
+    srv = fake.add_server("x")
+    fake.fail("stop_server", errors.ServerError("boom", status=500))
+    seen: list[str] = []
+
+    def gate(action: str) -> None:
+        seen.append(action)
+        raise RuntimeError("gate refused")
+
+    with fake.gate_binding.bind(gate), pytest.raises(RuntimeError):
+        fake.stop_server(srv)
+    assert seen == ["openstack:stop_server"]
+    assert (
+        "stop_server" not in fake.calls
+    )  # refused before the cloud saw it; the injected fault is unused
+    with pytest.raises(errors.ServerError):
+        fake.stop_server(srv)  # no gate bound and not strict: the fault fires now
+
+
+def test_strict_fake_refuses_writes_without_a_gate_but_not_reads() -> None:
+    fake = FakeOpenStack()
+    srv = fake.add_server("x")
+    fake.strict_gate = True
+    fake.get_server(srv)
+    with pytest.raises(errors.WriteNotAllowedError):
+        fake.lock_server(srv, "ovlm:x")
+    fake.create_volume(
+        1, volume_type="ssd"
+    )  # fake-only cloud setup is outside the OVLM write boundary
