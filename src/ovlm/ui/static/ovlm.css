@@ -86,3 +86,11 @@ tr.gone th a { color: var(--muted); }
 .banner.info { background: var(--info-bg); color: var(--info); border-color: var(--info); }
 .steps { padding-left: 1.2rem; } .key { font-size: 1rem; letter-spacing: .05em; overflow-wrap: anywhere; } .wrap { overflow-wrap: anywhere; }
 @media (max-width: 40rem) { .kv { grid-template-columns: 1fr; } table { display: block; overflow-x: auto; } }
+
+/* readiness section (E4-1) */
+.badge.err { background: var(--err-bg); color: var(--err); border-color: var(--err); }
+.readiness table.checks { margin-bottom: .5rem; }
+.readiness table.checks th[scope="row"] { text-align: left; font-weight: 400; overflow-wrap: anywhere; }
+.readiness .rec { margin: 0 0 .25rem; }
+.readiness details > summary { cursor: pointer; color: var(--muted); }
+.readiness .kv { grid-template-columns: 11rem 1fr; }

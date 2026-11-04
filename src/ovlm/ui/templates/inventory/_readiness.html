@@ -1,0 +1,55 @@
+{# Readiness section of the VM details page (E4-1). Context: ``readiness`` (ui.readiness_view), ``managed``, ``server``, ``who``. #}
+{% set rd = readiness %}
+{% set latest = rd.latest %}
+<section id="readiness" aria-labelledby="readiness-h" class="panel readiness">
+  <h2 id="readiness-h">Rebuild readiness
+    {% if latest %}<span class="badge {{ 'ok' if latest.level == 'ready' else ('warn' if latest.level == 'partially-ready' else 'err') }}">{{ rd.level_text[latest.level] }}</span>{% endif %}
+  </h2>
+  {% if rd.in_flight %}
+    <p role="status" class="banner info">An assessment was requested {{ rd.in_flight.requested_at | age }} ago and is {{ "waiting for the worker" if rd.in_flight.state == "requested" else "being worked on" }}. Reload this page to see the result.</p>
+  {% elif rd.failed_run %}
+    <p role="alert" class="banner warn">The last assessment run did not finish ({{ rd.failed_run.state }}). Request another one; if it keeps failing, ask an administrator to look at the run.</p>
+  {% endif %}
+  {% if who.roles() and ("operator" in who.roles()) %}
+    <form method="post" action="/inventory/servers/{{ server.id }}/assess" hx-boost="true" class="inline">
+      <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+      <button type="submit"{% if not latest %} class="primary"{% endif %}>{{ "Assess again" if latest else "Assess readiness" }}</button>
+    </form>
+    <span class="muted">Reads the stored inventory and profile only. No code runs on the VM.</span>
+  {% endif %}
+
+  {% if not latest %}
+    <p class="empty">{% if rd.in_flight %}No result yet.{% else %}Not assessed yet.{% endif %} The assessment says whether a replacement VM could be rebuilt from this VM's profile, and why not.</p>
+  {% else %}
+    {% set s = latest.summary %}
+    <p class="muted">Assessed {{ latest.created_at | timestamp }}
+      {% if latest.input_snapshot.profile %}against profile version {{ latest.input_snapshot.profile.number }}{% else %}with no profile{% endif %};
+      inventory last synced {{ latest.input_snapshot.server.synced_at | timestamp if latest.input_snapshot.server else "never" }}.
+      <span title="For orientation only: the level comes from the rules below, never from a count.">{{ s.text }}.</span></p>
+    <p><strong>Rule:</strong>
+      {% if latest.level == "not-ready" %}at least one blocker failed ({% for k in s.failed_blockers %}<span class="mono">{{ k }}</span>{{ ", " if not loop.last }}{% endfor %}).
+      {% elif latest.level == "partially-ready" %}no blocker failed, but at least one blocker could not be determined ({% for k in s.unknown_blockers %}<span class="mono">{{ k }}</span>{{ ", " if not loop.last }}{% endfor %}).
+      {% else %}no blocker failed and none is unknown. Warnings do not change the level.{% endif %}</p>
+    {% for g in rd.groups %}
+    <h3>{{ g.label }}</h3>
+    <table class="checks">
+      <caption class="sr">{{ g.label }} checks</caption>
+      <thead><tr><th scope="col">Check</th><th scope="col">Result</th><th scope="col">Severity</th><th scope="col">Evidence and recommendation</th></tr></thead>
+      <tbody>
+      {% for c in g.checks %}
+        <tr>
+          <th scope="row"><span class="mono">{{ c.key }}</span> <span class="muted">v{{ c.version }}</span></th>
+          <td><span class="badge {{ {'pass': 'ok', 'fail': 'err', 'unknown': 'warn'}.get(c.result, '') }}">{{ c.result }}</span></td>
+          <td>{{ c.severity }}</td>
+          <td>
+            {% if c.recommendation %}<p class="rec"><strong>{{ "Do this:" if c.result in ("fail", "unknown") else "Note:" }}</strong> {{ c.recommendation }}</p>{% endif %}
+            {% set lines = c.evidence | evidence_lines %}
+            {% if lines %}<details><summary>Evidence</summary><dl class="kv">{% for label, text in lines %}<dt>{{ label }}</dt><dd class="mono">{{ text }}</dd>{% endfor %}</dl></details>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endfor %}
+  {% endif %}
+</section>
