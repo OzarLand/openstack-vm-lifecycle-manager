@@ -16,6 +16,9 @@ against a document that has not fixed the detail (list in §10). **ASSUMPTION** 
 
 > **Revision 2026-11-04**: synced to the architecture revision. Addressed: SEC-R-1 (DB roles `ovlm_api` / `ovlm_worker`, §5, §6 row 14),
 > SEC-R-30 (policy field `auto_restore_in_window`, §4.2 WF-17), SRE-R-11 (`NoValidHost` fatal everywhere; §10 item 2 closed).
+>
+> **Revision 2026-11-04 (round 2)**: synced to architecture round 2. Added: B9 `verify_green_ready` before T0 (§7.1), WF-21 to WF-24
+> (SRE-R-23, -24, -26, bounded self-resolution), injected host key and its rotation at B5 (§4.2, §6 row 18, §7.1), security tests S-24 to S-27.
 
 ## 1. Principles
 
@@ -161,6 +164,11 @@ Deterministic, no sleeps, no random kills.
 | WF-18 | Error classes: `OverQuota` → **fatal** (no retry); `NoValidHost`/`ERROR` green → fatal for the attempt, green **kept** until operator rollback (TC), never auto-deleted; retryable exhaustion → `needs_human` | L1 | Exact class per case (renewal-workflow §2.1, §7) |
 | WF-19 | Upgrade: `running` steps drained; `waiting`/`ready` steps of N-1 resume on N; unknown `strategy_version` refuses start with a listing | L2 | architecture.md §9 |
 | WF-20 | Clock safety: lease and `not_before` use DB time, not worker clock | L2 | Skewed worker clock cannot extend its lease |
+| WF-21 | **SRE-R-23:** approval evidence re-check fails inside the window (decider role revoked or evidence mismatch at W2–W8) | L1 + L2 | `needs_human(reason=approval_evidence_invalid)`, security audit event, page; never forward; known-state rows of §4.1 restore; a legitimate later change (role revoked, user disabled) after `decided_at` does **not** trip the historical check |
+| WF-22 | **SRE-R-24:** signal consumed only with its effect; worker killed between signal read and commit | L2 (crash matrix) | `run_signal.consumed_at` is set in the same transaction as the effect; after the kill the signal is re-applied once, never lost and never applied twice; unconsumed signal is shown as pending |
+| WF-23 | **SRE-R-26:** order after an OpenStack API outage across a step deadline (e.g. W3: volume `available`, blue SHUTOFF, FIP unchanged) | L1 (fake outage + fake clock) | Deadline → `needs_human(api_unreachable)`; on a successful re-probe rule 0 (budget) is checked first, then rule 1 (exact expected post-state → continue forward, nothing re-sent), then rule 2, else stay `needs_human`; W9/W10 never auto-continue |
+| WF-24 | **Self-resolution after the approved budget:** outage lasts past `max_window_duration` | L1 (fake clock) | Run stays `needs_human` with a page even though the probe now matches an expected state; no `resume.auto`; only an operator action moves it |
+| WF-25 | **Injected host key and rotation (B5):** bootstrap key pinned, rotated before anything else on the session; interrupted rotation; wrong key | L2 (two containers with different keys) | Bootstrap key accepted only before rotation; after rotation sshd rejects it and the rotated key is pinned; no `configure` or secret sent before rotation; re-run accepts only the bootstrap or rotated key matching step evidence, anything else → `needs_human` "host key unverifiable"; empty console does not block B5 |
 
 ## 5. Integration tests in CI (L2)
 | Component | Setup | What is tested |
@@ -197,7 +205,11 @@ Automated where possible; "manual" is stated. Names `S-nn` = item number in §10
 | 15 | Hostile guest output | Fuzz result.json (oversized, wrong schema, YAML tags, `<script>`); decisions unchanged |
 | 16 | Ansible env has no `OS_*`/DB/KEK path; `ovlm-ansible` cannot read KEK | L2: playbook dumps `env` and `id`/read attempt on the container target |
 | 17 | Branch/tag instead of SHA, non-allowlisted repo | Unit |
-| 18 | Unverified SSH host key fails; pinned fingerprint enforced | L2 against two containers with different keys |
+| 18 | Unverified SSH host key fails; pinned fingerprint enforced; injected bootstrap key trusted only until rotation (WF-25) | L2 against two containers with different keys |
+| 24 | Self-approval at G3 refused even with `auth.allow_operator_approver` on; G1/G2 self-approval flagged `self_approved` only with it on; solo install without second approver leaves blue stopped and locked | Unit (engine) + API, setting on and off |
+| 25 | Step-up reuse refused (consumed, older than 5 min, other action or target) | API test with fake clock |
+| 26 | Admin-set password impossible; user create/reset returns only an enrolment link | API route-table test + DB inspection |
+| 27 | Assessment without typed confirmation runs no repo code on the live VM | L2: fake target records no repo-content execution |
 | 19 | Non-root, read-only rootfs, image scan, `pip-audit`, bandit, secret scan, SDK debug flag | CI pipeline stage "supply chain"; container assertions via `docker inspect` |
 
 Release gate: Agent 8 has a veto on high/critical findings (agent-team.md). Security tests are never skipped or
@@ -222,9 +234,9 @@ tables, `server/volume/floating ip list --long` before and after, ansible run re
 | 3 | Readiness assessment | `ready`, each check with evidence; negative control run earlier (`not-ready` with unpinned ref) |
 | 4 | Set policy; plan shows deadline and window | Deadline = launch + max age adjusted to window |
 | 5 | Plan renewal; capacity pre-check; G1 approved by approver ≠ requester; run starts (`B1 preflight`, `B2 claim_resources`) | Approval bound to hash; self-approval rejected; markers on blue, FIP, volume |
-| 6 | `B3 create_green`, `B4 wait_green_active`, `B5 wait_green_ssh` (host key pinned, ADR-0006) | One server tagged `ovlm:managed` + `ovlm:run:<id>`, in the volume's AZ; ledger row `present`; blue untouched |
+| 6 | `B3 create_green`, `B4 wait_green_active`, `B5 wait_green_ssh` (injected bootstrap host key pinned, then rotated over the authenticated session and the rotated key pinned, ADR-0006) | One server tagged `ovlm:managed` + `ovlm:run:<id>`, in the volume's AZ; ledger row `present`; blue untouched |
 | 7 | `B6`–`B8` (`green_preflight`, `configure_green`, `verify_cutover_preconditions`); second `configure` run `changed=0` | `ovlm.result/1` ok; external baseline of blue recorded |
-| 8 | G2 approved inside a policy window (typed confirmation: name + last 6 of ID); `W1 quiesce_old` → `W2 stop_old` → `W3 detach_volume` → (`W4` snapshot optional) → `W5 attach_volume_green` → `W6 data_attach_green` → `W7 start_service_green` | Volume attached to exactly one server at all sampled instants; no mkfs; marker SHA equal |
+| 8 | G2 approved inside a policy window (typed confirmation: name + last 6 of ID); **`B9 verify_green_ready`** (before T0, no outage; green ACTIVE, SSH on the pinned key, `cloud-init status` done, `preflight.yml` ok, success younger than `green_ready.max_age`; negative control: green not yet SSH-reachable keeps the run before T0, EXP-01b R3 +55 s); `W1 quiesce_old` → `W2 stop_old` → `W3 detach_volume` → (`W4` snapshot optional) → `W5 attach_volume_green` → `W6 data_attach_green` → `W7 start_service_green` | Volume attached to exactly one server at all sampled instants; no mkfs; marker SHA equal |
 | 9 | `W8 healthcheck_green` | `/health` ok, `fs_uuid` and `marker_sha256` equal to recorded, `counter ≥ recorded`, VM id differs from blue |
 | 10 | `W9 move_fip`, `W10 verify_external` | FIP `port_id` = green port; probe answered by green; OVLM-measured downtime recorded and compared with the external probe timeline |
 | 11 | `R1 retain_old`, `R2 await_retention` | Blue `SHUTOFF`, locked (`locked_reason=ovlm:retained:<run>`) only after W3; audit has every step attempt |

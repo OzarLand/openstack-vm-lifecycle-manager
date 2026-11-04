@@ -14,6 +14,10 @@ SOURCE-VERIFIED, DU = DOCUMENTED-UNVERIFIED, AS = ASSUMPTION are kept), [automat
 > **Revision 2026-11-04**: synced to the architecture revision. Addressed: SEC-R-1 (T7 residual, §8, §9, §10 item 14), SEC-R-2
 > (§3.2, §10), SEC-R-3 (§5.2, §6.4, §10), SEC-R-6, SEC-R-8, SEC-R-25, SEC-R-33 (§7.1), SEC-R-7, SEC-R-23, SEC-R-24 (§4.3,
 > §10), SEC-R-21 (§8 audit mirror).
+>
+> **Revision 2026-11-04 (round 2)**: synced to architecture round 2 (M9, ADR-0006). TOTP mandatory for approver/admin, single-use
+> action-bound step-up, enrolment links (§2); self-approval setting and solo installations (§3.2); out-of-band credential rotation
+> (§4.4); bootstrap host key exception (§5.2) and host-key default `injected` (§6.2); tests added (§10 items 24-27).
 
 ## 1. Threat model
 
@@ -68,7 +72,10 @@ SOURCE-VERIFIED, DU = DOCUMENTED-UNVERIFIED, AS = ASSUMPTION are kept), [automat
   breached-password list shipped offline (ASSUMPTION: a list such as the top 100k is acceptable licence-wise).
 - Login: generic error (no enumeration), per-account and per-IP rate limit with backoff; no hard lockout (DoS on
   approvers). Bootstrap admin via CLI one-time password, forced change; no default credentials anywhere.
-- V1: TOTP second factor, **mandatory for `approver` and `admin`**. Later: OIDC (authorization code + PKCE); role
+- **Enrolment links; admins never set passwords** (SEC-R-11). Creating a user or resetting a password returns a one-time
+  enrolment link; the admin never chooses or sees the password. First login forces the user to set one and, for
+  `approver`/`admin`, to enrol TOTP in their own session. The account records who created it and who last reset its credential.
+- **TOTP second factor is mandatory for `approver` and `admin`** (M9, SEC-R-10). Later: OIDC (authorization code + PKCE); role
   mapping from IdP groups is optional, local role bindings stay the source of truth.
 
 ### 2.2 API tokens
@@ -83,8 +90,9 @@ SOURCE-VERIFIED, DU = DOCUMENTED-UNVERIFIED, AS = ASSUMPTION are kept), [automat
 ### 2.3 Sessions and browser
 - Server-side session table; cookie `__Host-ovlm_session`, `HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/`. New
   session id at login and on privilege change. Idle timeout 30 min, absolute 12 h; logout deletes the row.
-- **Step-up re-auth**: approvals and destructive confirmations require password (and TOTP when enabled) within the
-  last 5 minutes.
+- **Step-up re-auth (TOTP)**: approvals and destructive confirmations require a TOTP step-up. A step-up is **single-use**,
+  valid **5 minutes**, and **bound to one action type and one target** (and the session); it is consumed by exactly that
+  approval or confirmation and cannot be replayed for another action or target (SEC-R-10, M9).
 - CSRF: per-session synchronizer token, sent by HTMX via `hx-headers` (`X-CSRF-Token`) and in form fields; every
   unsafe method checks the token **and** the `Origin`/`Referer` against the configured external URL. Bearer-token API
   calls carry no cookie and are exempt.
@@ -124,8 +132,15 @@ Typed confirmation (TC) = FR-UI-2. ✓ = allowed, — = denied.
 - **Requester set, per gate**: the profile version author, the plan creator, the run starter, the policy editor (last
   editor of the policy version in effect) and the requester of the approval. None of them may approve that gate. The
   worker recomputes the set and checks it (renewal-workflow.md §3.1); the API enforces it too, not the UI.
-- Default: one person cannot hold `operator` and `approver` in the same scope. An admin may allow it (policy
-  `allow_operator_approver`); the allowance is audited and shown on each approval it affects.
+- Default: one person cannot hold `operator` and `approver` in the same scope. An admin may allow it **per installation**
+  (setting `auth.allow_operator_approver`, default false, TOTP step-up + typed confirmation, history kept); the change is
+  audited. When on, a requester-set member may approve G1 and G2, and each such approval is flagged **`self_approved`** on
+  the approval, the run and every page showing it.
+- **G3 (retirement) never allows self-approval**, whatever the setting. A solo installation needs a **second human account**
+  with `approver`, created by an admin through an enrolment link (§2.1; the user self-enrols password and TOTP). The G3
+  approval page shows the account's origin ("created by X on D; last credential reset by Y on D"). One person holding both
+  accounts defeats the rule; OVLM cannot prevent it and records the origin so an auditor can see it. Without a second
+  account the old VM stays stopped and locked.
 - Policy flag `require_distinct_approvers` (default **on** for retirement, off for plan/cutover): plan approver and
   retirement approver must be different people from each other and from the requester (two-person rule).
 - NFR-4 says SoD is "configurable". Decision: an admin may relax it **only for plan and cutover gates**, per policy;
@@ -205,8 +220,9 @@ The ownership guard and the allowlist are independent: a call must pass both.
   credentials or trusts — OSI §8, SV); roles limited to `reader` or `member` (subset of user roles, one project, SV);
   `expires_at` mandatory, ≤ 180 days. OVLM rejects a credential whose token shows other roles (it checks the token's
   role list at validation; ASSUMPTION: the SDK exposes it via `get_access()`).
-- Rotation (admin, audited): create new app credential → worker validates it read-only → switch atomically → delete
-  the old one in Keystone. OVLM warns at 30/7 days before expiry; an expired write credential blocks new runs only.
+- Rotation (admin, audited) is **out of band**: the cloud admin creates the new app credential in Keystone; OVLM only
+  validates it (worker, read-only) and switches atomically, then **marks the old credential for deletion by the cloud
+  admin**. OVLM never deletes or creates Keystone credentials itself. OVLM warns at 30/7 days before expiry; an expired write credential blocks new runs only.
 - Access rules, stance: **read credential: recommended** (`GET` on `compute`, `block-storage`, `network`, `image`
   with `/**`); failure mode is fail-closed (token rejected, OSI §8, SV), so inventory breaks loudly, never silently.
   **Write credential: not in MVP.** Rules cannot restrict by resource (IDs change per run), need downstream paths
@@ -245,6 +261,18 @@ Ansible command line / `-e` / inventory vars (automation-contract §5), Nova met
 OSI §2, AS), exception tracebacks shown to users, Prometheus labels. Redaction of known values and patterns in logs is
 the backstop (automation-contract §5), tested (§10).
 
+**Exception: bootstrap host key in user-data (ADR-0006).** The one private key allowed in cloud-init user-data is the
+per-run **bootstrap SSH host key** of the new VM (`ssh_keys` section; ASSUMPTION, lab item). What it is: an ed25519 host
+key OVLM generates in memory in B3; OVLM stores only its public key and fingerprint, never the private part. Why it is
+acceptable: it is short-lived and trusted only until B5, where OVLM, over the session authenticated against it and before
+any `configure` or secret is sent, regenerates green's host keys, pins the new public keys in the per-run `known_hosts`,
+reconnects and verifies; sshd then no longer accepts the bootstrap key, so its later exposure in user-data cannot be used
+to impersonate the rotated key. It is never an authentication credential for logins. Residual risk: whoever can read green's
+user-data during the build phase (cloud admins; project members if the cloud exposes user-data to them, ASSUMPTION) and can
+also intercept the guest-access path can impersonate green until rotation and receive the `configure` run. They cannot
+obtain the data volume (OpenStack attaches it to the real green, verified by W6 UUID and marker checks). No other secret
+may be placed in user-data.
+
 **Automation artefacts may contain workload secrets.** ansible-runner events, stdout and diffs show what playbooks
 template onto the guest, including vault-decrypted values that OVLM never knows in clear and so cannot redact. They are
 restricted artefacts: readable by operator/admin in scope only (viewers see the validated result JSON and per-task
@@ -267,11 +295,13 @@ changed/unchanged.
 |---|---|---|
 | Disable checking | Any MITM gets the key session and the vault-decrypted secrets | Forbidden |
 | TOFU, record fingerprint at first connect | MITM in the first-connect window on the tenant network goes undetected | Opt-in per profile only, audited as accepted risk |
-| Fingerprints from console log (cloud-init prints host key fingerprints to the serial console; read via `os-getConsoleOutput` with the write credential) | Image must log to console; console policy is member by default (ASSUMPTION, not in OSI); a pre-compromised image could print fake lines | **Default** |
-| Pre-generated host key injected via user_data | Private host key stored in Nova and readable by any guest process via metadata service | Rejected |
+| Fingerprints from console log (cloud-init prints host key fingerprints to the serial console; read via `os-getConsoleOutput` with the write credential) | Image must log to console; **lab-observed unreliable**: worked in EXP-01, empty for 14 min in EXP-01b (Felcloud); a pre-compromised image could print fake lines | Secondary source (`host_key_policy=console`) |
+| Pre-generated **bootstrap** host key injected via user_data, rotated at B5 (ADR-0006) | Private bootstrap key is exposed in Nova user-data until rotation (§5.2 exception) | **Default** (`injected`) |
 
-Decision: console-log fingerprints are the default; if none are found before the deadline the step fails with
-"host key unverifiable" and the operator may switch that profile to TOFU (audited). The verified fingerprint is pinned
+Decision (ADR-0006): the injected bootstrap key is the default (`profile.guest_access.host_key_policy = injected | console |
+tofu`). The console log is a secondary source, selectable per profile where it is reliable. TOFU is an **audited per-profile
+opt-in** (a new profile version, hence re-approval). If no key can be verified before the deadline the step fails with
+"host key unverifiable" (no outage yet). The verified (rotated) key is pinned
 in a per-run `known_hosts` with `StrictHostKeyChecking=yes`. Blue's key is recorded at registration (TOFU, confirmed
 by the operator). cloud-init regenerates host keys on a new instance (OSI §9, AS), so green always needs this step.
 
@@ -377,3 +407,7 @@ destructive action needs a named human owner (OzarLand rule 6). Audit records `p
 21. Vault canary: a canary placed in an Ansible vault file (and templated onto the guest) never appears in stored artefacts (events, stdout, diffs, task results), logs, audit rows or API/UI responses; diffs are absent unless the profile has `store_diffs`; a viewer cannot read automation artefacts.
 22. Write allowlist enforced: `WriteClient` raises before sending for a volume delete, volume create, floating IP create/delete and any security-group write, and for any call outside the strategy's operations (fake transport records zero such requests).
 23. Adoption checks of claimed resources: a server found by `tags=ovlm:run:<id>` is adopted only if image, flavor, creation time, attached volumes and creating user match; any mismatch ends in needs_human "adoption refused". Marking uses add/merge forms only, and pre-existing foreign tags and metadata survive.
+24. Self-approval at G3 is refused even when `auth.allow_operator_approver` is on; G1/G2 self-approval succeeds only with the setting on and is flagged `self_approved`; a solo installation without a second human approver account leaves the old VM stopped and locked.
+25. Step-up reuse is refused: a consumed step-up, one older than 5 minutes, or one bound to another action type or target is rejected.
+26. Admin-set password is impossible: no API or UI path lets an admin choose or read another user's password; user creation and reset return only a one-time enrolment link.
+27. An assessment without typed confirmation runs no repo code on the live VM (only OVLM-owned read-only checks and static analysis).
