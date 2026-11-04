@@ -5,7 +5,7 @@ name: ci
 
 on:
   push:
-    branches: [main, "claude/ovlm-backend", "claude/ovlm-profiles"]
+    branches: [main]
   pull_request:
 
 permissions:
