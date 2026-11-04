@@ -76,6 +76,8 @@ lint_and_syntax() {
     ansible-playbook --syntax-check -i "$HERE/syntax_inventory.ini" "$f" >/dev/null && echo "syntax ok: $f"
   done
   static_lints
+  say "identity contract of the reference workload (X-OVLM-Server-Id header, JSON server_id)"
+  python3 -I "$HERE/test_identity.py"
   say "data_attach decision table (canned blkid output)"
   ansible-playbook -i "localhost," "$HERE/decision_table.yml" | tee "$WORK/decision.log" | tail -4
   grep -Eq 'failed=0' "$WORK/decision.log" || die "decision table test failed"
