@@ -96,7 +96,8 @@ make down      # stop and delete the local stack
 ```
 
 Create the first admin with `ovlm admin create --enrol-link` inside the api container, then open the enrolment link.
-There is no install guide for real clouds yet, on purpose: it comes after lab validation.
+An [install guide for evaluation](docs/install-guide.md) exists. It says plainly what is missing, including the
+encrypted credential store. There is no guide for real clouds yet, on purpose: it comes after lab validation.
 
 ## 🧪 Where OVLM is tested
 
@@ -147,7 +148,9 @@ Rules that are not optional, as everywhere in OzarLand:
 - sign off your commits (`git commit -s`);
 - never present a procedure as validated if it was not.
 
-See the [OzarLand contribution guide](https://github.com/OzarLand/ozarland/blob/main/CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup and review rules, [good first issues](docs/good-first-issues.md)
+for small tasks, and the
+[OzarLand contribution guide](https://github.com/OzarLand/ozarland/blob/main/CONTRIBUTING.md).
 
 ## ⚖️ License
 
