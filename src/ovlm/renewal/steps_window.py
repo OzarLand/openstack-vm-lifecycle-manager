@@ -300,11 +300,12 @@ class SnapshotVolume(WindowStep):
             return fail
         snap = observed["snap"]
         if snap is None:
-            if ctx.previous_intent:
+            tries = int((ctx.previous_intent or {}).get("try", 0))
+            if tries >= 2 or (tries == 1 and not ctx.takeover):  # same rule as W5
                 return self.fail(
                     ctx, E.NEEDS_HUMAN, "snapshot_failed", snapshot="missing after create"
                 )
-            return Act({"name": observed["name"]})
+            return Act({"name": observed["name"], "try": tries + 1})
         if snap["status"] == "available":
             return Done({"snapshot_id": snap["id"]})
         if snap["status"] in ("creating",):
@@ -349,9 +350,13 @@ class AttachVolumeGreen(WindowStep):
         if observed["status"] in ("reserved", "attaching"):
             return self.wait(ctx, volume=observed)
         if observed["status"] == "available" and not observed["attached"]:
-            if ctx.previous_intent:
+            tries = int((ctx.previous_intent or {}).get("try", 0))
+            # A takeover cannot tell "sent" from "not sent" (crash between intent and act): re-send once;
+            # attaching an ``available`` volume is check-then-act and Nova refuses a duplicate. Seen
+            # completed and still available on a normal re-probe: the attach did not happen.
+            if tries >= 2 or (tries == 1 and not ctx.takeover):
                 return self.fail(ctx, E.NEEDS_HUMAN, "attach_not_done", volume=observed)
-            return Act({"attach": gid})
+            return Act({"attach": gid, "try": tries + 1})
         return self.fail(ctx, E.NEEDS_HUMAN, "volume_unexpected_state", volume=observed)
 
     def act(self, ctx: StepContext, intent: Mapping[str, Any]) -> None:
