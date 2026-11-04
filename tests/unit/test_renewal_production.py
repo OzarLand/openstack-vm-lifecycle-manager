@@ -431,6 +431,39 @@ def test_rerun_accepts_only_the_keys_already_pinned() -> None:
     )
 
 
+@pytest.mark.parametrize("policy", ["injected", "console", "tofu"])
+def test_rerun_after_a_recorded_pin_never_falls_back_to_the_bootstrap_key(policy: str) -> None:
+    """REN-2 (reviewer probe 2): green's keys were rotated and pinned; a later B5 re-run finds a host at green's
+    address that presents the **bootstrap** key (the impostor holds the user-data copy). The pinned connection fails
+    with a host-key mismatch: needs_human, never a connection with the bootstrap key, never a rotation, never a
+    re-pin. Holds even if a caller still passes the bootstrap key along."""
+    _p, boot = _key()
+    _p2, pinned = _key()
+    ssh = _Ssh(parse_public_key(boot))  # the answering host presents the bootstrap key
+    fence = _Fence()
+    res = _guest(ssh).pin_host_key(run_id="r", target=GuestRef(GREEN, "10.0.0.9", "new"), policy=policy,
+                                   bootstrap_public=boot, accept=(pinned,), console=None, fence=fence)  # fmt: skip
+    assert not res.ok and res.reason == "host key unverifiable" and res.pinned == ()
+    assert ROTATE_HOST_KEYS not in ssh.commands and fence.checks == []
+    assert ssh.commands == [("true",)]  # one attempt, with the pinned key only
+
+
+def test_rerun_after_a_recorded_pin_waits_when_green_is_unreachable() -> None:
+    """A network blip on a re-run is still "unreachable" (B5 waits on the pinned key), not a fallback."""
+    _p, boot = _key()
+    _p2, pinned = _key()
+
+    class _Down(_Ssh):
+        def run(self, **kw: Any) -> SshResult:
+            self.commands.append(tuple(kw["command"]))
+            return SshResult(255, "", "ssh: connect to host 10.0.0.9 port 22: Connection timed out")
+
+    ssh = _Down(parse_public_key(boot))
+    res = _guest(ssh).pin_host_key(run_id="r", target=GuestRef(GREEN, "10.0.0.9", "new"), policy="injected",
+                                   bootstrap_public=boot, accept=(pinned,), console=None, fence=_Fence())  # fmt: skip
+    assert not res.ok and res.reason == "unreachable" and ssh.commands == [("true",)]
+
+
 def test_console_policy_pins_only_keys_the_console_vouches_for() -> None:
     _p, pub = _key()
     key = parse_public_key(pub)
@@ -511,3 +544,22 @@ def test_no_git_host_contact_inside_the_downtime_window() -> None:
     with pytest.raises(AutomationError, match="inside the downtime window") as exc:
         _CheckoutPort(runner, outage=True)._prepared_for("run")  # noqa: SLF001
     assert exc.value.classification.value == "needs_human" and runner.cloned == 0
+
+
+def test_lazy_runner_adopts_the_checkout_through_the_public_reverify() -> None:
+    """The worker's runner wrapper uses the automation module's public ``reverify_checkout`` (no private helpers)."""
+    from ovlm.renewal.production import _LazyRunner
+
+    seen: list[tuple[Any, str]] = []
+    prepared: Any = object()
+
+    class _Automation:
+        def reverify_checkout(self, spec: Any, workflow_id: str) -> Any:
+            seen.append((spec, workflow_id))
+            return None if workflow_id == "gone" else prepared
+
+    lazy = _LazyRunner(_Automation)
+    spec = object()
+    assert lazy.adopt_checkout(spec, "run") is prepared  # type: ignore[arg-type]
+    assert lazy.adopt_checkout(spec, "gone") is None  # type: ignore[arg-type]
+    assert seen == [(spec, "run"), (spec, "gone")]

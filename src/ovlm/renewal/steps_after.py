@@ -18,7 +18,7 @@ from sqlalchemy import text
 
 from ovlm.auth.sod import Gate
 from ovlm.openstack.allowlist import LOCK_REASON_PREFIX
-from ovlm.openstack.errors import NotFoundError
+from ovlm.openstack.errors import DuplicateResourceError, NotFoundError
 from ovlm.renewal.base import RStep, StepRefusal
 from ovlm.renewal.ledger import snapshot_row
 from ovlm.renewal.steps_build import AnsibleStep, gate_check
@@ -424,13 +424,22 @@ class AttachToOld(_Volume):
 
 class BootOld(RestoreStep):
     """S6: ensure blue has **booted since quiesce** (SRE-R-1): SHUTOFF -> start; ACTIVE -> read-only probe: mounted
-    and units active -> skip, else stop and start. fstab (UUID, nofail) remounts; enabled units start."""
+    and units active -> skip, else stop and start. fstab (UUID, nofail) remounts; enabled units start.
+
+    Precondition (REN-6): the profile is stateless, or the data volume is ``in-use`` on blue only. Otherwise blue
+    would boot without its data (``nofail``): needs_human, nothing started or stopped."""
 
     key = "boot_old"
     destructive = True
 
     def probe(self, ctx: StepContext) -> Any:
         r = self.resolved(ctx)
+        dv = r.get("data_volume")
+        if dv:
+            v = self.wc(ctx).get_volume(dv["volume_id"])
+            attached = sorted(a.server_openstack_id for a in v.attachments)
+            if v.status != "in-use" or attached != [r["blue"]["server_id"]]:
+                return {"volume_not_on_blue": {"status": v.status, "attached": attached}}
         s = self.wc(ctx).get_server(r["blue"]["server_id"])
         obs: dict[str, Any] = {"status": s.status, "task": s.task_state}
         if s.status == "ACTIVE" and s.task_state is None:
@@ -442,6 +451,10 @@ class BootOld(RestoreStep):
 
     def decide(self, ctx: StepContext, observed: Any) -> Decision:
         prev = (ctx.previous_intent or {}).get("action")
+        if "volume_not_on_blue" in observed:
+            return self.fail(
+                ctx, E.NEEDS_HUMAN, "volume_not_on_blue", volume=observed["volume_not_on_blue"]
+            )
         if observed["task"] is not None:
             return Wait(evidence={"blue": observed})
         if observed["status"] == "SHUTOFF":
@@ -604,7 +617,11 @@ class AwaitDiscard(RStep):
 
 
 class DiscardGreen(RStep):
-    """Discarding: unlock green (own lock), check no volume is attached, delete it (ledger + tag + guard)."""
+    """Discarding: unlock green (own lock), check no volume is attached, delete it (ledger + tag + guard).
+
+    A live ledger row without an id (the worker died between the Nova create and ``ledger_present``) is looked up
+    by the run tag + exact name (REN-7): a match means green exists but is not recorded -> needs_human (never
+    adopted here, never reported "absent")."""
 
     key = "discard_green"
     destructive = True
@@ -612,6 +629,14 @@ class DiscardGreen(RStep):
     def probe(self, ctx: StepContext) -> Any:
         gid = self.green_id(ctx)
         if gid is None:
+            g = self.green(ctx)
+            if g is not None and g["state"] in ("intended", "present") and not g["openstack_id"]:
+                try:
+                    found = self.wc(ctx).find_run_server(g["intended_name"])
+                except DuplicateResourceError as exc:
+                    return {"unrecorded": list(exc.matches)}
+                if found is not None:
+                    return {"unrecorded": [found.openstack_id]}
             return None
         s = _gone(self.wc(ctx).get_server, gid)
         if s is None:
@@ -622,6 +647,9 @@ class DiscardGreen(RStep):
     def decide(self, ctx: StepContext, observed: Any) -> Decision:
         if observed is None:
             return Done({"green": "absent"})
+        if "unrecorded" in observed:
+            return self.fail(ctx, E.NEEDS_HUMAN, "green_unrecorded", servers=observed["unrecorded"],
+                             note="a server tagged for this run exists but the ledger has no id for it")  # fmt: skip
         if observed["volumes"]:
             return self.fail(ctx, E.NEEDS_HUMAN, "green_has_volume", green=observed)
         if observed["task"] is not None:

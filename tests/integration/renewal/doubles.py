@@ -162,6 +162,9 @@ class FakeGuest:
         self.pin_attempts += 1
         if not self._active(target.server_id) or self.pin_attempts <= self.ssh_after:
             return HostKeyResult(False, "unreachable")
+        # a re-run after a recorded pin: only the pinned keys, never the bootstrap key (REN-2)
+        if accept:
+            return HostKeyResult(True, "ok", accept, "rotated")
         if policy == "injected" and not bootstrap_public:
             return HostKeyResult(False, "no bootstrap key")
         return HostKeyResult(True, "ok", accept or ("ssh-ed25519 AAAArotated",), "rotated")

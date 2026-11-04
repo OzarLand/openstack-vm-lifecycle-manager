@@ -18,8 +18,10 @@ def test_every_needs_human_reason_the_engine_can_set_has_plain_words() -> None:
     seen: set[str] = set()
     for path in RENEWAL_SRC.glob("*.py"):
         text = path.read_text()
-        seen |= set(re.findall(r'NEEDS_HUMAN,\s*"([a-z_]+)"', text))
-        seen |= set(re.findall(r'needs_human_reason="([a-z_]+)"', text))
+        seen |= set(re.findall(r'NEEDS_HUMAN,\s*"([a-z0-9_]+)"', text))
+        seen |= set(re.findall(r'needs_human_reason="([a-z0-9_]+)"', text))
+        seen |= set(re.findall(r'park_reason="([a-z0-9_]+)"', text))
+        seen |= set(re.findall(r'_REASON = "([a-z0-9_]+)"', text))
     seen |= {
         "api_unreachable",
         "post_start_failure",
