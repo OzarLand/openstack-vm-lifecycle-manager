@@ -38,6 +38,9 @@ what needs the maintainer. Agent 1 (PM/EM) updates it after every handoff. Agent
 - residual risks the maintainer must accept as owner;
 - any action outside `ovlm-*` resources on a cloud.
 
+**Lab resource limit (2026-11-04):** only **one floating IP** is available on `ozar-lab` today. Lab work uses it as the
+single cutover address and allocates no other.
+
 The `ozar-dev` session applies its own approval rules: it accepts only approvals typed in its own conversation.
 
 ## 💬 Dedicated agent conversations

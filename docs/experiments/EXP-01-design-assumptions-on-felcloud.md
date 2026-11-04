@@ -30,7 +30,7 @@ implementation is cheap, and an error found now costs a document edit instead of
   resources in the project (other labs, other teams) are off-limits, even for read-only inspection beyond listing.
 - Read-only steps first. Check quotas against current usage before creating anything.
 - Show the cost estimate per hour before creating anything, and stop if the maintainer has not authorized it.
-- Smallest flavor that runs an Ubuntu 24.04 cloud image; a 1 GB volume; one floating IP.
+- Smallest flavor that runs an Ubuntu 24.04 cloud image; a 1 GB volume; **exactly one floating IP**, the only one available on 2026-11-04. If it cannot be allocated, Q4 is skipped and the report says so.
 - 🛑 At the end, delete everything named `ovlm-exp01-*`, then list servers, volumes, floating IPs, ports, security
   groups and keypairs to prove nothing is left. Target duration: under 1 hour.
 - Never print secrets, real IP addresses or hostnames in the report: use placeholders.
