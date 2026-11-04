@@ -85,16 +85,37 @@ def _single_key(body: Any) -> str | None:
     return None
 
 
+#: The only keys a server-create body may carry (SEC-C-5). An allow-list, not a deny-list: ``adminPass``,
+#: ``config_drive``, ``OS-DCF:diskConfig``, ``return_reservation_id``, ``trusted_image_certificates``, block device
+#: mappings, ``min_count``/``max_count`` and anything Nova adds later are refused, whoever builds the body.
+CREATE_SERVER_KEYS = frozenset(
+    {
+        "name",
+        "imageRef",
+        "flavorRef",
+        "networks",
+        "tags",
+        "metadata",
+        "availability_zone",
+        "security_groups",
+        "key_name",
+        "user_data",
+    }
+)
+#: Top-level siblings of ``server`` in the create body.
+CREATE_BODY_KEYS = frozenset({"server", "os:scheduler_hints"})
+
+
 def _create_ok(body: Any) -> bool:
-    server = body.get("server") if isinstance(body, dict) and len(body) == 1 else None
-    if not isinstance(server, dict):
+    if not isinstance(body, dict) or "server" not in body or not set(body) <= CREATE_BODY_KEYS:
+        return False
+    server = body.get("server")
+    if not isinstance(server, dict) or not set(server) <= CREATE_SERVER_KEYS:
         return False
     tags = server.get("tags")
     if not isinstance(tags, list) or TAG_MANAGED not in tags:
         return False
     if not any(isinstance(t, str) and t.startswith(TAG_RUN_PREFIX) for t in tags):
-        return False
-    if {"block_device_mapping", "block_device_mapping_v2", "min_count", "max_count"} & set(server):
         return False
     networks = server.get("networks")
     return isinstance(networks, list) and len(networks) >= 1  # never "auto"/"none"

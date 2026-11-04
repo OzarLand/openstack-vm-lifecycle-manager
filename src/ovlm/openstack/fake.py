@@ -29,7 +29,8 @@ where the lab tag says otherwise:
 
 Write boundary (E5-2): every operation in ``allowlist.WRITE_OPERATIONS`` calls the fence gate bound on
 ``gate_binding`` **before** it touches state, like the SDK session hook does before sending. With no gate bound the
-call proceeds unless ``strict_gate`` is set (direct fake tests); ``GuardedWriteClient`` always binds one. Fault
+call is refused (``strict_gate``, the default, SEC-C-7), as the real transport refuses it; ``GuardedWriteClient``
+always binds one. Tests of the cloud model itself, which call the fake directly, pass ``strict_gate=False``. Fault
 rules (``fail``) apply after the gate, so a refused gate never consumes an injected fault.
 
 Extensions beyond the Protocols (cloud-side operations OVLM itself never performs, needed to model the cloud):
@@ -179,6 +180,7 @@ class FakeOpenStack:
         compute_max: tuple[int, int] = (2, 100),
         block_storage_max: tuple[int, int] = (3, 71),
         now: datetime | None = None,
+        strict_gate: bool = True,
     ) -> None:
         self._project_id = project_id
         self.role: Role = role
@@ -192,9 +194,10 @@ class FakeOpenStack:
         )
         self.force_no_valid_host = False
         self.calls: list[str] = []
-        #: Fence gate binding (see the module docstring); ``strict_gate`` refuses writes with no gate bound.
+        #: Fence gate binding (see the module docstring). ``strict_gate`` (the default, like the real transport)
+        #: refuses a write with no gate bound; only tests of the cloud model itself turn it off, explicitly.
         self.gate_binding = GateBinding()
-        self.strict_gate = False
+        self.strict_gate = strict_gate
         self._servers: dict[str, _Server] = {}
         self._volumes: dict[str, _Volume] = {}
         self._volume_types: dict[str, str] = {}

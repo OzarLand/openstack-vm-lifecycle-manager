@@ -138,6 +138,13 @@ REFUSED = {
     "create with block devices": ("POST", "/servers", kw(C, {"server": {
         **CREATE_BODY["server"], "block_device_mapping_v2": [{"source_type": "blank"}]}})),
     "create several": ("POST", "/servers", kw(C, {"server": {**CREATE_BODY["server"], "max_count": 3}})),
+    # SEC-C-5: only allow-listed create keys
+    **{f"create with {k}": ("POST", "/servers", kw(C, {"server": {**CREATE_BODY["server"], k: v}}))
+       for k, v in (("adminPass", "chosen"), ("config_drive", True), ("OS-DCF:diskConfig", "MANUAL"),
+                    ("return_reservation_id", True), ("trusted_image_certificates", ["x"]),
+                    ("min_count", 1), ("block_device_mapping", []), ("personality", []),
+                    ("hostname", "h"), ("host", "compute-1"), ("hypervisor_hostname", "h"))},
+    "create with an unknown top-level key": ("POST", "/servers", kw(C, {**CREATE_BODY, "extra": {}})),
     "create with auto network": ("POST", "/servers", kw(C, {"server": {**CREATE_BODY["server"], "networks": "auto"}})),
     "attach with delete_on_termination": ("POST", f"/servers/{SID}/os-volume_attachments",
         kw(C, {"volumeAttachment": {"volumeId": VID, "delete_on_termination": True}})),
@@ -159,6 +166,14 @@ REFUSED = {
     "token request via a proxy": ("POST", f"{AUTH_URL}/auth/tokens",
                                   {"authenticated": False, "endpoint_filter": {"service_type": "identity"}}),
 }  # fmt: skip
+
+
+def test_create_accepts_every_allow_listed_key() -> None:
+    full = {**CREATE_BODY["server"], "metadata": {"ovlm.role": "green"}, "availability_zone": "az1",
+            "security_groups": [{"name": "sg"}], "key_name": "k", "user_data": "I2Nsb3Vk"}  # fmt: skip
+    assert classify_write("POST", "/servers", kw(C, {"server": full})) == "create_server"
+    hints = {"server": CREATE_BODY["server"], "os:scheduler_hints": {"group": SID}}
+    assert classify_write("POST", "/servers", kw(C, hints)) == "create_server"
 
 
 @pytest.mark.parametrize("case", list(REFUSED), ids=list(REFUSED))

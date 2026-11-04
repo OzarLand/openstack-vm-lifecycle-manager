@@ -25,7 +25,7 @@ class Two:
         self.env = env
         self.a = env.project
         self.b = uuid4()
-        fake = FakeOpenStack()
+        fake = FakeOpenStack(strict_gate=False)  # cloud set-up, not OVLM writes
         fake._ids = 50_000  # distinct OpenStack ids from project A's fake
         net = fake.add_network("tenant-b")
         self.b_server = fake.add_server("b-server")

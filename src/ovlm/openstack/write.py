@@ -84,6 +84,16 @@ def _gated[F: Callable[..., Any]](fn: F) -> F:
     return cast(F, wrapper)
 
 
+#: Kinds of lock OVLM sets on blue: ``ovlm:retained:<run>`` (after cut-over), ``ovlm:restored:<run>`` (rollback).
+LOCK_REASON_KINDS = ("retained", "restored")
+
+
+def own_lock_reasons(run_id: str) -> frozenset[str]:
+    """The full lock reasons of one run. Any other reason, ``ovlm:``-prefixed or not, is a foreign lock: a project
+    member can set any reason, so a prefix proves nothing (SEC-C-6)."""
+    return frozenset(f"{LOCK_REASON_PREFIX}{kind}:{run_id}" for kind in LOCK_REASON_KINDS)
+
+
 class GuardedWriteClient:
     """``WriteClient`` with the ownership guard in front of a backend. See the module docstring."""
 
@@ -241,20 +251,28 @@ class GuardedWriteClient:
             return
         self._backend.start_server(server_id)
 
+    def own_lock_reasons(self) -> frozenset[str]:
+        """The only lock reasons this run sets and recognises as its own (SEC-C-6)."""
+        return own_lock_reasons(self.run_id)
+
+    def _foreign_lock(self, server_id: str, server: ServerInfo) -> ForeignLockError:
+        return ForeignLockError(
+            f"server {server_id} is locked with reason {server.locked_reason!r}, not one of this run's",
+            locked_reason=server.locked_reason,
+        )
+
     @_gated
     def lock_server(self, server_id: str, reason: str | None = None) -> None:
-        if not reason or not reason.startswith(LOCK_REASON_PREFIX):
+        if reason not in self.own_lock_reasons():
             raise WriteNotAllowedError(
-                f"lock_server: OVLM locks carry a reason starting {LOCK_REASON_PREFIX!r}"
+                f"lock_server: the reason must be one of this run's ({sorted(self.own_lock_reasons())})"
             )
         server = self._owned_server(server_id, "lock_server")
         if server.locked:
             if server.locked_reason == reason:
                 return
-            if not (server.locked_reason or "").startswith(LOCK_REASON_PREFIX):
-                raise ForeignLockError(
-                    f"server {server_id} is locked by someone else ({server.locked_reason!r})"
-                )
+            if server.locked_reason not in self.own_lock_reasons():
+                raise self._foreign_lock(server_id, server)
         self._backend.lock_server(server_id, reason)
 
     @_gated
@@ -262,10 +280,8 @@ class GuardedWriteClient:
         server = self._owned_server(server_id, "unlock_server")
         if not server.locked:
             return
-        if not (server.locked_reason or "").startswith(LOCK_REASON_PREFIX):
-            raise ForeignLockError(
-                f"server {server_id} is locked by someone else ({server.locked_reason!r})"
-            )
+        if server.locked_reason not in self.own_lock_reasons():
+            raise self._foreign_lock(server_id, server)
         self._backend.unlock_server(server_id)
 
     # --- claim_resources: add / merge only (rule 1 only, see ownership.py) ---------------------------------

@@ -59,7 +59,7 @@ class World:
 
 
 def make_world() -> World:
-    fake = FakeOpenStack()
+    fake = FakeOpenStack(strict_gate=False)  # cloud set-up below acts as the cloud, not as OVLM
     ids = {
         "image": fake.add_image(),
         "flavor": fake.add_flavor(),
@@ -111,7 +111,7 @@ def test_guarded_client_and_fake_satisfy_the_write_protocol(w: World) -> None:
 UNREGISTERED_CALLS = {
     "stop_server": lambda c, i: c.stop_server(i["foreign"]),
     "start_server": lambda c, i: c.start_server(i["foreign"]),
-    "lock_server": lambda c, i: c.lock_server(i["foreign"], "ovlm:retained:x"),
+    "lock_server": lambda c, i: c.lock_server(i["foreign"], f"ovlm:retained:{RUN}"),
     "unlock_server": lambda c, i: c.unlock_server(i["foreign"]),
     "delete_server": lambda c, i: c.delete_server(i["foreign"]),
     "attach_volume (server)": lambda c, i: c.attach_volume(i["foreign"], i["vol"]),
@@ -176,7 +176,7 @@ def test_untagged_registered_server_is_refused_for_every_mutation(w: World) -> N
     calls: list[Callable[[], object]] = [
         lambda: w.client.stop_server(w.ids["blue"]),
         lambda: w.client.start_server(w.ids["blue"]),
-        lambda: w.client.lock_server(w.ids["blue"], "ovlm:retained:x"),
+        lambda: w.client.lock_server(w.ids["blue"], f"ovlm:retained:{RUN}"),
         lambda: w.client.unlock_server(w.ids["blue"]),
         lambda: w.client.detach_volume(w.ids["blue"], w.ids["vol"]),
         lambda: w.client.update_floating_ip(w.ids["fip"], w.ids["blue_port"]),
@@ -514,8 +514,8 @@ def test_repeated_calls_send_nothing_once_the_goal_is_reached(w: World) -> None:
     c.attach_volume(i["green"], i["vol"])
     c.update_floating_ip(i["fip"], i["green_port"])
     c.update_floating_ip(i["fip"], i["green_port"])
-    c.lock_server(i["blue"], "ovlm:retained:r")
-    c.lock_server(i["blue"], "ovlm:retained:r")
+    c.lock_server(i["blue"], f"ovlm:retained:{RUN}")
+    c.lock_server(i["blue"], f"ovlm:retained:{RUN}")
     c.unlock_server(i["blue"])
     c.unlock_server(i["blue"])
     c.start_server(i["green"])
@@ -565,13 +565,46 @@ def test_foreign_lock_is_left_alone(w: World) -> None:
     with pytest.raises(errors.ForeignLockError) as exc:
         w.client.unlock_server(w.ids["blue"])
     assert classify(exc.value) is RetryClass.NEEDS_HUMAN
-    with pytest.raises(errors.ForeignLockError):
-        w.client.lock_server(w.ids["blue"], "ovlm:retained:x")
+    with pytest.raises(errors.ForeignLockError) as exc2:
+        w.client.lock_server(w.ids["blue"], f"ovlm:retained:{RUN}")
+    assert exc2.value.locked_reason == "maintenance by ops"  # for the step evidence
     assert w.mutating_calls() == []
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "ovlm:retained:x",
+        "ovlm:retained:other-run",
+        f"ovlm:{RUN}",
+        f"ovlm:retained:{RUN}:x",
+        "ovlm:",
+    ],
+)
+def test_an_ovlm_prefixed_lock_of_another_run_or_unknown_form_is_foreign(
+    w: World, reason: str
+) -> None:
+    """SEC-C-6: any project member can lock with an ``ovlm:`` reason; only this run's full reason is its own."""
+    w.fake.touch_server(w.ids["blue"], locked=True, locked_reason=reason)
+    with pytest.raises(errors.ForeignLockError) as exc:
+        w.client.unlock_server(w.ids["blue"])
+    assert exc.value.locked_reason == reason
+    assert classify(exc.value) is RetryClass.NEEDS_HUMAN
+    with pytest.raises(errors.ForeignLockError):
+        w.client.lock_server(w.ids["blue"], f"ovlm:restored:{RUN}")
+    assert w.mutating_calls() == []
+
+
+def test_own_locks_are_recognised_and_can_change_kind(w: World) -> None:
+    assert w.client.own_lock_reasons() == {f"ovlm:retained:{RUN}", f"ovlm:restored:{RUN}"}
+    w.client.lock_server(w.ids["blue"], f"ovlm:retained:{RUN}")
+    w.client.lock_server(w.ids["blue"], f"ovlm:restored:{RUN}")  # own lock, other kind: re-lock
+    w.client.unlock_server(w.ids["blue"])
+    assert w.mutating_calls() == ["lock_server", "lock_server", "unlock_server"]
+
+
 def test_ovlm_locks_carry_an_ovlm_reason(w: World) -> None:
-    for reason in (None, "", "retention"):
+    for reason in (None, "", "retention", "ovlm:retained:x", "ovlm:retained:other-run"):
         with pytest.raises(errors.WriteNotAllowedError):
             w.client.lock_server(w.ids["blue"], reason)
     assert w.mutating_calls() == []
@@ -579,7 +612,7 @@ def test_ovlm_locks_carry_an_ovlm_reason(w: World) -> None:
 
 def test_admin_lock_cannot_be_unlocked(w: World) -> None:
     w.fake.touch_server(
-        w.ids["blue"], locked=True, locked_by="admin", locked_reason="ovlm:retained:x"
+        w.ids["blue"], locked=True, locked_by="admin", locked_reason=f"ovlm:retained:{RUN}"
     )
     with pytest.raises(errors.ForbiddenError) as exc:
         w.client.unlock_server(w.ids["blue"])
