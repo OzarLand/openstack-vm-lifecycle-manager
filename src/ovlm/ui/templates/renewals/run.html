@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run.id | short_id }}{% endblock %}
+{% block content %}
+<p class="crumbs"><a href="/renewals">Renewals</a> › <a href="/renewals/plans/{{ plan_id }}">Plan</a> › Run <span class="mono">{{ run.id | short_id }}</span></p>
+<h1>Renewal run <span class="mono">{{ run.id | short_id }}</span></h1>
+{% if notice %}<p role="status" class="banner ok">{{ notice }}</p>{% endif %}
+{% if error %}<p role="alert" class="banner error"><strong>{{ error.title }}.</strong> {{ error.detail }}{% if error.next_action %} <em>{{ error.next_action }}</em>{% endif %}</p>{% endif %}
+
+{% if gates.cutover or gates.retirement or approvals %}
+<section class="panel" aria-labelledby="gates-h">
+  <h2 id="gates-h">Approvals</h2>
+  <ul class="plain">{% for a in approvals %}
+    <li><a href="/approvals/{{ a.id }}">{{ GATE_TEXT[a.subject_type][0] }} {{ GATE_TEXT[a.subject_type][1] }}</a>: {{ "voided" if a.void_reason else (a.decision or "waiting for an approver") }}{% if a.self_approved %} <span class="badge warn">self-approved</span>{% endif %}</li>
+  {% endfor %}</ul>
+
+  {% if gates.cutover %}
+    <h3>G2: the cutover (the downtime starts after this)</h3>
+    {% if "cutover" in gates.open %}
+      <p>A cutover approval is waiting. <a href="/approvals/{{ gates.open.cutover.id }}">Open it</a>; an approver who is not in the requester set must decide it.</p>
+    {% elif is_operator and gates.cutover_needs_approval %}
+      <form method="post" action="/renewals/runs/{{ run.id }}/cutover-request" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+        <button type="submit" class="primary">Request cutover approval (G2)</button>
+      </form>
+      <p class="muted">The approver sees the worst-case downtime ({{ run.worst_case_window_seconds | duration }}), the budget ({{ run.max_window_duration_seconds | duration }}) and when automatic restore can happen.</p>
+    {% elif is_operator %}
+      <p>This policy needs no cutover approval. <strong>You confirm the downtime yourself.</strong> The service is stopped on <strong class="mono">{{ blast.vms[0].name }}</strong> ({{ blast.vms[0].openstack_id }}), the data volume <span class="mono">{{ blast.volume or "none" }}</span> and the floating IP <span class="mono">{{ blast.floating_ip }}</span> move to the new VM.
+        Worst case {{ run.worst_case_window_seconds | duration }}, budget {{ run.max_window_duration_seconds | duration }}. {{ blast.automatic_restore }}</p>
+      {% if not is_human %}<p role="alert" class="banner warn"><strong>API tokens cannot confirm this.</strong> Sign in to the web interface with your own account.</p>
+      {% else %}
+      <form method="post" action="/renewals/runs/{{ run.id }}/cutover-request" class="card">
+        <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+        <p><label for="tc">Typed confirmation</label>Type the server's name, a space, and the last 6 characters of its id: this concerns <strong class="mono">{{ tc_target.name }}</strong> ending <strong class="mono">{{ tc_target.tail }}</strong>.
+          <input id="tc" name="typed_confirmation" autocomplete="off" autocapitalize="off" spellcheck="false" required></p>
+        <p><label for="pw">Password</label><input id="pw" name="password" type="password" required autocomplete="current-password"></p>
+        {% if who.totp_confirmed %}<p><label for="otp">Authenticator code</label><input id="otp" name="totp_code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required></p>{% endif %}
+        <p><button type="submit" class="danger">Start the downtime window</button></p>
+      </form>{% endif %}
+    {% endif %}
+  {% endif %}
+
+  {% if gates.retirement and is_operator %}
+    <h3>G3: retire the old VM</h3>
+    {% if "retirement" in gates.open %}
+      <p>A retirement approval is waiting. <a href="/approvals/{{ gates.open.retirement.id }}">Open it</a>. A second person who is not in the requester set must decide it.</p>
+    {% else %}
+      <form method="post" action="/renewals/runs/{{ run.id }}/retirement-request" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+        <button type="submit">Request retirement approval (G3)</button>
+      </form>
+      <span class="muted">Deleting the old VM is irreversible and always needs a second human.</span>
+    {% endif %}
+  {% endif %}
+</section>
+{% endif %}
+
+{% include "renewals/_run_panel.html" %}
+{% endblock %}

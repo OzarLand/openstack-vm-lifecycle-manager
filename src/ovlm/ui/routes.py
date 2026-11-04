@@ -24,6 +24,7 @@ from ovlm.registry.errors import DomainError
 from ovlm.ui.readiness_view import readiness_context
 from ovlm.ui.routes_account import router as account_router
 from ovlm.ui.routes_readiness import router as readiness_router
+from ovlm.ui.routes_renewal import router as renewal_router
 from ovlm.ui.support import UiRoute, error_page, render
 
 router = APIRouter(route_class=UiRoute, include_in_schema=False)
@@ -31,6 +32,9 @@ router.include_router(
     account_router
 )  # step-up page; one include_router line in api/app.py serves the whole UI
 router.include_router(readiness_router)  # POST /inventory/servers/{id}/assess
+router.include_router(
+    renewal_router
+)  # planning, approvals (G1-G3), run timeline and actions (E6-3, E6-4)
 
 Db = Annotated[Session, Depends(get_db)]
 VIEWER = Depends(require_role("viewer"))
@@ -322,14 +326,6 @@ def services_create(
 
 
 # --- pages that arrive with later tasks -----------------------------------------------------------------------------
-
-
-@router.get("/renewals", response_class=HTMLResponse)
-def renewals(request: Request, who: Principal = VIEWER) -> HTMLResponse:
-    return render(
-        request, "placeholder.html", active="renewals", title="Renewals",
-        detail="Renewal plans, readiness results and approvals arrive with the renewal workflow (backlog E4, E5, E6-3).",
-    )  # fmt: skip
 
 
 @router.get("/audit", response_class=HTMLResponse)

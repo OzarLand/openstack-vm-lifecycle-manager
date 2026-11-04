@@ -1,0 +1,31 @@
+{# Everything bound into the plan hash, from the approval's own copy. Context: ``inputs`` (renewal_view.hash_inputs), ``policy_rows``. #}
+<section class="panel" aria-labelledby="hash-h">
+  <h2 id="hash-h">What you are approving: every input of the plan hash</h2>
+  <p class="muted">If any value below changes after the decision, the approval is void and the worker refuses to act on it.</p>
+  <dl class="kv">
+    <dt>Plan hash bound</dt><dd class="mono">{{ inputs.bound_hash }}</dd>
+    <dt>Profile version</dt><dd>{{ inputs.profile.number }} <span class="muted mono">id {{ inputs.profile.id }}</span><br><span class="muted">spec hash</span> <span class="mono">{{ inputs.profile.spec_hash }}</span></dd>
+    <dt>Automation repository</dt><dd class="mono">{{ inputs.automation.repo }}</dd>
+    <dt>Automation commit (SHA)</dt><dd class="mono">{{ inputs.automation.sha }}</dd>
+    <dt>Diff since the last approved SHA</dt><dd>
+      {% set d = inputs.diff %}
+      {% if d.summary == "first approval of this repo" %}<span class="badge warn">first approval of this repository</span> Nothing was approved before; read the automation at this commit yourself.
+      {% elif d.summary == "unchanged" %}<span class="badge ok">unchanged</span> since <span class="mono">{{ d.previous }}</span>
+      {% else %}<span class="badge warn">changed</span> from <span class="mono">{{ d.previous }}</span> to <span class="mono">{{ d.sha }}</span>{% endif %}
+      {% if d.changed_files %}<ul class="plain">{% for f in d.changed_files %}<li class="mono">{{ f }}</li>{% endfor %}</ul>
+      {% else %}<br><span class="muted">File-level diff: not available in this release. Compare the two commits in the repository before you approve.</span>{% endif %}
+    </dd>
+    <dt>Old VM (blue)</dt><dd class="mono">{{ inputs.blue.name }} · {{ inputs.blue.server_id }}</dd>
+    <dt>Floating IP</dt><dd class="mono">{{ inputs.floating_ip.address }} · {{ inputs.floating_ip.id }}</dd>
+    <dt>Data volume</dt><dd>
+      {% if inputs.data_volume %}<span class="mono">{{ inputs.data_volume.volume_id }}</span>, {{ inputs.data_volume.size }} GB, {{ inputs.data_volume.fs_type }} mounted at <span class="mono">{{ inputs.data_volume.mount_point }}</span>;
+        snapshot before handoff: <strong>{{ "yes" if inputs.data_volume.snapshot_before_handoff else "no" }}</strong>
+      {% else %}none: a stateless service{% endif %}
+    </dd>
+    <dt>New VM image</dt><dd class="mono">{{ inputs.image.name }} · {{ inputs.image.id }}<br><span class="muted">owner {{ inputs.image.owner }}, {{ inputs.image.visibility }}</span></dd>
+    <dt>Flavor</dt><dd class="mono">{{ inputs.flavor.name }} · {{ inputs.flavor.id }}</dd>
+    <dt>Security groups</dt><dd class="mono">{{ inputs.security_groups | join(", ") }}</dd>
+    <dt>Network</dt><dd class="mono">{{ inputs.network_id }}</dd>
+    {% for label, value in policy_rows %}<dt>Policy: {{ label }}</dt><dd>{{ value }}</dd>{% endfor %}
+  </dl>
+</section>

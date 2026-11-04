@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Plan {{ plan.id | short_id }}{% endblock %}
+{% block content %}
+<p class="crumbs"><a href="/renewals">Renewals</a> › Plan <span class="mono">{{ plan.id | short_id }}</span></p>
+<h1>Renewal plan: {{ plan.resolved.service.slug }}</h1>
+{% if notice %}<p role="status" class="banner ok">{{ notice }}</p>{% endif %}
+{% if stale %}<p role="alert" class="banner error"><strong>This plan is stale.</strong> The profile version or the policy changed after it was made, so every approval bound to it is void. Create a new plan.</p>{% endif %}
+{% if error %}<p role="alert" class="banner error"><strong>{{ error.title }}.</strong> {{ error.detail }}{% if error.next_action %} {{ error.next_action }}{% endif %}</p>{% endif %}
+
+<section class="panel" aria-labelledby="state-h">
+  <h2 id="state-h">State <span class="badge info">{{ plan.state.replace("_", " ") }}</span></h2>
+  <dl class="kv">
+    <dt>Plan hash</dt><dd class="mono">{{ plan.plan_hash }}</dd>
+    <dt>Created</dt><dd>{{ plan.created_at | timestamp }}{% if names.get(plan.created_by) %} by {{ names[plan.created_by] }}{% endif %}</dd>
+    <dt>Planned window start</dt><dd>{{ (plan.planned_window_start | timestamp) if plan.planned_window_start else "not set" }}</dd>
+    <dt>Readiness</dt><dd>
+      {% if assessment %}<span class="badge {{ 'ok' if assessment.level == 'ready' else ('warn' if assessment.level == 'partially-ready' else 'err') }}">{{ assessment.level.replace("-", " ") }}</span>, assessed {{ assessment.created_at | age }} ago
+        {% if assessment.level != "ready" %}<br><strong>Starting a run is refused until the level is "ready".</strong>{% for b in blockers %}<br><span class="mono">{{ b.key }}</span>: {{ b.recommendation or b.result }}{% endfor %}{% endif %}
+      {% else %}<span class="badge warn">not assessed</span> Starting a run is refused until an assessment says "ready".{% endif %}
+    </dd>
+    <dt>Capacity (advisory)</dt><dd>
+      {% if plan.capacity_check %}<span class="mono">{{ plan.capacity_check }}</span>
+      {% elif quota %}<span class="badge {{ {'pass': 'ok', 'fail': 'err'}.get(quota.result, 'warn') }}">{{ quota.result }}</span> {{ quota.recommendation or "" }}
+      {% else %}not checked{% endif %}
+    </dd>
+  </dl>
+
+  {% if is_operator %}
+  <div class="actions">
+    {% if plan.state == "draft" and g1_required %}
+      <form method="post" action="/renewals/plans/{{ plan.id }}/approval-requests" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+        <button type="submit" class="primary"{% if stale %} disabled{% endif %}>Request plan approval (G1)</button>
+      </form>
+      <span class="muted">An approver who is not in the requester set must decide it.</span>
+    {% elif plan.state == "awaiting_approval" and g1_open %}
+      <a href="/approvals/{{ g1_open.id }}">Open the approval request</a> (waiting for an approver).
+    {% endif %}
+    {% if (plan.state == "approved" or (plan.state == "draft" and not g1_required)) and not runs %}
+      <form method="post" action="/renewals/plans/{{ plan.id }}/start" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+        <input type="hidden" name="idempotency_key" value="{{ key }}">
+        <button type="submit" class="primary"{% if stale %} disabled{% endif %}>Start run</button>
+      </form>
+      <span class="muted">Builds the new VM next to the old one. The service is not touched until the cutover gate.</span>
+    {% endif %}
+  </div>
+  {% else %}<p class="muted">Creating approval requests and starting runs needs the operator role.</p>{% endif %}
+</section>
+
+<section class="panel" aria-labelledby="blast-h">
+  <h2 id="blast-h">What this plan touches</h2>
+  <dl class="kv">
+    <dt>Service</dt><dd>{{ plan.blast_radius.service }}</dd>
+    <dt>Old VM (blue)</dt><dd class="mono">{{ plan.blast_radius.vms[0].name }} · {{ plan.blast_radius.vms[0].openstack_id }}</dd>
+    <dt>Data volume</dt><dd class="mono">{{ plan.blast_radius.volume or "none: a stateless service" }}</dd>
+    <dt>Floating IP</dt><dd class="mono">{{ plan.blast_radius.floating_ip }}</dd>
+    <dt>Worst-case downtime</dt><dd>{{ plan.resolved.worst_case_window_seconds | duration }} (budget {{ plan.resolved.max_window_duration_seconds | duration }})</dd>
+    <dt>Automatic restore</dt><dd>{{ "on" if restore.enabled else "off" }}{% if restore.enabled %}; {{ "a snapshot of the volume is taken before the handoff" if restore.snapshot else "no snapshot is taken" }}{% endif %}</dd>
+  </dl>
+  <p class="muted">Everything the approver sees, including the automation diff and the policy, is on the approval page once it is requested.</p>
+</section>
+
+{% if approvals %}
+<section class="panel" aria-labelledby="ap-h"><h2 id="ap-h">Approvals</h2>
+  <ul class="plain">{% for a in approvals %}
+    <li><a href="/approvals/{{ a.id }}">{{ GATE_TEXT[a.subject_type][0] }} {{ GATE_TEXT[a.subject_type][1] }}</a>:
+      {{ "voided" if a.void_reason else (a.decision or "open") }}{% if a.self_approved %} <span class="badge warn">self-approved</span>{% endif %}</li>
+  {% endfor %}</ul>
+</section>
+{% endif %}
+{% if runs %}
+<section class="panel" aria-labelledby="rn-h"><h2 id="rn-h">Runs of this plan</h2>
+  <ul class="plain">{% for r in runs %}<li><a href="/renewals/runs/{{ r.id }}" class="mono">{{ r.id | short_id }}</a> {{ RUN_STATE_TEXT.get(r.state, r.state) }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+{% endblock %}
