@@ -27,7 +27,7 @@ Part of [OzarLand](https://github.com/OzarLand/ozarland): *a shared land for bet
 
 > [!WARNING]
 > **Pre-alpha. Do not use against a production cloud.** The design is reviewed and large parts are implemented and
-> tested in CI, but the renewal workflow has **not** run end to end on a lab yet. See [Status](#-status).
+> tested in CI, but the renewal workflow has **not** run end to end on a real cloud yet. See [Status](#-status).
 
 ## 🧭 What OVLM does
 
@@ -77,7 +77,7 @@ implemented → unit tested → integration tested → lab validated → product
 | Authentication, TOTP, audit; inventory; profiles, policies, deadlines; operator UI (first pages) | ✅ Integration tested, in `main` |
 | OpenStack write client, RBAC, Ansible runner, readiness | 🟡 Integration tested on the working branch; security fixes in progress |
 | Renewal strategy (blue/green steps, gates, restore) | 🟡 In progress |
-| End-to-end renewal on a lab (openstack-quick-lab with Cinder) | ⬜ Not started |
+| End-to-end renewal on Felcloud (a real OpenStack cloud), acceptance and failure scenarios | ⬜ Not started |
 | Production validated | ⬜ No |
 
 The detailed backlog is in [docs/roadmap.md](docs/roadmap.md), and the day-by-day record of the team's work is in
@@ -98,6 +98,21 @@ make down      # stop and delete the local stack
 Create the first admin with `ovlm admin create --enrol-link` inside the api container, then open the enrolment link.
 There is no install guide for real clouds yet, on purpose: it comes after lab validation.
 
+## 🧪 Where OVLM is tested
+
+OVLM is validated on **[Felcloud](https://felcloud.io)**, a real public OpenStack cloud and OzarLand's sponsor, not on
+an all-in-one lab ([ADR-0007](docs/decisions/ADR-0007-lab-on-felcloud.md)). Real Nova, Cinder and Neutron on real KVM
+hosts give realistic timings and real API behaviour. OVLM uses the same non-admin credentials an operator would give
+it.
+
+- **Shared project:** test runs create only `ovlm-*` resources and delete them afterwards. Each run proves, with a
+  before/after snapshot, that nothing else in the project changed.
+- **What "lab validated" means here:** validated on Felcloud at the recorded API microversions (compute 2.100,
+  block storage 3.71 at the first experiments). It does not mean validated on every OpenStack cloud. Reports from
+  other clouds are very welcome.
+
+Felcloud provides cloud credit for OzarLand's labs and has no say over the content.
+
 ## 📚 Documentation
 
 | Read this | For |
@@ -107,7 +122,7 @@ There is no install guide for real clouds yet, on purpose: it comes after lab va
 | [Renewal workflow](docs/renewal-workflow.md) · [ADR-0004](docs/decisions/ADR-0004-mvp-renewal-strategy.md) | The state machine, rollback and failure handling |
 | [Security model](docs/security-model.md) · [OpenStack integration](docs/openstack-integration.md) | Credentials, least privilege, verified API behaviour |
 | [Automation contract](docs/automation-contract.md) · [ansible/](ansible/README.md) | What your Ansible content must provide |
-| [Testing strategy](docs/testing-strategy.md) · [Test environment](docs/test-environment.md) | How claims become "lab validated" |
+| [Testing strategy](docs/testing-strategy.md) · [ADR-0007](docs/decisions/ADR-0007-lab-on-felcloud.md) | How claims become "lab validated" on Felcloud |
 | [Decisions](docs/decisions/) · [Reviews](docs/reviews/) | Why things are the way they are |
 
 ## 🤖 How OVLM is built
