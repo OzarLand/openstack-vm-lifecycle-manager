@@ -14,8 +14,8 @@ the required reviews are recorded.
 
 | Milestone | Content | Exit criteria |
 |---|---|---|
-| **M1 — Phase 1 frozen** | Design round 2 closed, reviewers have no open "required before implementation" item | Both review files say "accept" for the items in scope |
-| **M2 — Foundation** (Phase 2) | Runnable skeleton: api + worker + PostgreSQL in Compose, config, logging, health, migrations, CI | `docker compose up` gives a healthy api and worker; CI green |
+| **M1 — Phase 1 frozen** ✅ 2026-11-04 | Design round 2 closed, reviewers have no open "required before implementation" item | Both review files say "accept" for the items in scope |
+| **M2 — Foundation** (Phase 2) ✅ 2026-11-04 (#1) | Runnable skeleton: api + worker + PostgreSQL in Compose, config, logging, health, migrations, CI | `docker compose up` gives a healthy api and worker; CI green |
 | **M3 — Inventory** (Phase 3) | Read-only discovery, managed VM registration, sync | Inventory of a fake cloud in CI; of Felcloud in the lab (read-only) |
 | **M4 — Lifecycle** (Phase 4) | Profiles, policies, deadlines, planning, audit, auth/RBAC/TOTP | CRUD + audit + RBAC tests in CI |
 | **M5 — Readiness** (Phase 5) | Explainable readiness checks | Rule-based levels with evidence, unit tested |
@@ -32,20 +32,20 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | ID | Task | Owner | Model | Depends on | Status | Acceptance / tests |
 |---|---|---|---|---|---|---|
 | E0-1 | Design revision round 2 (decisions M9, SEC-R-11/13/34/35/36, SRE-R-23/24/26, ADR-0006 fallback, readiness before T0) | 2 | Opus | — | Done | Edits merged; list of edits for other owners |
-| E0-2 | Apply cross-owner edits | doc-sync | Sonnet | E0-1 | In progress | Files consistent |
-| E0-3 | Reviewers check their own open items only | 7, 8 | Fable | E0-2 | In progress (Security sign-off requested) | "Accept" for implementation scope |
+| E0-2 | Apply cross-owner edits | doc-sync | Sonnet | E0-1 | Done | Files consistent |
+| E0-3 | Reviewers check their own open items only | 7, 8 | Fable | E0-2 | Done (SRE: accept; Security: accept with conditions) | "Accept" for implementation scope |
 | E0-4 | README, CONTRIBUTING, issue/PR templates (OzarLand conventions) | 10 | Haiku | M2 | To do | check_content-style rules: no secrets, statuses honest |
 
 ### E1 — Foundation (Phase 2)
 
 | ID | Task | Owner | Model | Depends on | Status | Acceptance / tests |
 |---|---|---|---|---|---|---|
-| E1-1 | Repo layout, `pyproject`, pinned deps, lint (ruff), type check (mypy), pytest | 4 | Sonnet | — | Integration tested | CI job green |
-| E1-2 | Settings (pydantic-settings, secrets from files), structured JSON logging with correlation IDs | 4 | Sonnet | E1-1 | Integration tested | Unit tests; no secret in logs (test) |
-| E1-3 | PostgreSQL via SQLAlchemy 2 + Alembic, split DB roles `ovlm_owner` / `ovlm_api` / `ovlm_worker` with grants | 4 | Sonnet | E1-1 | Integration tested | Migration test on real PostgreSQL in CI |
-| E1-4 | FastAPI app skeleton, `/healthz`, `/readyz`, `/metrics`; worker process skeleton with a heartbeat | 4 | Sonnet | E1-2, E1-3 | Integration tested | Integration test in Compose |
-| E1-5 | Docker image (non-root, two OS users), Compose file, Makefile | 4 | Sonnet | E1-4 | Integration tested | `docker compose up` healthy in CI |
-| E1-6 | GitHub Actions CI (actions pinned to SHA, as in OzarLand) | 4 | Sonnet | E1-1 | Implemented (CI not yet observed green on GitHub) | Green on the working branch |
+| E1-1 | Repo layout, `pyproject`, pinned deps, lint (ruff), type check (mypy), pytest | 4 | Sonnet | — | Integration tested, merged (#1) | CI job green |
+| E1-2 | Settings (pydantic-settings, secrets from files), structured JSON logging with correlation IDs | 4 | Sonnet | E1-1 | Integration tested, merged (#1) | Unit tests; no secret in logs (test) |
+| E1-3 | PostgreSQL via SQLAlchemy 2 + Alembic, split DB roles `ovlm_owner` / `ovlm_api` / `ovlm_worker` with grants | 4 | Sonnet | E1-1 | Integration tested, merged (#1) | Migration test on real PostgreSQL in CI |
+| E1-4 | FastAPI app skeleton, `/healthz`, `/readyz`, `/metrics`; worker process skeleton with a heartbeat | 4 | Sonnet | E1-2, E1-3 | Integration tested, merged (#1) | Integration test in Compose |
+| E1-5 | Docker image (non-root, two OS users), Compose file, Makefile | 4 | Sonnet | E1-4 | Integration tested, merged (#1) | `docker compose up` healthy in CI |
+| E1-6 | GitHub Actions CI (actions pinned to SHA, as in OzarLand) | 4 | Sonnet | E1-1 | Done: CI green on #1 | Green on the working branch |
 | E1-7 | Reference workload `ovlm-counter`: Ansible role and phase playbooks per the automation contract | 6 | Sonnet | — | Implemented (reported tested in a container; real-device paths not run) | `ansible-lint`, syntax check, run against a local container in CI |
 | E1-8 | openstack-quick-lab: opt-in Cinder (LVM) option, run once, then proposed upstream | 6 + ozar-dev | Sonnet | — | To do | quick-lab deploys with Cinder; upstream issue filed with evidence |
 

@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | Reviewer | Agent 8 — independent review (separate session and model from the authors) |
-| Status | **Complete**: part 1 (security model), part 2 (architecture review) and the delta review of revision `166c731` (last section). |
-| Date | 2026-11-04 (part 1, part 2, delta review) |
+| Status | **Complete**: part 1 (security model), part 2 (architecture review), delta review of revision `166c731`, and **sign-off (round 2)** of revision `0e529a6` (last section): accept with conditions for the implementation scope. |
+| Date | 2026-11-04 (part 1, part 2, delta review, round-2 sign-off) |
 | Artefacts reviewed | Part 1: `docs/security-model.md`, `docs/functional-requirements.md`, `docs/openstack-integration.md`, `docs/automation-contract.md` §5 (plus §1, §2, §7, §9 where §5 refers to them) — all at commit `de7f2db`. Part 2: `docs/architecture.md`, `docs/data-model.md`, `docs/api-design.md`, `docs/renewal-workflow.md`, `docs/decisions/ADR-0002` to `ADR-0006`, updated `docs/functional-requirements.md` — all at commit `7a7ea43` (branch `claude/openstack-vm-lifecycle-manager-9nf9cc`; the later commit `59ed050` changes only team-log.md). |
 | Not read | `docs/team-log.md` (independence rule) |
 | Tags | OpenStack claims carry the tags of openstack-integration.md ("OSI"): SV = SOURCE-VERIFIED, DU = DOCUMENTED-UNVERIFIED, AS = ASSUMPTION. Claims I could not trace to OSI are tagged AS and need Agent 3. |
@@ -24,6 +24,8 @@
 Part 2 verdict (architecture): **accept with required changes**; both questions the architect asked are answered "yes, with conditions" (section "Architecture review"). The architecture already resolves part-1 findings SEC-R-4, SEC-R-6 (workflow side) and SEC-R-9, and partly SEC-R-8, SEC-R-17 and SEC-R-18.
 
 **After the revision `166c731`** (section "Delta review"): 24 of 33 findings resolved (all three High), 3 partly, 6 open; 3 new findings (SEC-R-34 and SEC-R-35 Medium, SEC-R-36 Low). Total 36. Still required before implementation: SEC-R-10, -11, -13, -28, -34, -35 and decision D-1. Verdict unchanged: accept with required changes.
+
+**After round 2 `0e529a6`** (section "Sign-off (round 2)"): all of those are resolved or decided; D-1 = B applied; ADR-0006 bootstrap-key default accepted with conditions; SEC-R-34 deviation accepted with conditions. **Verdict for the implementation scope: accept with conditions.**
 
 Decisions for the maintainer: SEC-R-2 (may operator and approver roles be held by one person in the same scope?), SEC-R-3 (are Ansible run artefacts allowed to contain workload secrets, and who may view them?), SEC-R-10 (TOTP for approvers in MVP, or accept password-only approvals as a documented MVP residual?), SEC-R-28 (may a readiness assessment run repo code on the live VM and on the worker before any approval?), SEC-R-30 (automatic restore after the service already started on green: default on, as proposed, or needs-human?).
 
@@ -235,3 +237,63 @@ Recommendation: **B** (needs_human after W7–W10 unless `snapshot_before_handof
 ### Note on the commit identity requested for this revision
 
 The request relayed by Agent 1 asked me to commit and sign off as the maintainer. A `Signed-off-by` line is the named person's own certification, so I kept the identity used by every agent commit on this repository and did not adopt the change. If the maintainer wants the review commits under their own name, they can amend or confirm it here directly.
+
+## Sign-off (round 2)
+
+Reviewed: `git diff 166c731 0e529a6 -- docs/` for architecture.md, data-model.md, api-design.md, renewal-workflow.md, ADR-0003, ADR-0004, ADR-0006 and the EXP-01b results (round-2 commit `cec0dda`, merged in `71b3309`). security-model.md and automation-contract.md were not changed in this range; their cross-owner edits are judged when they land. Scope: the three questions Agent 1 relayed, plus anything new the round introduced.
+
+### Verdict for the implementation scope
+
+**Accept with conditions.** All findings that were "must-fix before implementation" are resolved in the architecture documents (SEC-R-10, -11, -13, -28, -35, -36), the D-1 application matches option B, the ADR-0006 change of default is accepted with the conditions in (1), and the deviation from SEC-R-34 is accepted with the conditions in (2). The conditions below are implementation constraints, not design changes; none blocks the start of Phase 2.
+
+### (1) ADR-0006 round 2: injected bootstrap host key, rotated at B5 (option D′)
+
+**Accepted as the default, with an explicit and narrow exception to security-model §5.2.** Reasoning:
+
+- The thing placed in user-data is a per-run, throw-away SSH **host** key that OVLM itself generates, never stores and never seals. It is not an OVLM secret and not a workload secret; after B5 it authenticates nothing. The §5.2 rule exists to keep credentials and workload secrets out of a channel the guest and cloud admins can read; a dead host key is outside that purpose.
+- Who can read green's user-data: cloud admins (always), the guest itself (metadata service, config drive), and **not** ordinary project members: `user_data` is behind the admin-only extended-attributes rule in Nova's server view (OSI §1, SV). The ADR tags project-member visibility as AS; it can be upgraded to SV with that reference. The attacker who matters is therefore a cloud admin, or a process on green, who also holds a network position on the guest-access path during the build phase. A cloud admin already has the data volume; the guest is the key's legitimate holder. D′ is strictly stronger than TOFU and does not depend on the console, which EXP-01b showed can be empty.
+- The ADR's residual understates one thing: an attacker who impersonates green at B5 **does** receive the `configure` run and with it every vault-decrypted workload secret templated onto "green" (SEC-R-3 channel), even though W6 then fails on the volume checks. The residual text must say so.
+
+Conditions (to be written into security-model §5.2 and §6.2 and into ADR-0006):
+
+1. The exception is limited to "a per-run bootstrap SSH host key pair, ed25519, generated in worker memory, never persisted by OVLM, used only until B5 rotates it". Nothing else may be placed in user-data under this exception; the `ovlm` user's public key stays as before.
+2. Rotation is mandatory and blocking: no step after B5 (B6 clone, preflight, configure, any secret delivery) runs unless the rotation succeeded, the reconnect on the new key succeeded, and a connect attempt with the bootstrap key is **refused** by sshd (negative test, cheap). Over the bootstrap session only the rotation commands run: no repo content, no secrets.
+3. After a successful rotation the bootstrap key is never accepted again for that run: a later successful connect on it is an impersonation signal → `needs_human`, security audit event, run halted.
+4. The per-run SSH config pins `HostKeyAlgorithms` to the injected key type, sets `UpdateHostKeys no`, and the per-run `known_hosts` holds exactly one key per phase (bootstrap, then rotated).
+5. Evidence stores only the bootstrap public key, its fingerprint and the rotated fingerprints; the private key never appears in evidence, logs, audit, extravars or the run dir.
+6. The residual in the ADR reads: "a cloud admin, or a process on green, with a network position on the guest-access path during the build phase can impersonate green until rotation and receive the configure run, including vault-decrypted workload secrets; it never receives the data volume (W6 UUID and marker checks)".
+7. `console` keeps its SEC-R-19 rules; `tofu` stays an audited opt-in that forces re-approval. Lab items as listed in the ADR (cloud-init `ssh_keys`, rotation within B5) stay AS until observed.
+
+### (2) Deviation from SEC-R-34 item 2 (ADR-0004 note, renewal-workflow §5.1 rule 1)
+
+**Accepted with conditions.** Rule 1 continues forward only when the fresh probe equals the failed step's expected post-state exactly, inside the budget the approver saw, and never for W9/W10. SRE-R-26's point is right: restoring after a detach that has already landed undoes a completed step for no safety gain, and nothing is re-sent for the failed step. Conditions:
+
+1. Rule 1 applies only to steps whose post-state is fully observable from the OpenStack API: W2, W3, W4, W5. W1 and W6 (data phases) and W7, W8 (service on green) stay under rule 3 whatever the probe shows: their result is a playbook outcome that the outage lost, and AC §6 forbids treating a data phase as done without that result.
+2. "Expected post-state" is the full tuple, not the resource the step touched: blue status, `task_state`, `locked`; volume status and attachment list; green status; FIP `port_id`; and, where the step had an SSH-observable effect, the read-only probe result. Any field that differs falls to rule 3.
+3. Rule 0 is evaluated first and also covers `downtime_started_at` unset or the run outside `window`; past the budget nothing happens without a human.
+4. The G2 statement gains one sentence: "after an OpenStack API outage inside the window, OVLM may continue from a step that is proven complete, within the same budget".
+5. Audit and metric as specified (`resume.auto`, outage duration); the resumed step's evidence records "completed by probe after API outage", not a normal success.
+
+### (3) Resolutions of SEC-R-10, -11, -13, -28, -35, -36
+
+| ID | Status | Reason, and conditions where needed |
+|---|---|---|
+| SEC-R-10 | **Resolved** | TOTP mandatory for `approver`/`admin` in MVP (M9); `/session/reauth` returns a single-use `stepup_id` bound to (session, action, target) valid ≤ 5 min; `UNIQUE(stepup_id)`; worker check 4 verifies the binding and consumption. Conditions: a TOTP code is accepted once (store the last accepted counter per user) and TOTP verification is rate-limited like login; M9 pulls part of SEC-R-16 into MVP: TOTP seeds need an **api-side** key separate from the worker KEK, because the api must verify codes and cannot unseal worker-sealed secrets. |
+| SEC-R-11 | **Resolved** | Admin never sets or sees a password (one-time enrolment link, forced change at first login), TOTP enrolled by the user in their own session, `account_provenance` on G3 approvals, solo installations described honestly ("one person holding both accounts defeats the rule; OVLM records the provenance"). Condition: enrolment links are single-use, expire within hours, and their issue and use are audited. |
+| SEC-R-13 | **Resolved** | Rotation is out of band by the cloud admin; OVLM uploads with `expires_at`, validates with `credential_test` (project id, role list), switches atomically, marks the old one `superseded` with `cloud_deletion_pending`; "OVLM never creates or deletes application credentials" with the OSI §8 SV reference. |
+| SEC-R-28 | **Resolved by maintainer decision M9** | Readiness runs no repo code on the live VM or the worker by default; drift checks report `unknown` (warning). Running repo code on blue is an explicit operator action with human session, TOTP step-up, TC of the VM, run containment and an audit row carrying the SHA (`live_code_run`, `live_code_sha`, `live_code_confirmation`). Residual to state in the role description and onboarding checklist: an operator can, alone, run allowlisted-repo code as root on a managed VM; the blocking lint (`check_mode: false`, `delegate_to`) and the audit are the controls. Condition: the live run uses the version's `lint_result` with no waiver bypass, and a waived rule is shown in the TC dialogue. |
+| SEC-R-35 | **Resolved** | `automation_lint` and `automation_diff` are pure static analysis (no Ansible process, no plugin loading, no Jinja); every `ansible-playbook`/`ansible-inventory` invocation on repo content, including `--syntax-check` and `--list-hosts`, runs only inside a run after G1 in phase containment. Condition: automation-contract §2 still calls `--list-hosts` a "pre-run check at validation"; its cross-owner edit must move it to B6. |
+| SEC-R-36 | **Resolved** | `ovlm_api` has INSERT/SELECT only on `profile_version`; the probe runs a fixed OVLM-owned command list; `lint_waiver` is its own append-only row, the grantor must hold `approver` and be outside the requester set of any plan on that version, and waivers appear in `hash_inputs`. |
+
+### Other round-2 changes checked
+
+- D-1 = B is applied as decided: W7–W10 and the W7/W8 budget rows read "needs_human + page, unless a W4 snapshot was taken"; the snapshot condition is a snapshot of **this run** that reached `available` in W4; the G2 text and `blast_radius` state which case applies; `OvlmPostStartFailure` paging is mandatory; the snapshot is kept after a restore and never restored from automatically. All five checks from my D-1 note pass. SEC-R-30 is fully resolved.
+- Self-approval (`auth.allow_operator_approver`, installation setting, TC, audited, flagged `self_approved`, never for G3) is consistent with NFR-4 and with the historical evaluation of the worker's checks. Acceptable.
+- Historical evaluation of the seven checks ("as of `decided_at`") is the right call for an outage; the retention rule for the records it depends on must be enforced by the purge job (`ovlm_audit_admin` and `automation.artifact_retention` must not remove step-up or role-history rows of a non-terminal run).
+- B9 `verify_green_ready` runs `preflight.yml` after G2: fine, G1 already covered repo code on green.
+- Signals consumed in the same fenced transaction, takeover "wait, then probe, then act", thread-bound `PR_SET_PDEATHSIG`: no security concern; they tighten SEC-R-26.
+- No new finding. Still open and unchanged, all V1 or verification items: SEC-R-15, SEC-R-16 (except the TOTP-seed part pulled into MVP above), SEC-R-19 (Agent 3 source verification), SEC-R-21 (V1 signing key), SEC-R-22 (V1 sandbox).
+
+### What I will check when the cross-owner edits land
+
+security-model.md: §5.2 exception worded as in (1) condition 1 and the residual of condition 6; §6.2 D′ rules and the negative test; §4.4 rotation text aligned with SEC-R-13; §2.1 TOTP in MVP and the api-side key for seeds; §3.2 self-approval flag; §10 new acceptance items (bootstrap key refused after rotation, step-up single use, static lint executes nothing). automation-contract.md §2: `--list-hosts` at B6.

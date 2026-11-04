@@ -580,3 +580,21 @@ They are replaced by a local watcher that wakes Agent 1 when an agent branch rec
 - E2-1..3 adapter and inventory (Sonnet).
 - E3-1/E3-4 auth, TOTP and audit (Sonnet).
 - E3-3 profiles and policies plus the CI Ansible job (Sonnet).
+
+## Milestones M1 and M2 reached — 2026-11-04 14:50 UTC
+
+- **Security sign-off, round 2 (Fable):** accept with conditions for the implementation scope. The ADR-0006 bootstrap
+  key and the SEC-R-34 deviation are accepted with conditions. Together with the SRE's "accept", **Phase 1 is
+  frozen**.
+- **[OzarLand/openstack-vm-lifecycle-manager#1](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/1)
+  is merged into `main`** (squash, `e52856a`). CI was green: lint, unit, integration (PostgreSQL), image build and
+  Compose smoke test.
+- **Integration model from now on:**
+  - Agent work is brought into the working branch.
+  - The working branch goes to `main` by pull request, one per batch, merged only when CI is green (the maintainer's
+    instruction).
+  - Pull requests are merged with a **merge commit**, not a squash. The squash of #1 cut the history link with the
+    agent branches. Agent work started before #1 is brought in **by the paths each agent owns**, not by `git merge`.
+- **Incident:** a `git merge` of the security-review branch after the squash left conflict markers, which were
+  committed to the working branch (not to `main`). The working branch was reset to `main` and the review file was
+  taken from the agent branch alone. Nothing reached `main`.
