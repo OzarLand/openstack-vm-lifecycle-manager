@@ -154,7 +154,11 @@ class AsyncStep(_CloudStep):
     def decide(self, ctx: StepContext, observed: Any) -> Decision:
         value, pending = observed
         if value == ctx.params["value"]:
-            return Done({"polls_left": pending}) if pending == 0 else Wait(evidence={"pending": pending})
+            return (
+                Done({"polls_left": pending})
+                if pending == 0
+                else Wait(evidence={"pending": pending})
+            )
         return Act({"res": ctx.params["res"], "value": ctx.params["value"]})
 
     def act(self, ctx: StepContext, intent: Mapping[str, Any]) -> None:
@@ -230,6 +234,10 @@ class BlockStep(_CloudStep):
 
     key: ClassVar[str] = "block"
 
+    def lease_for(self, params: Mapping[str, Any]) -> float | None:
+        lease = params.get("lease")
+        return float(lease) if lease is not None else None
+
     def probe(self, ctx: StepContext) -> Any:
         return self.cloud.get(ctx.params["res"])[0]
 
@@ -268,7 +276,9 @@ class InFlightStep(_CloudStep):
     def act(self, ctx: StepContext, intent: Mapping[str, Any]) -> None:
         ctx.gate(f"openstack:PUT {intent['res']}")  # sent before the deadline...
         BLOCKERS.setdefault(ctx.params["name"], threading.Event()).wait(30)
-        self.cloud.land(intent["res"], intent["value"])  # ...lands later, whatever happened meanwhile
+        self.cloud.land(
+            intent["res"], intent["value"]
+        )  # ...lands later, whatever happened meanwhile
 
     def verify(self, ctx: StepContext, intent: Mapping[str, Any]) -> Outcome:
         return Done({"value": intent["value"]})
@@ -308,7 +318,11 @@ STEP_CLASSES: tuple[type[_CloudStep], ...] = (
 
 
 def plan_step(key: str, **params: Any) -> dict[str, Any]:
-    meta = {k: params.pop(k) for k in ("timeout", "destructive", "phase", "acquire_locks") if k in params}
+    meta: dict[str, Any] = {
+        k: params.pop(k)
+        for k in ("timeout", "destructive", "phase", "acquire_locks")
+        if k in params
+    }
     return {"key": key, "params": params, **meta}
 
 
@@ -374,7 +388,8 @@ class DummyDefinition(WorkflowDefinition):
         comp = ctx.run.subject.get("compensate_with")
         if comp and fail.error_class == ErrorClass.FATAL:
             return Transition(
-                next_step=StepSpec(comp["key"], {**comp.get("params", {}), "_i": 10_000}), phase="restore"
+                next_step=StepSpec(comp["key"], {**comp.get("params", {}), "_i": 10_000}),
+                phase="restore",
             )
         return None
 

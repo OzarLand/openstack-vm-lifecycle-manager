@@ -87,6 +87,18 @@ class Fence:
             self._unknown = False
             self._deadline = max(self._deadline, t_send + self._lease - self._margin)
 
+    @property
+    def lease_duration(self) -> float:
+        return self._lease
+
+    def set_lease(self, lease_duration: float) -> None:
+        """Per-step lease (e.g. Ansible timeout + kill grace + margin). Applies from the next successful
+        heartbeat on; the current deadline is never moved by this call alone."""
+        if lease_duration <= self._margin:
+            raise ValueError("a step lease must exceed worker.fence_margin")
+        with self._lock:
+            self._lease = lease_duration
+
     def mark_unknown(self) -> None:
         """A DB error: ownership is unknown until a guarded heartbeat returns 1 row (ADR-0003)."""
         with self._lock:

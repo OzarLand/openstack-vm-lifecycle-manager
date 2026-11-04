@@ -157,7 +157,9 @@ class WfDb:
 
     def locks(self, run_id: str | None = None) -> list[tuple[str, str]]:
         sql = "SELECT resource_type, resource_key FROM resource_lock"
-        rows = self.q(sql + (" WHERE holder_run_id = :id" if run_id else "") + " ORDER BY 1, 2", id=run_id)
+        rows = self.q(
+            sql + (" WHERE holder_run_id = :id" if run_id else "") + " ORDER BY 1, 2", id=run_id
+        )
         return [(r["resource_type"], r["resource_key"]) for r in rows]
 
 
@@ -166,11 +168,24 @@ def drive(engine: WorkflowEngine, run_id: str, wf: WfDb, max_passes: int = 100) 
     for _ in range(max_passes):
         did = engine.run_once()
         r = wf.run(run_id)
-        if r["state"] in ("completed", "rejected", "cancelled", "failed", "rolled_back", "needs_human"):
+        if r["state"] in (
+            "completed",
+            "rejected",
+            "cancelled",
+            "failed",
+            "rolled_back",
+            "needs_human",
+        ):
             return r
         if not did and r["state"] == "running":
-            open_steps = [s for s in wf.steps(run_id) if s["state"] in ("ready", "running", "waiting")]
-            if open_steps and open_steps[0]["state"] == "waiting" and open_steps[0]["not_before"] is None:
+            open_steps = [
+                s for s in wf.steps(run_id) if s["state"] in ("ready", "running", "waiting")
+            ]
+            if (
+                open_steps
+                and open_steps[0]["state"] == "waiting"
+                and open_steps[0]["not_before"] is None
+            ):
                 return r  # parked until a signal
     return wf.run(run_id)
 

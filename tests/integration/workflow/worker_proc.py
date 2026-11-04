@@ -31,7 +31,10 @@ def main() -> int:
     db = create_engine(make_url(os.environ["WF_WORKER_URL"]), pool_pre_ping=True)
     wid = new_id()
     engine = WorkflowEngine(
-        db, Registry([DummyDefinition(db, wid)]), EngineConfig.from_settings(settings), worker_id=wid
+        db,
+        Registry([DummyDefinition(db, wid)]),
+        EngineConfig.from_settings(settings),
+        worker_id=wid,
     )
     worker = Worker(settings, db, engine)
 
@@ -39,7 +42,7 @@ def main() -> int:
         worker.request_stop(signal.Signals(signum).name)
 
     signal.signal(signal.SIGTERM, _handler)
-    print(f"worker-id {wid}", flush=True)
+    print(f"worker-id {wid}", flush=True)  # noqa: T201
     worker.run()
     return 0
 

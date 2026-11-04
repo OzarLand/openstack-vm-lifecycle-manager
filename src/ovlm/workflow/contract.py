@@ -286,6 +286,11 @@ class Step(ABC):
     def verify(self, ctx: StepContext, intent: Mapping[str, Any]) -> Outcome:
         """Check the effect: Done, Wait (verify again after the next probe) or Fail."""
 
+    def lease_for(self, params: Mapping[str, Any]) -> float | None:
+        """Lease (seconds) for an attempt of this step; ``None`` = ``worker.lease_duration``. A step that
+        spawns a bounded subprocess returns its hard timeout + kill grace + ``worker.fence_margin``."""
+        return None
+
     def classify(self, ctx: StepContext, exc: Exception) -> Fail:
         """Map an unexpected exception from step code to an error class. Default: retryable."""
         return Fail(ErrorClass.RETRYABLE, f"{type(exc).__name__}: {exc}"[:500])

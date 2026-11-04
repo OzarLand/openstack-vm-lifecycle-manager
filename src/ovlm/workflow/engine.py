@@ -504,7 +504,7 @@ class WorkflowEngine:
                         "RETURNING (SELECT abort_requested FROM workflow_run WHERE id = s.run_id)"
                     ),
                     {
-                        "lease": self.config.lease_duration,
+                        "lease": fence.lease_duration,
                         "id": claim.step.id,
                         "tok": claim.fencing_token,
                         "owner": claim.lease_owner,
@@ -561,6 +561,14 @@ class WorkflowEngine:
                     needs_human_reason="unknown_step",
                 )
             else:
+                step_lease = step_impl.lease_for(claim.step.params)
+                if step_lease is not None and step_lease != fence.lease_duration:
+                    # ADR-0003: a step running a bounded subprocess holds a lease covering its hard timeout
+                    # + kill grace + margin, so no takeover starts while an orphan could still run. Set by a
+                    # guarded heartbeat before anything is probed or spawned.
+                    fence.set_lease(step_lease)
+                    if self.heartbeat(claim, fence) is False:
+                        fence.check("lease")
                 if claim.takeover and (
                     claim.step.destructive or claim.run.phase in TAKEOVER_DELAY_PHASES
                 ):

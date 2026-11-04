@@ -39,7 +39,13 @@ EXPECTED_POINTS = [
     *(f"async.{p}" for p in ("after_claim", "after_probe", "after_intent", "after_act")),
     "async.after_verify_before_commit",
     "async.after_commit",
-    *["async.after_claim", "async.after_probe", "async.after_verify_before_commit", "async.after_commit"] * 2,
+    *[
+        "async.after_claim",
+        "async.after_probe",
+        "async.after_verify_before_commit",
+        "async.after_commit",
+    ]
+    * 2,
     *(f"set_destructive.{p}" for p in ("after_claim", "after_probe", "after_intent", "after_act")),
     "set_destructive.after_verify_before_commit",
     "lease.release",

@@ -93,7 +93,9 @@ def test_retryable_then_success(wf: WfDb) -> None:
     assert outcomes == ["retryable", "retryable", "succeeded"]
 
 
-def test_retry_exhaustion_parks_in_needs_human_and_retry_step_gives_a_fresh_budget(wf: WfDb) -> None:
+def test_retry_exhaustion_parks_in_needs_human_and_retry_step_gives_a_fresh_budget(
+    wf: WfDb,
+) -> None:
     """WF-18: retryable exhaustion -> needs_human; operator retry-step re-runs with a new budget."""
     eng = wf.make_engine()
     run_id = wf.request([plan_step("flaky", res="f", fail_times=4)], locks=[["volume", "v1"]])
@@ -133,7 +135,10 @@ def test_fatal_can_be_compensated_by_the_strategy(wf: WfDb) -> None:
 def test_needs_human_class_parks_and_mark_resolved_moves_on(wf: WfDb) -> None:
     eng = wf.make_engine()
     run_id = wf.request(
-        [plan_step("fail", cls="needs_human", reason="ambiguous_state"), plan_step("set", res="z", value="Z")]
+        [
+            plan_step("fail", cls="needs_human", reason="ambiguous_state"),
+            plan_step("set", res="z", value="Z"),
+        ]
     )
     r = drive(eng, run_id, wf)
     assert r["state"] == "needs_human" and r["needs_human_reason"] == "ambiguous_state"

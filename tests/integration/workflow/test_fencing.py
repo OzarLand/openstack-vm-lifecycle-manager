@@ -46,14 +46,18 @@ def _in_thread(fn: Callable[[], str]) -> tuple[threading.Thread, list[str]]:
 
 
 def test_wf04_heartbeat_stops_lease_expires_takeover_resumes_once(wf: WfDb) -> None:
-    run_id = wf.request([plan_step("block", res="k", value="K", name="wf04")], locks=[["server", "s1"]])
+    run_id = wf.request(
+        [plan_step("block", res="k", value="K", name="wf04")], locks=[["server", "s1"]]
+    )
     clock_a = FakeClock(sleep_advances=False)
     a = wf.make_engine(clock=clock_a)
     a.admit_pending()
     crashpoint.install(CrashPlan("lease.heartbeat", 1, "raise"))  # A's heartbeat thread dies
     (claim_a,) = a.claim(1)
     t, out = _in_thread(lambda: a.execute(claim_a))
-    _wait_for(lambda: crashpoint._state.plan is not None and crashpoint._state.plan.fired, 5, "hb crash")  # noqa: SLF001
+    _wait_for(
+        lambda: crashpoint._state.plan is not None and crashpoint._state.plan.fired, 5, "hb crash"
+    )  # noqa: SLF001
     crashpoint.install(None)
 
     wf.expire_leases()  # the injectable clock passes lease_expires_at
@@ -67,7 +71,10 @@ def test_wf04_heartbeat_stops_lease_expires_takeover_resumes_once(wf: WfDb) -> N
     clock_a.advance(TEST_CONFIG.lease_duration)  # A's local deadline passes: it stops by itself
     t.join(5)
     assert out == ["fence_lost"]
-    assert ("wf04", "local fence deadline passed") in REVOKED  # its "subprocess" would be killed now
+    assert (
+        "wf04",
+        "local fence deadline passed",
+    ) in REVOKED  # its "subprocess" would be killed now
 
     BLOCKERS["wf04"].set()
     assert b.execute(claim_b) == "succeeded"
@@ -134,14 +141,18 @@ def _proc_state(pid: int) -> str:
 
 @pytest.mark.parametrize("pause_at", ["after_probe", "after_act"])
 def test_wf05_sigstop_beyond_lease_then_sigcont_is_refused_locally(wf: WfDb, pause_at: str) -> None:
-    run_id = wf.request([plan_step("set_destructive", res="c", value="C")], locks=[["volume", "v1"]])
+    run_id = wf.request(
+        [plan_step("set_destructive", res="c", value="C")], locks=[["volume", "v1"]]
+    )
     proc = worker_process(wf, {"OVLM_TEST_CRASHPOINT": f"set_destructive.{pause_at}:stop"})
     try:
         _wait_for(lambda: _proc_state(proc.pid) == "T", 30, "worker stopped")
         # the paused worker cannot heartbeat: wait for the DB lease to expire (real time, documented sleep)
         _wait_for(
             lambda: bool(
-                wf.q("SELECT 1 FROM workflow_step WHERE state = 'running' AND lease_expires_at < now()")
+                wf.q(
+                    "SELECT 1 FROM workflow_step WHERE state = 'running' AND lease_expires_at < now()"
+                )
             ),
             15,
             "lease expiry",
@@ -152,7 +163,9 @@ def test_wf05_sigstop_beyond_lease_then_sigcont_is_refused_locally(wf: WfDb, pau
         assert r["state"] == "completed"
         os.kill(proc.pid, signal.SIGCONT)
         _wait_for(lambda: _proc_state(proc.pid) != "T", 5, "worker resumed")
-        time.sleep(1.0)  # let the resumed worker reach its next gate (documented real-process sleep)
+        time.sleep(
+            1.0
+        )  # let the resumed worker reach its next gate (documented real-process sleep)
     finally:
         os.kill(proc.pid, signal.SIGCONT)
         proc.send_signal(signal.SIGTERM)
@@ -193,7 +206,9 @@ def test_wf06_in_flight_call_of_stale_worker_lands_during_takeover_delay(wf: WfD
     a.admit_pending()
     (claim_a,) = a.claim(1)
     t, out = _in_thread(lambda: a.execute(claim_a))
-    _wait_for(lambda: "wf06" in BLOCKERS, 5, "request in flight")  # A passed the gate; request on the wire
+    _wait_for(
+        lambda: "wf06" in BLOCKERS, 5, "request in flight"
+    )  # A passed the gate; request on the wire
     wf.expire_leases()
 
     def land() -> None:
@@ -219,7 +234,9 @@ def test_wf06_in_flight_call_of_stale_worker_lands_during_takeover_delay(wf: WfD
 def test_wf07_zero_row_heartbeat_stops_the_step_at_once(wf: WfDb) -> None:
     cfg = EngineConfig(**{**TEST_CONFIG.__dict__, "heartbeat_interval": 0.05})
     run_id = wf.request([plan_step("block", res="k", value="K", name="wf07a")])
-    a = wf.make_engine(config=cfg, clock=FakeClock(sleep_advances=False))  # deadline never passes alone
+    a = wf.make_engine(
+        config=cfg, clock=FakeClock(sleep_advances=False)
+    )  # deadline never passes alone
     a.admit_pending()
     (claim,) = a.claim(1)
     before = m.HEARTBEAT_LOST._value.get()  # noqa: SLF001
@@ -244,7 +261,12 @@ def test_wf07_database_unreachable_self_fences_at_local_deadline(wf: WfDb) -> No
     """Heartbeats fail (worker role cannot reach the DB): the step stops at its *local* deadline and revoke
     callbacks fire (the automation runner kills non-data subprocesses there)."""
     cfg = EngineConfig(
-        **{**TEST_CONFIG.__dict__, "lease_duration": 2.0, "fence_margin": 0.5, "heartbeat_interval": 0.1}
+        **{
+            **TEST_CONFIG.__dict__,
+            "lease_duration": 2.0,
+            "fence_margin": 0.5,
+            "heartbeat_interval": 0.1,
+        }
     )
     run_id = wf.request([plan_step("block", res="k", value="K", name="wf07b")])
     a = wf.make_engine(clock=SystemClock(), config=cfg)
@@ -301,7 +323,9 @@ def test_wf09_connection_loss_mid_step_mid_wait_and_idle(wf: WfDb) -> None:
         ]
     )
     eng = wf.make_engine()
-    crashpoint.install(CrashPlan("set.after_act", 1, action=lambda _n: _terminate_worker_backends(wf)))
+    crashpoint.install(
+        CrashPlan("set.after_act", 1, action=lambda _n: _terminate_worker_backends(wf))
+    )
     eng.run_once()  # mid-step: the outcome commit reconnects
     crashpoint.install(None)
     _terminate_worker_backends(wf)  # idle
@@ -312,3 +336,26 @@ def test_wf09_connection_loss_mid_step_mid_wait_and_idle(wf: WfDb) -> None:
     assert r["state"] == "completed"
     assert sorted(e["key"] for e in wf.effects()) == ["a", "b", "c"]
     assert all(a["outcome"] for a in wf.attempts(run_id))
+
+
+# ---- WF-08 (engine part): per-step lease covering a bounded subprocess ---------------------------------------
+
+
+def test_wf08_step_lease_covers_its_subprocess_timeout(wf: WfDb) -> None:
+    """A step declaring ``lease_for`` (Ansible: hard timeout + kill grace + fence_margin) holds that lease from
+    before its probe; a dead worker's step is not claimable until it ends. The orphan kill itself is E5-3."""
+    run_id = wf.request([plan_step("block", res="k", value="K", name="wf08", lease=3600)])
+    a = wf.make_engine(clock=FakeClock(sleep_advances=False))
+    a.admit_pending()
+    (claim,) = a.claim(1)
+    t, out = _in_thread(lambda: a.execute(claim))
+    _wait_for(lambda: "wf08" in BLOCKERS, 5, "step acting")
+    left = wf.one(
+        "SELECT EXTRACT(EPOCH FROM lease_expires_at - now()) AS left FROM workflow_step WHERE run_id = :id",
+        id=run_id,
+    )["left"]
+    assert 3500 < float(left) <= 3600
+    assert wf.make_engine().claim(1) == []  # nobody can take over while the subprocess may run
+    BLOCKERS["wf08"].set()
+    t.join(5)
+    assert out == ["succeeded"]
