@@ -22,13 +22,12 @@ from typing import Any
 
 from sqlalchemy import Connection, text
 
+from ovlm.auth.authz import can_read_restricted
 from ovlm.automation.model import RunnerConfig, RunRecord
 from ovlm.workflow.ids import new_id
 
 RESTRICTED_COLUMNS: tuple[str, ...] = ("log", "events", "diff")
 NEVER_EXPORT_COLUMNS: frozenset[str] = frozenset(RESTRICTED_COLUMNS)
-RESTRICTED_READ_ROLES: frozenset[str] = frozenset({"operator", "admin"})
-GLOBAL_SCOPE = "global"
 
 _RESULT_TIER = (
     "id, step_id, attempt, phase, target_role, project_scope, repo, sha, requirements_hash, "
@@ -36,17 +35,6 @@ _RESULT_TIER = (
     "reported_classification, reason, result, result_error, task_summary, duration_seconds, host_key_mode, "
     "lint_digest, artifact_expires_at, artifacts_purged_at, created_at"
 )
-
-
-def can_read_restricted(grants: frozenset[tuple[str, str]], project_scope: str) -> bool:
-    """``grants`` are (role, scope) pairs as in :class:`ovlm.auth.principal.Principal`. ``operator`` and ``admin``
-    qualify, in the run's project or globally; ``viewer`` and ``approver`` do not. (Mirrors
-    ``ovlm.auth.authz`` semantics without importing it; ``admin`` does not inherit ``operator``, so both are
-    listed explicitly.)"""
-    return any(
-        role in RESTRICTED_READ_ROLES and scope in (GLOBAL_SCOPE, project_scope)
-        for role, scope in grants
-    )
 
 
 @dataclass(frozen=True)
