@@ -750,3 +750,24 @@ merged: the write client, RBAC, the Ansible runner, readiness, and the engine an
   restricted-artefact endpoint): https://claude.ai/code/session_016ti9vzQN4PBKzmXYQ7MYMW (`claude/ovlm-runner-wiring`).
 
 The renewal strategy (E5-4/E5-5, Opus) continues: https://claude.ai/code/session_016ti9w2W4u5bRegw53P7dqM.
+
+## Batch integrated, lab decisions — 2026-11-04 20:45 UTC
+
+Renewal strategy (E5-4/E5-5, Opus), runner wiring (Sonnet) and the Felcloud lab kit (Sonnet) are merged into the
+working branch. **Verified by Agent 1:**
+- lint clean;
+- 1052 unit tests pass as root, and pass as a **non-root** user (1050 passed, 2 skipped because they need root);
+- 383 integration tests pass (the automation-container tests run in CI).
+
+Renewal: implemented and tested through cutover, restore and discard. **Still to do:**
+- register the strategy in the worker;
+- implement the W4 pre-handoff snapshot for real (today only a test double).
+
+**Maintainer decisions for the Felcloud lab (popup, 2026-11-04):**
+- **Cost approved:** `ovlm-lab-host` (at least 2 vCPU / 4 GB, OVLM in Docker) plus small test VMs, `ovlm-*` only,
+  deleted after each campaign.
+- **Approvals:** two lab-only human test accounts (approver A and B) with TOTP held by the lab session. This tests the
+  real separation of duties, including G3.
+- **Floating IP:** reuse the set-aside address, returned unassociated after each campaign.
+- **Failure scenario "failed Ansible configuration":** the lab may push a throw-away branch
+  `claude/ovlm-lab-broken-config`, which is never merged and is deleted after the campaign.
