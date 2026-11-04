@@ -85,14 +85,29 @@ class RStep(Step):
             g["openstack_id"] if g is not None and g["state"] in ("intended", "present") else None
         )
 
+    def project(self, ctx: StepContext) -> str:
+        """The run's project connection: the credentials of every cloud call are this project's."""
+        return project_of(self.resolved(ctx))
+
     def wc(self, ctx: StepContext) -> GuardedWriteClient:
         m = self.memo(ctx)
         if "wc" not in m:
             m["wc"] = self.d.cloud.write_client(
-                DbOwnershipRegistry(self.d.db, ctx.run.id), ctx.gate
+                DbOwnershipRegistry(self.d.db, ctx.run.id), ctx.gate, project=self.project(ctx)
             )
         client: GuardedWriteClient = m["wc"]
         return client
+
+    def external(self, ctx: StepContext) -> Any:
+        """External probe via the service FIP; blue and green (with their names) are the candidate answerers."""
+        r = self.resolved(ctx)
+        g = self.green(ctx)
+        candidates: dict[str, str | None] = {r["blue"]["server_id"]: r["blue"].get("name")}
+        if g is not None and g["openstack_id"] and g["state"] in ("intended", "present"):
+            candidates[g["openstack_id"]] = g["intended_name"]
+        return self.d.guest.external_probe(
+            r["floating_ip"]["address"], r["health_check"]["external"], candidates
+        )
 
     def green_ref(self, ctx: StepContext) -> GuestRef:
         g = self.green(ctx)
@@ -172,6 +187,10 @@ class RStep(Step):
                 ctx, ErrorClass.NEEDS_HUMAN, "state_lookup_failed", message=str(exc)[:300]
             )
         return self.fail(ctx, ErrorClass.RETRYABLE, type(exc).__name__, message=str(exc)[:300])
+
+
+def project_of(resolved: Mapping[str, Any]) -> str:
+    return str(resolved["service"]["project_connection_id"])
 
 
 def read_truth(

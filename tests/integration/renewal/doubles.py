@@ -1,4 +1,4 @@
-"""Test doubles of the renewal ports: a guest that follows the fake cloud, snapshots, and the cloud port.
+"""Test doubles of the renewal ports: a guest that follows the fake cloud, and the cloud port.
 
 ``FakeGuest`` models what matters for data safety: the data volume's content marker travels with the volume; a
 guest's mount and units follow its power state (a boot remounts by fstab if the volume is attached and starts the
@@ -25,7 +25,6 @@ from ovlm.renewal.ports import (
     GuestRef,
     HostKeyResult,
     PhaseResult,
-    SnapshotInfo,
 )
 
 SUBNET = "00000000-0000-0000-0000-0000000005b1"
@@ -176,7 +175,9 @@ class FakeGuest:
         st = self.g(target.server_id)
         return GuestProbe(True, st.mounted if mount_point else None, st.units, True, "running")
 
-    def external_probe(self, address: str, check: Mapping[str, Any]) -> ExternalResult:
+    def external_probe(
+        self, address: str, check: Mapping[str, Any], candidates: Mapping[str, str | None]
+    ) -> ExternalResult:
         self.sync()
         if self.external_down:
             return ExternalResult(False, None, "injected")
@@ -190,53 +191,27 @@ class FakeGuest:
 
 
 @dataclass
-class FakeSnapshots:
-    fail_create: bool = False
-    stuck: bool = False
-    snaps: dict[str, SnapshotInfo] = field(default_factory=dict)
-    deleted: list[str] = field(default_factory=list)
-
-    def find_snapshot(self, name: str) -> SnapshotInfo | None:
-        return next((s for s in self.snaps.values() if s.name == name), None)
-
-    def get_snapshot(self, snapshot_id: str) -> SnapshotInfo | None:
-        return self.snaps.get(snapshot_id)
-
-    def create_snapshot(
-        self, volume_id: str, name: str, gate: Callable[[str], None]
-    ) -> SnapshotInfo:
-        gate("openstack:create_snapshot")
-        status = "error" if self.fail_create else ("creating" if self.stuck else "available")
-        info = SnapshotInfo(f"snap-{len(self.snaps) + 1}", name, status, volume_id)
-        self.snaps[info.openstack_id] = info
-        return info
-
-    def delete_snapshot(self, snapshot_id: str, gate: Callable[[str], None]) -> None:
-        gate("openstack:delete_snapshot")
-        self.deleted.append(snapshot_id)
-        self.snaps.pop(snapshot_id, None)
-
-
-@dataclass
 class FakeCloudPort:
     cloud: RenewalFake
-    snaps: FakeSnapshots | None = None
     credential_expires: datetime | None = None
     token_expires: datetime | None = None
+    unavailable: str | None = None
+    projects: list[str] = field(default_factory=list)
+
+    def unavailable_reason(self, project: str) -> str | None:
+        return self.unavailable
 
     def write_client(
-        self, registry: OwnershipRegistry, gate: Callable[[str], None]
+        self, registry: OwnershipRegistry, gate: Callable[[str], None], *, project: str
     ) -> GuardedWriteClient:
+        self.projects.append(project)
         return GuardedWriteClient(self.cloud, registry, gate)
 
-    def write_credential_expires_at(self) -> datetime | None:
+    def write_credential_expires_at(self, project: str) -> datetime | None:
         return self.credential_expires
 
-    def write_user_id(self) -> str | None:
+    def write_user_id(self, project: str) -> str | None:
         return self.cloud.user_id
 
-    def token_expires_at(self) -> datetime | None:
+    def token_expires_at(self, project: str) -> datetime | None:
         return self.token_expires
-
-    def snapshots(self) -> FakeSnapshots | None:
-        return self.snaps

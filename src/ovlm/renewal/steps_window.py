@@ -21,6 +21,8 @@ from typing import Any
 from sqlalchemy import text
 
 from ovlm.auth.sod import Gate
+from ovlm.openstack import errors as oe
+from ovlm.openstack.write import SNAPSHOT_RUN_KEY, snapshot_name
 from ovlm.renewal import metrics
 from ovlm.renewal.base import RStep, StepRefusal
 from ovlm.renewal.closed_table import TRIGGER_BUDGET, TRIGGER_EVIDENCE
@@ -121,10 +123,11 @@ class QuiesceOld(WindowAnsible):
                 back = "verify_green_ready"  # only B9 is stale: re-prove green, then claim again
             refusals.append("verify_green_ready too old")
         worst = float(r["worst_case_window_seconds"])
-        token = (
-            self.d.cloud.token_expires_at()
-        )  # obtained before the claim transaction (SRE-R-28 b)
-        if not credential_ok(self.d.cloud.write_credential_expires_at(), worst, now):
+        # obtained before the claim transaction (SRE-R-28 b)
+        token = self.d.cloud.token_expires_at(self.project(ctx))
+        if not credential_ok(
+            self.d.cloud.write_credential_expires_at(self.project(ctx)), worst, now
+        ):
             refusals.append("write credential expires within the worst-case window")
         if not credential_ok(token, worst, now):
             refusals.append("Keystone token expires within the worst-case window")
@@ -273,54 +276,115 @@ class DetachVolume(WindowStep):
 
 
 class SnapshotVolume(WindowStep):
-    """W4 (optional): Cinder snapshot of the ``available`` volume; failure or deadline -> auto restore (SRE-R-7).
-    A snapshot stuck ``creating`` is reported as an orphan candidate, never deleted."""
+    """W4 (optional, ``data_volume.snapshot_before_handoff``, default off): Cinder snapshot of the detached
+    (``available``) data volume, before green ever sees it.
+
+    Safety argument:
+
+    * The snapshot is a **manual** way back, never something OVLM restores from or deletes (renewal-workflow.md 4,
+      SRE-R-30/31): the write allowlist has no snapshot DELETE rule at all, and nothing in OVLM calls one.
+    * Idempotency (ADR-0005): ledger ``intended`` row before the create, lookup by the run's exact name
+      (``ovlm-prehandoff-<run>``) on every probe, so a crash between create and ledger never makes a second one.
+      A snapshot found by name is adopted only if it copies **this** data volume, carries ``ovlm.run=<run>`` and
+      was created after the ledger intent (a project member could squat the name); otherwise needs_human. More
+      than one match: needs_human (never pick one).
+    * Failure rule (SRE-R-7): status ``error``, a refused create (quota, 4xx) or the step deadline -> failure
+      ``snapshot_failed``; the closed table restores automatically (volume ``available``, blue SHUTOFF, FIP on blue)
+      and the run counts as "no snapshot" from then on. A snapshot left ``creating``/``error`` is marked
+      ``orphan`` in the ledger and reported (never deleted).
+    """
 
     key = "snapshot_volume"
-
-    def _port(self) -> Any:
-        port = self.d.cloud.snapshots()
-        if port is None:
-            raise StepRefusal(E.NEEDS_HUMAN, "snapshot_unsupported")
-        return port
 
     def probe(self, ctx: StepContext) -> Any:
         if (f := self.window_gates(ctx)) is not None:
             return {"fail": f}
-        name = f"ovlm-prehandoff-{ctx.run.id}"
+        name = snapshot_name(ctx.run.id)
         with ctx.read() as c:
             row = snapshot_row(c, ctx.run.id)
-        snap = self._port().find_snapshot(name)
-        return {"name": name, "row": dict(row) if row else None,
-                "snap": None if snap is None else {"id": snap.openstack_id, "status": snap.status}}  # fmt: skip
+        found = self.wc(ctx).list_volume_snapshots(name=name)
+        return {"name": name, "row": None if row is None else {
+                    "state": row["state"], "openstack_id": row["openstack_id"],
+                    "intent_committed_at": row["intent_committed_at"]},
+                "found": [{"id": x.openstack_id, "status": x.status, "volume_id": x.volume_id,
+                           "run": x.metadata.get(SNAPSHOT_RUN_KEY), "created": x.created} for x in found]}  # fmt: skip
 
     def decide(self, ctx: StepContext, observed: Any) -> Decision:
         if "fail" in observed:
             fail: Fail = observed["fail"]
             return fail
-        snap = observed["snap"]
-        if snap is None:
+        found, row = observed["found"], observed["row"]
+        if len(found) > 1:
+            return self.fail(ctx, E.NEEDS_HUMAN, "duplicate_resource", snapshots=_public(found))
+        if not found:
             tries = int((ctx.previous_intent or {}).get("try", 0))
             if tries >= 2 or (tries == 1 and not ctx.takeover):  # same rule as W5
                 return self.fail(
                     ctx, E.NEEDS_HUMAN, "snapshot_failed", snapshot="missing after create"
                 )
-            return Act({"name": observed["name"], "try": tries + 1})
+            return Act({"create": observed["name"], "try": tries + 1})
+        snap = found[0]
+        problems = _adoption_problems(
+            snap, row, self.resolved(ctx)["data_volume"]["volume_id"], ctx.run.id
+        )
+        if problems:
+            return self.fail(ctx, E.NEEDS_HUMAN, "snapshot_adoption_refused", problems=problems,
+                             snapshot=_public(found)[0])  # fmt: skip
+        if row["state"] != "present" or row["openstack_id"] != snap["id"]:
+            return Act(
+                {"record": snap["id"]}
+            )  # created, but the ledger missed the id (crash after create)
         if snap["status"] == "available":
-            return Done({"snapshot_id": snap["id"]})
-        if snap["status"] in ("creating",):
-            return self.wait(ctx, snapshot=snap)
-        return self.fail(ctx, E.NEEDS_HUMAN, "snapshot_failed", snapshot=snap)
+            return Done({"snapshot_id": snap["id"], "snapshot_status": "available"})
+        if snap["status"] == "creating":
+            return self.wait(ctx, snapshot=_public(found)[0])
+        return self.fail(ctx, E.NEEDS_HUMAN, "snapshot_failed", snapshot=_public(found)[0])
 
     def act(self, ctx: StepContext, intent: Mapping[str, Any]) -> None:
-        ledger_intend(self.d.db, ctx, role="snapshot", rtype="snapshot", name=intent["name"])
-        snap = self._port().create_snapshot(
-            self.resolved(ctx)["data_volume"]["volume_id"], intent["name"], ctx.gate
+        if "record" in intent:
+            ledger_present(self.d.db, ctx, role="snapshot", openstack_id=intent["record"])
+            return
+        ledger_intend(self.d.db, ctx, role="snapshot", rtype="snapshot", name=intent["create"])
+        snap = self.wc(ctx).create_volume_snapshot(
+            self.resolved(ctx)["data_volume"]["volume_id"], intent["create"]
         )
-        ledger_present(self.d.db, ctx, role="snapshot", openstack_id=snap.openstack_id)
+        ledger_present(self.d.db, ctx, role="snapshot", openstack_id=snap.openstack_id,
+                       detail={"volume_id": snap.volume_id})  # fmt: skip
 
     def verify(self, ctx: StepContext, intent: Mapping[str, Any]) -> Outcome:
-        return Wait(poll_after=None)
+        return Wait(poll_after=0.0 if "record" in intent else None)
+
+    def classify(self, ctx: StepContext, exc: Exception) -> Fail:
+        f = super().classify(ctx, exc)
+        if isinstance(exc, oe.OpenStackError) and f.error_class == E.FATAL:
+            # a refused create (quota 413, 400): no snapshot exists; the closed table restores (SRE-R-7)
+            return self.fail(ctx, E.NEEDS_HUMAN, "snapshot_failed", error=type(exc).__name__,
+                             message=str(exc)[:300], truth=f.detail.get("truth"))  # fmt: skip
+        return f
+
+
+def _public(found: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {k: (str(v) if k == "created" and v is not None else v) for k, v in x.items()}
+        for x in found
+    ]
+
+
+def _adoption_problems(
+    snap: Mapping[str, Any], row: Mapping[str, Any] | None, volume_id: str, run_id: str
+) -> list[str]:
+    problems = []
+    if row is None or row["state"] not in ("intended", "present"):
+        problems.append("no live ledger row for this run's snapshot")
+    if snap["volume_id"] != volume_id:
+        problems.append("the snapshot is not a copy of the data volume")
+    if snap["run"] != run_id:
+        problems.append("the snapshot does not carry this run's ovlm.run marker")
+    if row is not None and (
+        snap["created"] is None or snap["created"] < row["intent_committed_at"]
+    ):
+        problems.append("the snapshot was created before this run's ledger row was committed")
+    return problems
 
 
 class AttachVolumeGreen(WindowStep):
@@ -526,9 +590,7 @@ class ExternalVerify(WindowStep):
 
     def probe(self, ctx: StepContext) -> Any:
         r = self.resolved(ctx)
-        res = self.d.guest.external_probe(
-            r["floating_ip"]["address"], r["health_check"]["external"]
-        )
+        res = self.external(ctx)
         expect = self.green_id(ctx) if self.expect_role == "green" else r["blue"]["server_id"]
         return {"ok": res.ok and res.identity == expect, "identity": res.identity}
 

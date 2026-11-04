@@ -116,6 +116,47 @@ class VolumeInfo:
 
 
 @dataclass(frozen=True)
+class VolumeSnapshotInfo:
+    """A Cinder snapshot (``creating`` -> ``available``, or ``error``). OVLM creates at most one per run (W4) and
+    never deletes one."""
+
+    openstack_id: str
+    name: str | None
+    status: str
+    volume_id: str
+    size: int | None = None
+    metadata: dict[str, str] = field(default_factory=dict)
+    created: datetime | None = None
+
+
+@dataclass(frozen=True)
+class BlockStorageLimits:
+    """Cinder absolute limits of the project (``GET /limits``). ``None`` or ``-1`` maximum: unlimited."""
+
+    max_snapshots: int | None
+    snapshots_used: int | None
+    max_gigabytes: int | None
+    gigabytes_used: int | None
+
+    def snapshot_headroom(self, size_gb: int) -> list[str]:
+        """Problems if one more snapshot of ``size_gb`` would exceed a limit (SRE-R-7); empty: room."""
+        out = []
+        if (
+            self.max_snapshots not in (None, -1)
+            and (self.snapshots_used or 0) + 1 > self.max_snapshots
+        ):
+            out.append(f"snapshot quota: {self.snapshots_used} of {self.max_snapshots} used")
+        if (
+            self.max_gigabytes not in (None, -1)
+            and (self.gigabytes_used or 0) + size_gb > self.max_gigabytes
+        ):
+            out.append(
+                f"gigabytes quota: {self.gigabytes_used} of {self.max_gigabytes} used, the snapshot needs {size_gb}"
+            )
+        return out
+
+
+@dataclass(frozen=True)
 class VolumeTypeInfo:
     openstack_id: str
     name: str

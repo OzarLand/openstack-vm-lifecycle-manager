@@ -44,11 +44,13 @@ from ovlm.openstack.sdk_read import (
     SdkReadClient,
     map_floating_ip,
     map_port,
+    map_snapshot,
     parse_version,
     require_tls_verification,
     translated,
 )
 from ovlm.openstack.types import (
+    BlockStorageLimits,
     CreateServerSpec,
     FlavorInfo,
     FloatingIpInfo,
@@ -59,6 +61,7 @@ from ovlm.openstack.types import (
     ServerInfo,
     VolumeAttachmentInfo,
     VolumeInfo,
+    VolumeSnapshotInfo,
     VolumeTypeInfo,
 )
 from ovlm.openstack.write import GuardedWriteClient
@@ -301,6 +304,44 @@ class SdkWriteBackend:
                     f"/floatingips/{quote(floating_ip_id, safe='')}/tags/{quote(tag, safe='')}"
                 )
             )
+
+    def create_volume_snapshot(
+        self, volume_id: str, name: str, metadata: Mapping[str, str]
+    ) -> VolumeSnapshotInfo:
+        body = {"snapshot": {"volume_id": volume_id, "name": name, "force": False,
+                             "metadata": {str(k): str(v) for k, v in metadata.items()}}}  # fmt: skip
+        with translated():
+            resp = _check(self._conn.block_storage.post("/snapshots", json=body))
+            created = resp.json().get("snapshot") or {}
+        if not created.get("id"):
+            raise NotFoundError("create_volume_snapshot: the response carries no snapshot id")
+        return VolumeSnapshotInfo(
+            openstack_id=str(created["id"]), name=created.get("name"), status=str(created.get("status") or ""),
+            volume_id=str(created.get("volume_id") or volume_id), size=created.get("size"),
+            metadata=dict(created.get("metadata") or {}),
+        )  # fmt: skip
+
+    def list_volume_snapshots(self, *, name: str | None = None) -> list[VolumeSnapshotInfo]:
+        query: dict[str, Any] = {"name": name} if name is not None else {}
+        with translated():
+            found = [
+                map_snapshot(s) for s in self._conn.block_storage.snapshots(details=True, **query)
+            ]
+        return [s for s in found if name is None or s.name == name]  # the filter is not trusted
+
+    def get_volume_snapshot(self, snapshot_id: str) -> VolumeSnapshotInfo:
+        with translated():
+            return map_snapshot(self._conn.block_storage.get_snapshot(snapshot_id))
+
+    def block_storage_limits(self) -> BlockStorageLimits:
+        with translated():
+            a = self._conn.block_storage.get_limits().absolute
+        return BlockStorageLimits(
+            a.max_total_snapshots,
+            a.total_snapshots_used,
+            a.max_total_volume_gigabytes,
+            a.total_gigabytes_used,
+        )
 
     def merge_volume_metadata(self, volume_id: str, items: Mapping[str, str]) -> None:
         with translated():

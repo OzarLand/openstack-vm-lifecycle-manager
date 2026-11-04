@@ -430,7 +430,7 @@ def blast_radius(resolved: Mapping[str, Any], gate: str) -> dict[str, Any]:
             "outage_start": "at quiesce of the current VM (step W1), after green is proven ready (B9)",
             "worst_case_window_seconds": resolved["worst_case_window_seconds"],
             "max_window_duration_seconds": resolved["max_window_duration_seconds"],
-            "snapshot": "yes: a pre-handoff snapshot is taken (a manual way back)"
+            "snapshot": "yes: a pre-handoff snapshot is taken (a manual way back; OVLM never deletes it)"
             if snap
             else "no: revert carries green's writes forward",
             "automatic_restore": (

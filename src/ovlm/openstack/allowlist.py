@@ -22,7 +22,7 @@ cannot be sent. For each request, in this order:
    re-probes before acting again (the step contract), instead of keystoneauth re-sending it later.
 
 What the rules make impossible by construction (refused even if a caller tried): any ``DELETE`` on
-``volumes``/``snapshots``/``floatingips``/``ports``, ``POST /volumes`` (create), ``POST``/``DELETE /floatingips``
+``volumes``/``snapshots``/``floatingips``/``ports`` (so OVLM can never delete a snapshot, its own included), ``POST /volumes`` (create), ``POST``/``DELETE /floatingips``
 (allocate/release), any ``security-groups``/``security-group-rules`` write, server ``forceDelete``/``rebuild``/
 ``resize``/``createImage`` and every other action not listed, the replace-all forms ``PUT .../tags`` and
 ``PUT .../metadata``, tag deletion, ``PUT .../os-volume_attachments`` (swap, ``delete_on_termination`` change), a
@@ -147,6 +147,33 @@ def _volume_metadata_ok(body: Any) -> bool:
     )
 
 
+#: Prefix of the only snapshot name OVLM creates: ``ovlm-prehandoff-<run uuid>`` (W4).
+SNAPSHOT_NAME_PREFIX = "ovlm-prehandoff-"
+_SNAPSHOT_KEYS = frozenset({"volume_id", "name", "metadata", "force", "description"})
+
+
+def _snapshot_create_ok(body: Any) -> bool:
+    snap = body.get("snapshot") if isinstance(body, dict) and len(body) == 1 else None
+    if not isinstance(snap, dict) or not set(snap) <= _SNAPSHOT_KEYS:
+        return False
+    if snap.get("force", False) is not False:  # never a snapshot of an attached (in-use) volume
+        return False
+    if not isinstance(snap.get("volume_id"), str) or not re.fullmatch(_ID, snap["volume_id"]):
+        return False
+    name = snap.get("name")
+    if not isinstance(name, str) or not name.startswith(SNAPSHOT_NAME_PREFIX) or len(name) > 255:
+        return False
+    md = snap.get("metadata")
+    return (
+        isinstance(md, dict)
+        and md.get(VOLUME_MARKER_KEY) == VOLUME_MARKER_VALUE
+        and all(
+            isinstance(k, str) and k.startswith("ovlm.") and isinstance(v, str)
+            for k, v in md.items()
+        )
+    )
+
+
 def _no_body(body: Any) -> bool:
     return body is None
 
@@ -192,6 +219,8 @@ RULES: tuple[Rule, ...] = (
         _p(f"volumes/{_ID}/metadata"),
         _volume_metadata_ok,
     ),
+    # W4 pre-handoff snapshot (renewal-workflow.md 2.2): create only; there is no snapshot DELETE rule.
+    Rule("create_volume_snapshot", BLOCK_STORAGE, "POST", _p("snapshots"), _snapshot_create_ok),
 )
 
 #: The operation names a write can be classified as (used by the fake to model the same boundary).

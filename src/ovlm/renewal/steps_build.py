@@ -120,9 +120,12 @@ class Preflight(RStep):
         if r["flavor"]["id"] not in {f.openstack_id for f in wc.list_flavors()}:
             problems.append("flavor missing")
         dv = r.get("data_volume") or {}
-        if dv.get("snapshot_before_handoff") and self.d.cloud.snapshots() is None:
-            problems.append(
-                "snapshot_before_handoff is set but this release's write client cannot snapshot"
+        if dv.get("snapshot_before_handoff"):
+            # SRE-R-7: room for one more snapshot of the volume's size, checked before any outage. W4 still
+            # restores automatically if the create is refused later (the check is advisory against a race).
+            v = wc.get_volume(dv["volume_id"])
+            problems += wc.block_storage_limits().snapshot_headroom(
+                int(v.size or dv.get("size") or 0)
             )
         missing = self.d.cfg.missing(snapshot=bool(dv.get("snapshot_before_handoff")))
         if missing:
@@ -137,7 +140,7 @@ class Preflight(RStep):
         )
         if facts.recomputed_hash is None:
             problems.append("plan sources (profile version or policy) are missing")
-        expires = self.d.cloud.write_credential_expires_at()
+        expires = self.d.cloud.write_credential_expires_at(self.project(ctx))
         return {
             "problems": problems,
             "g1": g1,
@@ -245,7 +248,7 @@ class CreateGreen(RStep):
             found,
             AdoptionExpectation(
                 run_id=ctx.run.id, image_id=r["image"]["id"], flavor_name=r["flavor"]["name"],
-                ledger_committed_at=g["intent_committed_at"], write_user_id=self.d.cloud.write_user_id(),
+                ledger_committed_at=g["intent_committed_at"], write_user_id=self.d.cloud.write_user_id(self.project(ctx)),
             ),
             self.wc(ctx).list_server_volume_attachments(found.openstack_id),
         )  # fmt: skip
@@ -477,9 +480,7 @@ class VerifyCutoverPreconditions(RStep):
             problems.append("green port has no fixed IP on the plan's subnet")
         if any(f.port_id == port.openstack_id for f in self.wc(ctx).list_floating_ips()):
             problems.append("a floating IP is already on green's port (SRE-R-13)")
-        probe = self.d.guest.external_probe(
-            r["floating_ip"]["address"], r["health_check"]["external"]
-        )
+        probe = self.external(ctx)
         return {"problems": problems, "baseline": {"ok": probe.ok, "identity": probe.identity}}
 
     def decide(self, ctx: StepContext, observed: Any) -> Decision:

@@ -44,7 +44,6 @@ from tests.integration.renewal.doubles import (
     SUBNET,
     FakeCloudPort,
     FakeGuest,
-    FakeSnapshots,
     GuestState,
     RenewalFake,
 )
@@ -397,8 +396,9 @@ def build_world(admin_url: URL, db: str, secrets_dir: Path, *, snapshot: bool = 
     api = create_engine(role_url(admin_url, db, "ovlm_api", API_PW))
     cloud = RenewalFake(now=datetime.now(UTC), strict_gate=False)  # seeding the cloud; strict after
     ids, users = _seed(admin, cloud, snapshot=snapshot, policy=policy or {})
-    port = FakeCloudPort(cloud, FakeSnapshots() if snapshot else None,
-                         datetime.now(UTC) + timedelta(days=30), datetime.now(UTC) + timedelta(hours=8))  # fmt: skip
+    port = FakeCloudPort(
+        cloud, datetime.now(UTC) + timedelta(days=30), datetime.now(UTC) + timedelta(hours=8)
+    )
     w = World(admin, worker, api, cloud, FakeGuest(cloud, ids["volume"]), port, ids, users)
     w.guest.state[ids["blue"]] = GuestState(mounted=True, units=True)  # blue serves
     if g1:

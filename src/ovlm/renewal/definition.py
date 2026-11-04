@@ -37,7 +37,7 @@ from ovlm import audit
 from ovlm.auth.sod import INTERACTIVE_AUTH, STEPUP_VALIDITY, role_held_at
 from ovlm.openstack.errors import WriteNotAllowedError
 from ovlm.renewal import closed_table, metrics
-from ovlm.renewal.base import Deps, RStep, read_truth
+from ovlm.renewal.base import Deps, RStep, project_of, read_truth
 from ovlm.renewal.config import RESTORE_STEPS, WINDOW_STEPS
 from ovlm.renewal.ledger import DbOwnershipRegistry, green_row, plan_resolved, snapshot_row
 from ovlm.renewal.plans import KIND, STRATEGY, STRATEGY_VERSION, load_facts, tc_target
@@ -185,6 +185,9 @@ class BlueGreenFipV1(WorkflowDefinition):
         missing = self.d.cfg.missing(snapshot=bool(dv.get("snapshot_before_handoff")))
         if missing:
             return Reject("configuration keys missing: " + ", ".join(missing))
+        unavailable = self.d.cloud.unavailable_reason(project_of(r))
+        if unavailable:
+            return Reject(unavailable)
         if facts.recomputed_hash is None or facts.recomputed_hash != facts.plan["plan_hash"]:
             return Reject(
                 "the plan's sources changed since it was created (plan hash differs); create a new plan"
@@ -327,6 +330,8 @@ class BlueGreenFipV1(WorkflowDefinition):
             snapshot_available=_snapshot_available(c, run.id, ctx),
         )
         if decision.restore:
+            if key == "snapshot_volume":
+                _orphan_snapshot(c, run.id, decision.reason)
             return self._restore(
                 c, run, trigger=decision.reason, step_key=key, fail=fail, truth=truth, auto=True
             )
@@ -455,10 +460,12 @@ class BlueGreenFipV1(WorkflowDefinition):
         if signal.kind != "probe":
             return None
         try:
-            client = self.d.cloud.write_client(DbOwnershipRegistry(self.d.db, run.id), _no_writes)
             with self.d.db.connect() as c:
                 resolved = plan_resolved(c, run.id)
                 g = green_row(c, run.id)
+            client = self.d.cloud.write_client(
+                DbOwnershipRegistry(self.d.db, run.id), _no_writes, project=project_of(resolved)
+            )
             return read_truth(client, resolved, g)
         except Exception as exc:  # noqa: BLE001 - an unreachable API is the result
             return {"api_reachable": False, "error": type(exc).__name__}
@@ -649,6 +656,17 @@ def _snapshot_available(c: Connection, run_id: str, ctx: TxContext) -> bool:
         {"r": run_id},
     ).first()
     return ok is not None
+
+
+def _orphan_snapshot(c: Connection, run_id: str, why: str) -> None:
+    """W4 failed and the run leaves it for good: a snapshot that exists (``creating`` or ``error``) is reported as an
+    orphan candidate, never deleted (SRE-R-7, SRE-R-31). The run counts as "no snapshot" from here on."""
+    c.execute(
+        text("UPDATE owned_resource SET state = 'orphan', updated_at = now(), detail = detail || CAST(:d AS jsonb) "
+             "WHERE run_id = :r AND role = 'snapshot' AND state IN ('intended', 'present') "
+             "AND openstack_id IS NOT NULL"),
+        {"r": run_id, "d": json.dumps({"orphan_candidate": why, "never_deleted_by_ovlm": True})},
+    )  # fmt: skip
 
 
 def _abort_actor(c: Connection, run_id: str) -> str | None:

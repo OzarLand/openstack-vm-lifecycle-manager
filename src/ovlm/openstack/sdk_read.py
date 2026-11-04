@@ -49,6 +49,7 @@ from ovlm.openstack.types import (
     ServerInfo,
     VolumeAttachmentInfo,
     VolumeInfo,
+    VolumeSnapshotInfo,
     VolumeTypeInfo,
 )
 
@@ -167,6 +168,18 @@ def map_volume(v: Any) -> VolumeInfo:
         volume_type=v.volume_type,
         metadata=dict(v.metadata or {}),
         attachments=attachments,
+    )
+
+
+def map_snapshot(sn: Any) -> VolumeSnapshotInfo:
+    return VolumeSnapshotInfo(
+        openstack_id=str(sn.id),
+        name=sn.name,
+        status=str(sn.status or ""),
+        volume_id=str(sn.volume_id or ""),
+        size=sn.size,
+        metadata={str(k): str(v) for k, v in (sn.metadata or {}).items()},
+        created=parse_time(sn.created_at),
     )
 
 
