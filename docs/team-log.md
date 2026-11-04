@@ -771,3 +771,12 @@ Renewal: implemented and tested through cutover, restore and discard. **Still to
 - **Floating IP:** reuse the set-aside address, returned unassociated after each campaign.
 - **Failure scenario "failed Ansible configuration":** the lab may push a throw-away branch
   `claude/ovlm-lab-broken-config`, which is never merged and is deleted after the campaign.
+
+**Started 20:42 UTC:**
+- Finish renewal (worker registration, real W4 snapshot, full renewal through the real worker loop with a crash
+  mid-window), Opus: https://claude.ai/code/session_016ti9w4DAiZDp81ZVjxTTAN (`claude/ovlm-renewal-finish`).
+- UI E6-3/E6-4 (planning, approvals with hash inputs and diff, run timeline, readiness), Sonnet:
+  https://claude.ai/code/session_016ti9w2vMuJizEbKqyJdCQQ (`claude/ovlm-ui-renewal`).
+
+**Next:** an independent Fable review of the renewal code in a fresh session (SRE + security lenses), then a PR to
+`main`, then the Felcloud acceptance campaign through `ozar-dev`.
