@@ -2,7 +2,8 @@
 
 The engine calls :func:`crashpoint` at every named point: ``<step_key>.after_claim``, ``.after_probe``,
 ``.after_intent``, ``.after_act``, ``.after_verify_before_commit``, ``.after_commit`` and the engine points
-``lease.heartbeat``, ``lease.release`` and ``run.create`` (locks acquired, admission not yet committed).
+``lease.heartbeat``, ``lease.release``, ``run.create`` (locks acquired, admission not yet committed) and
+``signal.apply`` (signal effect written, consumption not yet committed).
 
 In production the call is a no-op: no plan is installed and the environment variable is ignored unless the
 process opted in. The worker entry point refuses to start when ``OVLM_TEST_CRASHPOINT`` is set (see

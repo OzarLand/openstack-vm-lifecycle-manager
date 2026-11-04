@@ -242,7 +242,7 @@ class _StepContext:
 
     def sleep(self, seconds: float) -> None:
         self._engine.clock.sleep(seconds, self.fence.stopped)
-        self.fence.check("sleep")
+        self.fence.ensure_alive("sleep")
 
     @contextmanager
     def read(self) -> Iterator[Connection]:
@@ -735,8 +735,6 @@ class WorkflowEngine:
                     "att": claim.step.attempt,
                 },
             )
-            if transition is not None:
-                self._apply_transition_safely(c, run, step, transition, defn)
             self.audit.record(
                 c,
                 AuditEvent(
@@ -754,6 +752,8 @@ class WorkflowEngine:
                     },
                 ),
             )
+            if transition is not None:
+                self._apply_transition_safely(c, run, step, transition, defn)
         m.STEP_ATTEMPTS.labels(step.step_key, attempt_outcome, params["ecls"] or "none").inc()
         return attempt_outcome
 
@@ -1105,7 +1105,8 @@ class WorkflowEngine:
             srow = (
                 c.execute(
                     text(
-                        "SELECT g.id, g.run_id, g.kind, g.actor_id, g.approval_id, g.payload, "
+                        "SELECT g.id AS sig_id, g.run_id AS sig_run_id, g.kind AS sig_kind, g.actor_id, "
+                        "g.approval_id, g.payload AS sig_payload, "
                         f"{_RUN_COLS} FROM run_signal g JOIN workflow_run r ON r.id = g.run_id "
                         "WHERE g.id = :id AND g.consumed_at IS NULL"
                     ),
@@ -1125,12 +1126,12 @@ class WorkflowEngine:
         ):
             return False  # another worker release may know this run; leave the signal pending
         sig = SignalView(
-            id=str(srow["id"]),
-            run_id=str(srow["run_id"]),
-            kind=srow["kind"],
+            id=str(srow["sig_id"]),
+            run_id=str(srow["sig_run_id"]),
+            kind=srow["sig_kind"],
             actor_id=str(srow["actor_id"]) if srow["actor_id"] else None,
             approval_id=str(srow["approval_id"]) if srow["approval_id"] else None,
-            payload=srow["payload"] or {},
+            payload=srow["sig_payload"] or {},
         )
         prepared = defn.prepare_signal(pre_run, sig) if defn is not None else None
         try:
@@ -1166,6 +1167,7 @@ class WorkflowEngine:
                 open_step = _step_view(srow2) if srow2 else None
                 tctx = TxContext(conn=c, run=run, step=open_step, signal=sig, prepared=prepared)
                 outcome, effect = self._signal_effect(c, defn, tctx)
+                crashpoint("signal.apply")  # effect written, consumption not yet: both or neither
                 c.execute(
                     text(
                         "UPDATE run_signal SET consumed_at = now(), outcome = :o WHERE id = :id "

@@ -108,6 +108,10 @@ class Fence:
             if self._fired:
                 return
             self._fired = True
+            # Once stopped, the attempt is dead for good: a late 1-row heartbeat must not revive it after its
+            # revoke callbacks (e.g. the Ansible kill) already ran.
+            if self._revoked is None:
+                self._revoked = reason
             callbacks = list(self._callbacks)
         self.stopped.set()
         for cb in callbacks:
@@ -151,6 +155,18 @@ class Fence:
         # Unknown ownership: re-confirm synchronously with a guarded heartbeat instead of failing on a blip.
         if unknown and (self._verify is None or not self._verify()):
             self._refuse(action, "ownership_unknown", "ownership unknown after a DB error")
+        if self.remaining() <= 0:
+            self._fire("local fence deadline passed")
+            self._refuse(action, "deadline", "local fence deadline passed")
+
+    def ensure_alive(self, action: str) -> None:
+        """Weaker check for non-mutating waits: only revocation and the deadline stop them. Unknown ownership
+        after a DB error blocks *new* mutating actions (:meth:`check`) but does not interrupt an ongoing
+        bounded wait or subprocess before the deadline (ADR-0003 "DB outage")."""
+        with self._lock:
+            revoked = self._revoked
+        if revoked is not None:
+            self._refuse(action, "revoked", revoked)
         if self.remaining() <= 0:
             self._fire("local fence deadline passed")
             self._refuse(action, "deadline", "local fence deadline passed")

@@ -227,20 +227,27 @@ def upgrade() -> None:
     # SEC-R-1: the api inserts runs only in 'requested', with no execution columns set; signals unconsumed.
     op.execute(
         """
-        CREATE FUNCTION workflow_api_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+        CREATE FUNCTION workflow_run_api_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN
-          IF current_user = 'ovlm_api' THEN
-            IF TG_TABLE_NAME = 'workflow_run' AND (
-                 NEW.state <> 'requested' OR NEW.abort_requested OR NEW.phase IS NOT NULL
-                 OR NEW.admitted_at IS NOT NULL OR NEW.finished_at IS NOT NULL
-                 OR NEW.needs_human_reason IS NOT NULL OR NEW.auto_restore_used) THEN
-              RAISE EXCEPTION 'ovlm_api may only insert workflow_run rows in state requested'
-                USING ERRCODE = 'insufficient_privilege';
-            END IF;
-            IF TG_TABLE_NAME = 'run_signal' AND (NEW.consumed_at IS NOT NULL OR NEW.outcome IS NOT NULL) THEN
-              RAISE EXCEPTION 'ovlm_api may only insert unconsumed run_signal rows'
-                USING ERRCODE = 'insufficient_privilege';
-            END IF;
+          IF current_user = 'ovlm_api' AND (
+               NEW.state <> 'requested' OR NEW.abort_requested OR NEW.phase IS NOT NULL
+               OR NEW.admitted_at IS NOT NULL OR NEW.finished_at IS NOT NULL
+               OR NEW.needs_human_reason IS NOT NULL OR NEW.auto_restore_used) THEN
+            RAISE EXCEPTION 'ovlm_api may only insert workflow_run rows in state requested'
+              USING ERRCODE = 'insufficient_privilege';
+          END IF;
+          RETURN NEW;
+        END
+        $$
+        """
+    )
+    op.execute(
+        """
+        CREATE FUNCTION run_signal_api_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF current_user = 'ovlm_api' AND (NEW.consumed_at IS NOT NULL OR NEW.outcome IS NOT NULL) THEN
+            RAISE EXCEPTION 'ovlm_api may only insert unconsumed run_signal rows'
+              USING ERRCODE = 'insufficient_privilege';
           END IF;
           RETURN NEW;
         END
@@ -250,7 +257,7 @@ def upgrade() -> None:
     for table in ("workflow_run", "run_signal"):
         op.execute(
             f"CREATE TRIGGER {table}_api_insert_guard BEFORE INSERT ON {table} "
-            "FOR EACH ROW EXECUTE FUNCTION workflow_api_insert_guard()"
+            f"FOR EACH ROW EXECUTE FUNCTION {table}_api_insert_guard()"
         )
 
     tables = (
@@ -288,5 +295,6 @@ def downgrade() -> None:
         "workflow_run",
     ):
         op.execute(f"DROP TABLE {table}")
-    op.execute("DROP FUNCTION workflow_api_insert_guard()")
+    op.execute("DROP FUNCTION workflow_run_api_insert_guard()")
+    op.execute("DROP FUNCTION run_signal_api_insert_guard()")
     op.execute("DROP SEQUENCE fencing_seq")
