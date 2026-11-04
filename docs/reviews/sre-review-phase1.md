@@ -304,3 +304,124 @@ Severity: critical / high / medium / low. "Artefact" cites document and section.
 
 > Decision support only. State-changing steps above require approval by the
 > accountable owner and should be executed under your change process.
+
+---
+
+## Delta review (revision 2026-11-04)
+
+| Field | Value |
+|---|---|
+| Reviewer | Agent 7 — SRE / Reliability Engineer, independent (still has not read `docs/team-log.md`) |
+| Scope | Only the changes `git diff 7a7ea43 166c731 -- docs/` to the artefacts listed in §1, plus the revision notes in `automation-contract.md`, `openstack-integration.md`, `api-design.md`, `security-model.md` and the EXP-01 results they cite |
+| Method | Same as above; LO = LAB-OBSERVED as defined in the revised OSI (one cloud, one run; it adds to a source tag, never replaces it) |
+
+### D.1 Updated verdict
+
+**Accept.** No veto. The three high findings are resolved as designed, and the revision is sound. Two new
+medium gaps (SRE-R-23, SRE-R-24) are one-row additions to existing tables; they should be in the documents before
+the window phase is implemented, but they do not block engine or build-phase work. **D-1 was decided by the
+maintainer as option B** (relayed by Agent 1; applied by the architect in commit `40e959d` on
+`claude/ovlm-architect`, which I read for §D.4). This review is against B.
+
+Counts after the delta: original 18 MVP findings → 17 resolved, 1 partly resolved (SRE-R-12); 4 V1 items recorded
+as backlog. New: medium 2, low 7.
+
+### D.2 Disposition of the original findings
+
+| ID | Status | Reason (one line) |
+|---|---|---|
+| SRE-R-1 | **resolved** | S6 `boot_old`: ACTIVE blue is probed (`findmnt`, `systemctl is-active`) and stop/started when unmounted or inactive; B1 requires `service_units` enabled; AC §3.4 now says never edit fstab, never disable; `rollback_hooks` stays optional defence. Converges from "quiesced but ACTIVE" (§7 row added). |
+| SRE-R-2 | **resolved** | Local monotonic deadline from `t_send` of the claim/heartbeat (conservative: never later than the DB expiry); checked before every mutating call (keystoneauth request hook, so raw `session.post` is covered), every subprocess spawn and every commit; 0-row heartbeat stops at once; SIGSTOP/SIGCONT in the CI list. The added `takeover_delay` narrows the in-flight window further. |
+| SRE-R-3 | **resolved** | `first_use = false` hard-wired in the strategy, value recorded in W6 evidence, AC §3 extra-vars and ADR-0004 updated; `true` reserved for a future provisioning strategy. |
+| SRE-R-4 | **resolved** | `lease_owner` (per-process UUID) in claim, heartbeat and fenced-commit guards; ownership treated as unknown after a lost connection; HA posture stated (single instance + backups, or synchronous replication; async failover unsupported). |
+| SRE-R-5 | **resolved** | Own process group, runner `--timeout`, `PR_SET_PDEATHSIG`, minimal init, sweeper kills recorded process groups before any claim; CI test added. See SRE-R-28 for one implementation caveat. |
+| SRE-R-6 | **resolved** | `max_window_duration` is a required policy field, enforced before W2–W8 (state known → restore), forward from W9; worst-case window shown in `blast_radius` and the G2 approval text. |
+| SRE-R-7 | **resolved** | W4 failure/deadline → auto restore "snapshot failed"; B1 pre-checks Cinder `snapshots`/`gigabytes` when on; stuck snapshot reported, never deleted. |
+| SRE-R-8 | **resolved** | B6 `prepare_automation`: one verified clone per run, local copies per attempt, no Galaxy, no submodules; W1 claim checks credential `expires_at` and pre-warms the token. See SRE-R-28 (pre-warm outside the DB transaction). |
+| SRE-R-9 | **resolved** | `current_truth` + `current_truth_at` on the run, `POST …/actions/probe` (read-only, no TC), `available_actions[]` with effects, lease/heartbeat/`last_seen_at` on running steps, sample alert rule file shipped, new metrics (`ovlm_runs_needing_attention{phase,reason}`, budget, heartbeat age, auto-restore). |
+| SRE-R-10 | **resolved** | X1 probe now requires volume `in-use` on green, green `ACTIVE`, roles `retained`/`current`, FIP not on blue, a fresh `healthcheck.yml` within `retire.health_max_age`, no Restoring in the run's history; evidence shown at G3. |
+| SRE-R-11 | **resolved** (differently) | `NoValidHost` is now fatal like any `ERROR`; OVLM never auto-deletes a green and never retries `create_green` while one exists. Simpler and safer than the allowlist I proposed. Ledger uniqueness is partial over `intended`/`present`. |
+| SRE-R-12 | **partly resolved** | `needs_human(reason=api_unreachable)` is re-probed automatically and self-resolves. The precedence between "continue forward because the probe shows the step's goal reached" and "restore per the §4.1 row" is not stated; see SRE-R-26. |
+| SRE-R-13 | **resolved** | B8 asserts no FIP on green's port; S9 verifies the identity field equals blue. |
+| SRE-R-14 | **resolved** | `downtime_started_at` written in the W1 claim transaction (first claim only); policy window closing mid-window: run continues, restore may run outside the window. |
+| SRE-R-15 | **resolved** | Per-tag add and metadata merge forms only, read-back verification of foreign markers, limits checked; verb semantics AS → lab item listed. |
+| SRE-R-16 | **resolved** | Green's server and port locked in the B4 success transaction. |
+| SRE-R-17 | **resolved** | S10 `lock_green` with `ovlm:restored:<run>`; Discarding unlocks, checks no volume attached, deletes. |
+| SRE-R-18 | **resolved** | Overlay drawn per phase (`NH_Window`, `NH_Restore`, `NH_Retire`); "retry-step retries the current step in the current phase". |
+| SRE-R-19–22 | **recorded as V1 backlog** in ADR-0004 | As intended. |
+
+Q5 (auto restore default `true`) and Q6 (snapshot default off): positions unchanged. The closed table §4.1, the
+"exactly one automatic restore per run" rule, the fresh-probe gate and the G2 statement meet the conditions I set.
+The switch moving from config to a policy field bound into the plan hash is an improvement: the approver sees it.
+
+### D.3 New findings introduced by the revision
+
+| ID | Sev | Artefact + section | Failure scenario | Required change (minimum) |
+|---|---|---|---|---|
+| SRE-R-23 | **medium** | renewal-workflow.md §3.1 (re-validation "before W2, W3, W5, W9"), §4.1 closed table | The G2 evidence re-check fails inside the window (a role-binding-history row missing after a migration, a step-up record purged by retention, a bug in the recomputed requester set). Blue is SHUTOFF, the volume may be `available`, and the rule is "never proceed" → `needs_human(reason=approval_evidence_invalid)`. The state is fully known and reversible, yet no §4.1 row covers it, so the outage lasts until a human acts. | Add a row: `approval_evidence_invalid` at W2–W8 with state known by fresh probe → auto restore (recovery of the prior state needs no approval, security-model.md §7.1 "revert: none"), with the security audit event the design already specifies and `ovlm_approval_evidence_invalid_total` incremented; at W9 (service has run on green) the D-1 = B rule applies: `needs_human` + page unless a W4 snapshot exists. The revision's new `needs_human_reason` column already has the value `approval_evidence_invalid`; the alert file must page on it while `phase=window`. Also state which of the seven checks are *historical* (1–7 all are, since they use `decided_at` and history tables) so that a legitimate later change (role revoked after approval) can never trip the check mid-outage. |
+| SRE-R-24 | **medium** | ADR-0003 "Human waits"; data-model.md §8 `run_signal` (`consumed_at`, `outcome`); api-design.md §3.7 | An operator sends `rollback` at 3 a.m. inside the window. The worker marks the signal `consumed_at`, then dies before the resulting state change commits (or its fenced commit is rejected). The signal is consumed with no effect; the operator sees "accepted" and waits. Signals are now the only path for abort/rollback/revert/retry/mark-resolved, so a lost signal is a lost safety action. | `consumed_at` and `outcome` are written in the **same fenced transaction** as the state change the signal causes; a signal whose transaction did not commit stays unconsumed and is picked up again (idempotent by `run_signal.id`). Until consumed, the run body and `current_truth` show "signal pending: rollback requested by X at T"; the alert file includes "signal pending longer than `poll.initial_interval × k`". `abort` keeps its flag semantics but the flag is set by that same transaction. |
+| SRE-R-25 | low | renewal-workflow.md §2 (`Requested` state), ADR-0003 "Run admission", api-design.md §3.6 | No worker is running (crashed, draining for an upgrade): runs sit in `requested` indefinitely with a 202 already returned; the api's lock pre-check is advisory, so the operator has no signal that nothing admitted the run. Also, `renewal.max_concurrent_runs` is "checked at run start" — that is now admission, in the worker, and must be stated there. | `requested` counts as non-terminal for the per-service partial unique index; alert rule "run in `requested` older than N minutes"; `available_actions` on a `requested` run shows "waiting for worker admission; last worker heartbeat T"; move the concurrency cap to the admission transaction explicitly. |
+| SRE-R-26 | low | renewal-workflow.md §5 "OpenStack API outage", §4.1 last row | W3 `detach_volume` times out during an API outage; on re-probe the volume is `available`. The text offers "the §4.1 row of the failed step, or retry of the step" without precedence. Row W3-stuck says needs_human, row W3-rolled-back says restore, but the correct action here is to continue forward to W4/W5. | State the precedence for a self-resolved `api_unreachable`: (1) if the fresh probe shows the failed step's goal reached → mark it succeeded and continue; (2) else if the probed state matches a "yes" row → restore; (3) else stay `needs_human` with the probe attached. The budget check applies before continuing. |
+| SRE-R-27 | low | ADR-0003 "Takeover delay"; renewal-workflow.md §5 first row | "waits `takeover_delay` before its first mutating call, so … the probe sees it": if the probe runs *before* the delay, it can observe pre-landing state and then act on stale evidence after the delay. | State explicitly: the new attempt waits the delay **first**, then probes, then acts. (One sentence.) |
+| SRE-R-28 | low | ADR-0003 "Subprocess containment"; renewal-workflow.md §2.2 "W1 claim checks" | (a) `PR_SET_PDEATHSIG` fires when the *thread* that created the child exits, not only when the process dies (AS, Linux semantics); a worker that spawns from a thread pool can lose the signal when that thread is recycled while the process lives, or get a spurious kill when the thread exits normally. (b) "Keystone token pre-warmed" is listed among checks done "in the claim transaction": a network call inside a DB transaction holds row locks for the duration of a Keystone round trip. | (a) Spawn from a dedicated long-lived thread per subprocess, or set `PR_SET_CHILD_SUBREAPER` on the worker and rely on the sweeper + runner `--timeout`; note it as an implementation constraint. (b) Pre-warm the token before opening the claim transaction; only the result (token valid until T) is checked inside it. |
+| SRE-R-29 | low | renewal-workflow.md §4.1 row "W2 `stop_old` exhausted → yes" | The auto restore from a failed Nova stop runs S6, whose "boot-cycle" is the same Nova stop that just failed; it consumes the single automatic restore and ends in `NH_Restore`. Harmless (blue is still ACTIVE, volume on blue, units stopped) but the operator must understand that `retry-step` in `NH_Restore` is the way on. | Add to the row: "restore will most likely fail at S6 for the same reason; the run ends in `NH_Restore`; `available_actions` must show retry-step (S6) and the admin cause (task state, lock)". Optionally: W2 exhausted with a 409 lock → `needs_human` directly (admin lock, §6), skipping the pointless restore. |
+| SRE-R-30 | low | ADR-0004 D-1 (applied in `40e959d`: "keeps the snapshot as the copy of the pre-handoff data until retirement"); renewal-workflow.md §4 "Restore carries data forward"; G2 text "restored automatically; the pre-handoff snapshot is kept" | With a snapshot on, the text implies the snapshot makes an automatic restore recoverable by OVLM. OVLM creates no Cinder volume in MVP (EXP-01: no default volume type), so a snapshot can only be used by a human creating a volume from it and re-attaching by hand; the automatic restore itself still starts blue on green's data. **Still open after B was applied.** | Say so where the snapshot is offered (profile help, G2 statement, D-1): "the snapshot is a way back for a human with Cinder rights, not something OVLM restores from; the automatic restore starts the old VM on the data as the new VM left it". Record the snapshot id in `current_truth` and in the `restore.auto` audit row. |
+| SRE-R-31 | low | renewal-workflow.md §4.1 D-1 text ("keeps the snapshot … until retirement"); §2.3 X1 (snapshot deleted at retirement); §4 Discarding | After an automatic restore under B the run ends `Restored → Discarding → RolledBack`; there is no retirement, so the snapshot's lifecycle is unspecified: it is neither deleted by a step nor referenced by a current resource, so the orphan report (report-only) will list it forever, or a later cleanup deletes the only pre-handoff copy. | State: after a restore the snapshot is kept, shown in `current_truth` and the run's final summary with "pre-handoff copy of volume X, taken at T; release it manually once blue is confirmed healthy", excluded from the orphan report for `snapshot.retain_after_restore` (policy, default: until the next successful renewal of the service), then reported as an orphan candidate. Never deleted automatically. |
+
+### D.4 Maintainer decision D-1 (automatic restore after W7–W10)
+
+**Decided: B** (maintainer, 2026-11-04, relayed by Agent 1; applied in `40e959d` on `claude/ovlm-architect`).
+**I accept B.** It is the option I would have recommended, for the reasons below. Check of the applied text against
+my four conditions:
+
+| Condition | Status in `40e959d` |
+|---|---|
+| 1. G2 statement says which rule applies to this run | **Met**: renewal-workflow.md §3 and api-design.md `blast_radius` carry "stops and pages an operator" or "restored automatically; snapshot kept". |
+| 2. Paging mandatory for the post-start `needs_human` state | **Met**: `OvlmPostStartFailure` alert, `needs_human_reason=post_start_failure`, architecture.md §6 "paging is mandatory", install guide to state it. |
+| 3. `available_actions.rollback` at that state carries the consequence "blue will start on data the new VM may have changed; no snapshot exists" | **Partly**: the D-1 text lists retry-step / rollback / manual fix, without the consequence text. One sentence in §6.1 `available_actions` closes it. |
+| 4. Snapshot described honestly as a manual way back; snapshot id recorded | **Open**: see SRE-R-30 (and SRE-R-31 for the snapshot's lifecycle after a restore). |
+
+Under B, the rows of §4.1 that changed are consistent with each other (W7–W10 and the budget breach before W7/W8
+all follow the same rule), with SRE-R-7 (a failed W4 restores before any data exposure) and with the "one automatic
+restore per run" rule. New under B and acceptable: a W10 failure without a snapshot leaves the FIP on a green that
+does not answer externally, with blue SHUTOFF, until a human acts; that is the availability cost the maintainer
+accepted, and it is paged.
+
+Reasoning as SRE (written before the decision, kept as the record):
+
+- Rows before W7 move metadata only (power state, attachments, a FIP binding); the probe-first restore cannot meet
+  changed data there, so automating it trades nothing. From W7 on, green's software has had the volume read-write.
+  OVLM has no signal that tells "wrote nothing" from "ran a half migration" (a marker checksum or `updated_at`
+  proves neither; AS). The restore then starts blue's version on that data. If that goes wrong it is the one
+  failure in the whole design that no retry, probe or human action can reverse without a copy. The method's rule
+  applies: a judgement that accepts data-integrity risk stays human unless explicitly delegated.
+- **B is explicit delegation**: turning `snapshot_before_handoff` on is the owner saying "automatic recovery is
+  worth the snapshot time, and I have a way back". **A** delegates it silently through a default. **C** is also
+  explicit but adds MVP scope for an attestation OVLM cannot verify, and an attestation is not a way back.
+- The cost of B is availability: without a snapshot, a W7–W10 failure is an outage until a human acts. That is the
+  same class as the existing `needs_human` rows (W1, W6, stuck volumes), which the design already accepts, and it is
+  bounded by paging, not by luck.
+
+Conditions for B (the veto is not exercised; with B chosen, 3 and 4 remain required changes):
+
+1. The G2 statement and `blast_radius` say, when the snapshot is off: "if the service fails to start or verify on
+   the new VM, OVLM will **not** restore automatically; an operator must act" (SEC-R-30 condition 1 already requires
+   that what the approver sees is what the automation does).
+2. The alert "needs_human while `phase=window`" is documented as **mandatory** for any installation using B
+   without snapshots (architecture.md §6 alert file), since the design now relies on it for availability.
+3. At that `needs_human`, `available_actions` shows `rollback` with the consequence text "blue will start on data
+   the new VM may have changed; no snapshot exists", so the human decision is informed (SRE-R-9 c).
+4. With the snapshot on, the automatic restore records the snapshot id as the way back and states that using it is
+   a manual Cinder operation (SRE-R-30); the `max_window_duration` worst-case includes the snapshot deadline.
+
+(Option A is no longer under consideration; the earlier note on how A could have been made acceptable is dropped.)
+
+### D.5 Lab items added by the delta
+
+- Approval-evidence invalid injected at W3 (delete the step-up record) → automatic restore, security audit event (SRE-R-23).
+- Kill the worker between signal consumption and the state commit → the `rollback` signal is re-applied, not lost (SRE-R-24).
+- API outage across the W3 deadline, then API back with the volume `available` → run continues to W5, no restore (SRE-R-26).
+- Worker started with no running admission: run stays `requested`, alert fires (SRE-R-25).
+
+> Decision support only. State-changing steps above require approval by the
+> accountable owner and should be executed under your change process.
