@@ -9,7 +9,7 @@
 > **Revision 2026-11-04**: restore converges from "quiesced but ACTIVE" (SRE-R-1); `first_use` always false (SRE-R-3);
 > automatic restore is a policy field with a closed trigger table and one attempt (SEC-R-30, SRE Q5); snapshot failure
 > restores (SRE-R-7); window budget enforced (SRE-R-6); EXP-01 results (lab-observed tags, no volume creation, no
-> temporary FIP confirmed). Open: maintainer decision **D-1** (below).
+> temporary FIP confirmed). Maintainer decision **D-1: B** (below).
 
 ## Context
 
@@ -63,7 +63,7 @@ FR-REN-2 fixes one MVP strategy. Tags below are Agent 3's (openstack-integration
 | Blue's fstab and units | Quiesce stops units and unmounts but **does not remove** the fstab entry (must be by UUID/LABEL with `nofail`) and **never disables** units; readiness requires `service_units` enabled. Restore step S6 ensures blue has **booted since quiesce**: if blue is still ACTIVE with the volume unmounted or units inactive, it stops and starts blue (SRE-R-1). Nova stop + start was chosen over `reboot HARD` because both are already in the write credential's operation set. | Revert = attach to stopped blue, boot blue; boot remounts and restarts enabled units. Converges without `rollback_hooks`. |
 | Data volume formatting | The strategy always passes `first_use = false`; a blank volume in a renewal is needs_human. `first_use = true` is reserved for a future initial-provisioning strategy with its own gate (SRE-R-3). | Closes the only `mkfs` path for renewals. |
 | Rollback / revert | One **convergent restore sequence** (renewal-workflow.md §4): each step probes and skips if already satisfied, target = "volume on blue, blue ACTIVE and healthy, FIP on blue's port, green stopped". Used for in-window rollback and post-cutover revert until retirement. | One code path, testable from every intermediate state. |
-| Automatic vs human rollback | Build-phase failure (incl. `NoValidHost`): run stops `failed` with green kept for diagnosis; operator rollback (typed confirmation) deletes green (security-model.md §7.1). In-window failure: automatic restore only for the rows of the **closed table** (renewal-workflow.md §4.1), controlled by the **policy** field `auto_restore_in_window` (default true; bound through the policy version in the plan hash, copied into the plan, shown at G2). One automatic restore per run; a restore failure is `needs_human`; never re-enter the window automatically. Ambiguous state (quiesce failure, `data_attach` needs_human, stuck volume, unknown FIP state, API unreachable): stop, `needs_human`. Failures after the service started on green (W7–W10): **open maintainer decision D-1**. After cutover: revert only on operator request. | Contract §6 classes; data safety beats speed; an automatic destructive sequence must be bound to what the approver saw (SEC-R-30). |
+| Automatic vs human rollback | Build-phase failure (incl. `NoValidHost`): run stops `failed` with green kept for diagnosis; operator rollback (typed confirmation) deletes green (security-model.md §7.1). In-window failure: automatic restore only for the rows of the **closed table** (renewal-workflow.md §4.1), controlled by the **policy** field `auto_restore_in_window` (default true; bound through the policy version in the plan hash, copied into the plan, shown at G2). One automatic restore per run; a restore failure is `needs_human`; never re-enter the window automatically. Ambiguous state (quiesce failure, `data_attach` needs_human, stuck volume, unknown FIP state, API unreachable): stop, `needs_human`. Failures after the service started on green (W7–W10): `needs_human` with paging, unless a W4 pre-handoff snapshot was taken, then automatic restore (**D-1 = B**). After cutover: revert only on operator request. | Contract §6 classes; data safety beats speed; an automatic destructive sequence must be bound to what the approver saw (SEC-R-30). |
 | Window budget | Policy field `max_window_duration`, required; enforced before W2–W8 (state known → restore); from W9 the run finishes forward. G2 shows the worst-case window (Σ step deadlines W1–W10 + S1–S10) (SRE-R-6). | A threshold that only alerts is not a stop condition. |
 | Number of data volumes | **Exactly one** data volume, or **zero** for profiles declaring `stateless_service: true` (handoff steps skipped). N volumes = V1. | Sequential multi-volume handoff multiplies partial states (2 of 3 moved) for no MVP value. |
 | Root disk | Green boots **from image** (local root disk). Blue may be boot-from-volume: its root volume is never touched by handoff; at retirement OVLM reports a leftover root volume (`delete_on_termination=false`) and does not delete it. Boot-from-volume **green** = V1. | Simplest; but see risk below (clouds with only zero-disk flavors). |
@@ -103,7 +103,10 @@ The maintainer accepted the three points raised by Agent 2:
    on unsafe lifecycle operations). If the SRE review rejects this default, the question goes back to the maintainer.
 3. **After a revert:** the new VM stays stopped until an operator discards it.
 
-## Open maintainer decision D-1 (2026-11-04): automatic restore after the service ran on green
+## Maintainer decision D-1 (2026-11-04): automatic restore after the service ran on green
+
+**Decided by the maintainer, 2026-11-04: B** (relayed by Agent 1). Applied in renewal-workflow.md §4.1, §7 and
+architecture.md §6 (paging mandatory for this state).
 
 **Question.** When a failure happens at W7 `start_service_green`, W8 `healthcheck_green`, W9 `move_fip` or W10
 `verify_external` (the service has run on the data volume on green), should OVLM restore to blue automatically?
@@ -118,8 +121,8 @@ should cover W7–W10.)
 
 **Recommendation: B.** The rows before W7 move only metadata (attachments, power state), so an automatic restore
 there cannot meet changed data. From W7 on it can, and only a snapshot makes that case recoverable. The consequence to
-accept is a longer outage for profiles without a snapshot. Whatever the answer, the switch stays a policy field bound
-into the plan hash. Until the maintainer decides, option A (the earlier design) stays in force.
+accept is a longer outage for profiles without a snapshot. The switch stays a policy field bound into the plan hash.
+Option A no longer applies.
 
 ## Backlog (V1) from the reviews
 
