@@ -780,3 +780,26 @@ Renewal: implemented and tested through cutover, restore and discard. **Still to
 
 **Next:** an independent Fable review of the renewal code in a fresh session (SRE + security lenses), then a PR to
 `main`, then the Felcloud acceptance campaign through `ozar-dev`.
+
+## Renewal finished, wave 5 — 2026-11-04 22:10 UTC
+
+**Renewal finish (Opus, $15.47) merged into the working branch:**
+- the strategy is registered in the worker;
+- the real W4 snapshot is implemented (OVLM never deletes it);
+- a full renewal runs **through the real worker loop with a worker crash mid-window**, and the restarted worker
+  resumes without re-sending the volume attach.
+
+**Integration fix by Agent 1:** the UI test caught a new `needs_human` reason (`snapshot_adoption_refused`) with no
+operator wording, now added. **Verified:** lint clean, 1127 unit and 414 integration tests pass.
+
+**Blockers before the Felcloud lab:**
+- no encrypted credential store yet;
+- the worker image has no `ssh`/`git`.
+
+**Started (parallel, disjoint files):**
+- Encrypted credential store + project connections (also closes SEC-C-8), Opus:
+  https://claude.ai/code/session_016ti9vzvtr3eKwtKW8Zsf9r (`claude/ovlm-credential-store`).
+- Worker image `ssh`/`git`, public automation re-verify API, doc alignment (X1 keeps the snapshot, probe identity
+  contract), Sonnet: https://claude.ai/code/session_016ti9w331zgube8YxrVFJcc (`claude/ovlm-image-docs`).
+- **Independent review of the renewal code** (SRE + security lenses, fresh Fable session, focused scope):
+  https://claude.ai/code/session_016ti9vzJHS8tvkKt1uiSYrX (`claude/ovlm-review-renewal`).
