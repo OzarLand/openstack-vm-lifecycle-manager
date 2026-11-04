@@ -803,3 +803,16 @@ operator wording, now added. **Verified:** lint clean, 1127 unit and 414 integra
   contract), Sonnet: https://claude.ai/code/session_016ti9w331zgube8YxrVFJcc (`claude/ovlm-image-docs`).
 - **Independent review of the renewal code** (SRE + security lenses, fresh Fable session, focused scope):
   https://claude.ai/code/session_016ti9vzJHS8tvkKt1uiSYrX (`claude/ovlm-review-renewal`).
+
+## Renewal review and wave 5 results — 2026-11-04 22:35 UTC
+
+- **Independent renewal review (Fable, fresh session):** accept with required changes.
+  - REN-1 (High): a refused W1 claim after quiesce could route back to the build phase, where a rollback would leave
+    blue stopped.
+  - REN-2 (High, security): a B5 re-run could fall back to the bootstrap key after rotation.
+  - Plus mediums and lows.
+  - Fix round (Opus): https://claude.ai/code/session_016ti9vzmwavtQYQf87fVLGZ (`claude/ovlm-fix-renewal`).
+- **Merged into the working branch:** worker image with `ssh`/`git`, the public `reverify_checkout`, doc alignment
+  (X1 keeps the snapshot, probe identity contract, `sudo NOPASSWD` open for security). 1131 unit tests pass.
+- **Credential store agent:** blocked on a permission prompt (a harmless edit of `Makefile`, `compose.yaml` and the
+  worker entrypoint, which wire the KEK). It needs the maintainer's approval in its own conversation.
