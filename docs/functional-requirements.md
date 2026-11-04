@@ -63,7 +63,7 @@ The first instance is created from a profile with no previous VM. Planned after 
 | ID | Requirement | Priority |
 |---|---|---|
 | FR-REG-1 | Register an observed server as a **managed VM**, linked to a **service** (the long-lived identity that outlives VMs). | MVP |
-| FR-REG-2 | A **profile** describes desired state: flavor, image (by name or property, resolved at renewal time), networks and ports, security groups, data volumes (by ID) with mount points, automation reference, health check, cutover method and renewal strategy. | MVP |
+| FR-REG-2 | A **profile** describes desired state: flavor, image (resolved at **plan** time and included in the plan hash), networks and ports, security groups, data volume (by Cinder ID, mounted in the guest by filesystem UUID or label, never by device name), guest access (SSH user, host-key policy), automation reference (commit SHA), health check, cutover method and renewal strategy. | MVP |
 | FR-REG-3 | Profiles are versioned. A renewal records the profile version it used. | MVP |
 | FR-REG-4 | Desired state (profile) and observed state (inventory) are stored and displayed separately. | MVP |
 | FR-REG-5 | Application dependencies and required external services are declared in the profile (free-form plus typed endpoint checks). | V1 |
@@ -102,13 +102,13 @@ The first instance is created from a profile with no previous VM. Planned after 
 | ID | Requirement | Priority |
 |---|---|---|
 | FR-REN-1 | Execute the renewal as a durable, step-by-step workflow (state machine in [renewal-workflow.md](renewal-workflow.md)). | MVP |
-| FR-REN-2 | One strategy in the MVP: **blue/green with data-volume handoff and floating IP cutover** (decision in [ADR-0004](decisions/ADR-0004-mvp-renewal-strategy.md)). The strategy interface allows rolling, stop-and-rebuild and manual-assisted later. | MVP |
+| FR-REN-2 | One strategy in the MVP: **blue/green with data-volume handoff and floating IP cutover** ([ADR-0004](decisions/ADR-0004-mvp-renewal-strategy.md)). MVP scope limits: at most **one** data volume (or a stateless service), the replacement boots from an image (not from a volume), the service must be reached through a floating IP, and no temporary floating IPs are used. The strategy interface allows rolling, stop-and-rebuild and manual-assisted later. | MVP |
 | FR-REN-3 | Every step is idempotent and resumable after a worker or database restart. Before acting, it checks the real OpenStack state. | MVP |
-| FR-REN-4 | Approval gates: before start (plan), before cutover, before retirement, as the policy requires. | MVP |
-| FR-REN-5 | Rollback is available from every step up to and including cutover. After cutover, until retirement, a "revert" action moves the service back to the retained VM. | MVP |
+| FR-REN-4 | Approval gates: before start (plan), **before the downtime window** (gate G2, placed before quiesce of the old VM; it is also the cutover gate, and there is no gate inside the window), and before retirement, as the policy requires. | MVP |
+| FR-REN-5 | Rollback is available from every step up to and including cutover, and converges to the old VM serving again. After cutover, until retirement, a "revert" action does the same. Stuck volume states, admin-set locks and down compute hosts cannot be resolved by OVLM's credentials: the run stops and asks a human OpenStack admin. | MVP |
 | FR-REN-6 | Destructive steps (detach of the production data volume, cutover, deletion of the old VM) are clearly labelled. Each requires an explicitly authorized actor and the write credential. **Ownership guard:** before every mutating call, the target must be registered in the OVLM database **and** carry the OVLM tag. Each approval is bound to a hash of plan, profile version, automation commit SHA and target IDs, so a changed plan voids it. | MVP |
 | FR-REN-7 | The old VM is retained (stopped) for the policy's retention period and deleted only after approval. It is locked **only after** the data volume has left it, and OVLM unlocks it before any revert: a locked server rejects attach, detach and start from a non-admin. | MVP |
-| FR-REN-8 | An operator can pause a run, resume it, or abort it into rollback. | MVP (abort and resume), V1 (pause) |
+| FR-REN-8 | An operator can pause a run, resume it, or abort it into rollback. Abort takes effect at the next step boundary. A data-phase Ansible run (quiesce, data attach) is never interrupted midway. | MVP (abort and resume), V1 (pause) |
 
 ### FR-AUD — Audit
 
@@ -124,14 +124,14 @@ The first instance is created from a profile with no previous VM. Planned after 
 |---|---|---|
 | FR-UI-1 | Pages: dashboard (counts, upcoming renewals, runs needing attention), inventory list and VM details (observed vs desired), profiles, policies, readiness results, renewal plan, run timeline with step evidence, audit. | MVP (inventory, VM details, readiness, run timeline), V1 (the rest) |
 | FR-UI-2 | Every destructive action shows its blast radius and needs a typed confirmation: the VM name **plus the last 6 characters of its server ID**, because Nova names are not unique. The check is done on the server side, and the API requires the same field. | MVP |
-| FR-UI-3 | A REST API with the same capabilities; the UI uses no private API. **Exception:** approvals and destructive confirmations are accepted only from an interactive human session that re-authenticated recently, never from an API token or an automated agent ([security-model.md](security-model.md)). | MVP |
+| FR-UI-3 | A REST API with the same capabilities: the UI offers nothing the API lacks, and CI checks it. **Exception:** approvals and destructive confirmations are accepted only from an interactive human session that re-authenticated recently, never from an API token or an automated agent ([security-model.md](security-model.md)). | MVP |
 
 ## Non-functional requirements
 
 | ID | Area | Requirement |
 |---|---|---|
 | NFR-1 | Simplicity | Modular monolith: one codebase, one container image, two process roles (api, worker), PostgreSQL. No message broker, no Redis, no Kubernetes. |
-| NFR-2 | Reliability | Workflow state is in PostgreSQL. A worker crash at any point leaves a resumable run. No step runs twice concurrently (lease + row lock). |
+| NFR-2 | Reliability | Workflow state is in PostgreSQL. A worker crash at any point leaves a resumable run. No step runs twice concurrently: lease plus row lock, and a **fencing token** so a stale worker cannot commit. OpenStack side effects themselves cannot be fenced, so every step probes the real state before acting. |
 | NFR-3 | Idempotency | Every OpenStack-mutating step is "observe, then act if needed, then verify". Resources created by OVLM carry ownership metadata (run ID) so retries find instead of re-create. |
 | NFR-4 | Security | Separate read-only and write credentials; secrets encrypted at rest and never logged; RBAC roles `viewer`, `operator`, `approver`, `admin`, scoped per project; separation of duties (a requester cannot be the only approver), configurable for plan and cutover gates only; **retirement can never be self-approved**. The `api` process never calls OpenStack and cannot decrypt secrets. |
 | NFR-5 | Auditability | All state changes are audited (FR-AUD). Audit rows are append-only at the database permission level. |
