@@ -598,3 +598,26 @@ They are replaced by a local watcher that wakes Agent 1 when an agent branch rec
 - **Incident:** a `git merge` of the security-review branch after the squash left conflict markers, which were
   committed to the working branch (not to `main`). The working branch was reset to `main` and the review file was
   taken from the agent branch alone. Nothing reached `main`.
+
+## Batch 2 integrated — 2026-11-04
+
+The following are brought into the working branch for PR #3:
+- workflow engine core (E5-1, Opus, merged from its rebased branch);
+- auth, TOTP and audit (E3-1/E3-4, Sonnet, merged);
+- OpenStack adapter, inventory and registration (E2-1..3, Sonnet, cherry-picked, because the branch predated the
+  squash of #1).
+
+Integration work by Agent 1:
+- resolved the conflicts in `settings.py`, `cli.py`, `app.py`, `pyproject.toml` and the lock files;
+- added the merge migration `0003_merge`, which joins the four module heads.
+
+An integration sub-agent (Sonnet) replaced the inventory module's placeholder auth with the real `require_role`. The
+auth module's own test had caught it: the inventory routes returned 503 instead of enforcing CSRF. The same agent wired
+the registration audit.
+
+**Verified by Agent 1:** lint clean, 206 unit tests and 168 integration tests (PostgreSQL 16) pass.
+
+**Known gap (AUTH-HOOK, E3-2):** list results are not yet filtered by project scope, so a project-scoped viewer can
+see every project.
+
+**In parallel:** the SRE reviewer (Fable) is reviewing the engine code.

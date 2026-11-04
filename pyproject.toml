@@ -17,6 +17,11 @@ dependencies = [
   "pydantic-settings>=2.6",
   "prometheus-client>=0.21",
   "jinja2>=3.1.4",
+  "argon2-cffi==25.1.0",
+  "pyotp==2.9.0",
+  "cryptography==46.0.3",
+  "python-multipart==0.0.20",
+  "openstacksdk==4.22.0",
 ]
 
 [dependency-groups]
@@ -54,6 +59,8 @@ select = ["E", "F", "I", "UP", "B", "S", "SIM", "T20"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106", "S603", "S607"]
 "migrations/**" = ["S608"]
+# SQL fragments interpolated there are module constants (column lists), never input.
+"src/ovlm/workflow/engine.py" = ["S608"]
 
 [tool.mypy]
 python_version = "3.12"

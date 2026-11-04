@@ -15,6 +15,8 @@ from fastapi.staticfiles import StaticFiles
 
 from ovlm import __version__
 from ovlm.api.health import DbReadinessProbe, ReadinessProbe
+from ovlm.api.routes_auth import router as auth_router
+from ovlm.api.routes_inventory import router as inventory_router
 from ovlm.config import Settings
 from ovlm.db.engine import make_engine
 from ovlm.observability.context import bind_context
@@ -29,6 +31,13 @@ _CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
     "connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 )
+
+
+def _loggable_path(request: Request) -> str:
+    """The route template (``/enrol/{link}``), not the raw path: path parameters can be secrets (one-time links)."""
+    route = request.scope.get("route")
+    template = getattr(route, "path", None)
+    return template if isinstance(template, str) else "<unmatched>"
 
 
 def create_app(
@@ -94,7 +103,7 @@ def create_app(
                 "request",
                 extra={
                     "http_method": request.method,
-                    "path": request.url.path,
+                    "path": _loggable_path(request),
                     "status": response.status_code,
                     "duration_ms": round((time.perf_counter() - started) * 1000, 1),
                 },
@@ -117,4 +126,6 @@ def create_app(
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.include_router(ui_router)
+    app.include_router(auth_router)
+    app.include_router(inventory_router)
     return app
