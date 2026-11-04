@@ -107,6 +107,21 @@ class RenewalSettings(_Section):
     max_concurrent_runs: int = Field(default=5, ge=1)
 
 
+class AuthSettings(_Section):
+    """Authentication knobs (security-model.md section 2). Defaults are the documented values."""
+
+    #: File holding the Fernet key that encrypts TOTP secrets at rest (Docker secret, api only).
+    #: Without it TOTP enrolment and verification refuse to work (fail closed).
+    totp_key_file: Path | None = None
+    session_idle_minutes: int = Field(default=30, ge=1, le=24 * 60)
+    session_absolute_hours: int = Field(default=12, ge=1, le=24 * 7)
+    enrolment_link_hours: int = Field(default=72, ge=1, le=24 * 14)
+    #: Failed attempts per account / per source address in the window before backoff applies.
+    login_failure_threshold: int = Field(default=5, ge=1)
+    login_ip_failure_threshold: int = Field(default=20, ge=1)
+    login_window_minutes: int = Field(default=15, ge=1)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="OVLM_",
@@ -127,6 +142,7 @@ class Settings(BaseSettings):
     admission: AlertSettings = AlertSettings()
     signal: AlertSettings = AlertSettings()
     renewal: RenewalSettings = RenewalSettings()
+    auth: AuthSettings = AuthSettings()
 
     @model_validator(mode="after")
     def _check(self) -> Settings:
