@@ -51,6 +51,24 @@ manifest = json.loads(
 )
 assert manifest["collection_info"]["version"] == "2.2.2", manifest["collection_info"]["version"]
 
+# ssh (ansible's connection, ssh-keyscan/ssh-keygen for host-key pinning) and git (the verified clone) are shipped.
+for binary, probe in (
+    ("ssh", ["-V"]),
+    ("ssh-keyscan", ["-V"]),
+    ("ssh-keygen", ["-?"]),
+    ("git", ["--version"]),
+):
+    path = shutil.which(binary)
+    assert path, f"{binary} is missing from the worker image"
+    # as the ansible user too: it runs ssh, so it must be able to execute these
+    proc = subprocess.run(  # noqa: S603
+        [path, *probe], user="ovlm-ansible", group="ovlm-ansible", extra_groups=[],
+        env={"HOME": "/nonexistent"}, capture_output=True, text=True, timeout=30, check=False,
+    )  # fmt: skip
+    assert proc.returncode in (0, 1) and (proc.stdout + proc.stderr).strip(), (
+        f"{binary} does not run: {proc.stderr}"
+    )
+
 # The root filesystem is read-only: like the runner, use a directory under the tmpfs run root, shared with the
 # runner user through its group (the worker is a member of ovlm-ansible; it owns the directory).
 scratch = pathlib.Path("/run/ovlm/smoke")

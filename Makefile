@@ -76,9 +76,9 @@ smoke:  ## Assertions on a running stack (`make up` first); used by CI
 	echo "== non-root, distinct users"; \
 	test "$$(docker compose exec -T api id -u)" = 10001; \
 		docker compose run --rm --no-deps --entrypoint id api ovlm-ansible | grep -q 'uid=10002'; \
-	echo "== worker image: ansible runs as ovlm-ansible, worker holds only setuid/setgid/kill"; \
+	echo "== worker image: has ssh, ssh-keyscan, git; ansible --version runs as ovlm-ansible; worker holds only setuid/setgid/kill"; \
 	docker compose exec -T worker /usr/local/bin/ovlm-worker-entrypoint -- python - < tests/smoke/worker_checks.py; \
-	echo "== api image: no ansible"; \
+	echo "== api image: no ansible, ssh or git"; \
 	docker compose exec -T api python - < tests/smoke/api_checks.py; \
 	echo "== secret isolation: api/worker never see the owner secret"; \
 	test "$$(docker compose exec -T api ls /run/secrets)" = db_api_password; \

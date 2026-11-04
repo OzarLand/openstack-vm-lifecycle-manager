@@ -88,6 +88,16 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
 # --- worker: automation dependencies, pinned collection, and the launcher that gives the worker (uid ovlm) exactly
 # CAP_SETUID/SETGID/KILL as ambient capabilities so it can run ansible-runner as `ovlm-ansible` (automation-contract.md 11).
 FROM base AS worker
+# ssh/ssh-keyscan/ssh-keygen (host-key pinning, ansible's ssh connection) and git (the verified clone) belong to the
+# worker image ONLY: the api image gets neither (checked by `make smoke`). Pinned to the Debian release's upstream
+# series (bookworm: openssh 9.2, git 2.39), not to the -deb12uN revision: that one disappears from the archive with
+# every security update and would break rebuilds. The base image digest above fixes the rest of the OS.
+ARG OPENSSH_CLIENT_VERSION=1:9.2p1-*
+ARG GIT_VERSION=1:2.39.*
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      "openssh-client=${OPENSSH_CLIENT_VERSION}" "git=${GIT_VERSION}" \
+ && rm -rf /var/lib/apt/lists/*
 COPY --from=venv-worker /opt/venv /opt/venv
 COPY --from=collections /opt/ovlm/collections /opt/ovlm/collections
 COPY docker/worker-entrypoint.sh /usr/local/bin/ovlm-worker-entrypoint
