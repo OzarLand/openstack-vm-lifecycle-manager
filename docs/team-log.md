@@ -41,6 +41,10 @@ what needs the maintainer. Agent 1 (PM/EM) updates it after every handoff. Agent
 **Lab resource limit (2026-11-04):** only **one floating IP** is available on `ozar-lab` today. Lab work uses it as the
 single cutover address and allocates no other.
 
+**Escalation threshold (maintainer, 2026-11-04):** "ask me only for important decisions". Agent 1 decides reversible
+and technical matters itself and records them here. The maintainer gets only product and scope choices, risk
+acceptance, decisions that affect data safety, and the phase gate.
+
 The `ozar-dev` session applies its own approval rules: it accepts only approvals typed in its own conversation.
 
 ## 💬 Dedicated agent conversations
@@ -69,7 +73,7 @@ reports are below. Backend, Frontend and Docs get their conversations when they 
 | ~~M5~~ | Agent 1 | ✅ **Authorized 2026-11-04** by the maintainer directly in the `ozar-dev` session: EXP-01 on `ozar-lab`, `ovlm-exp01-*` resources only. | — |
 | M6 | Agent 2 | **Decision D-1:** if something fails at W7–W10, after the service has already written to the data volume on the new VM, should OVLM restore the old VM automatically? A = automatic (fastest, but the old VM may start on data the new one changed); **B = stop for a human unless the pre-handoff snapshot is on (recommended)**; C = automatic only if the profile owner has confirmed the old version can read the new data. A stays in force until you decide. | Final renewal-workflow |
 | M7 | `ozar-dev` | **Approve the pending Bash prompt in `ozar-dev`** for EXP-01b. | Floating-IP cutover measurement |
-| M8 | Agent 9 | CI: may it use privileged containers? Where is lab evidence stored, and who signs it? | CI design |
+| ~~M8~~ | Agent 9 | ✅ **Decided by Agent 1** (reversible, so it was not escalated): CI uses GitHub-hosted runners with unprivileged containers (PostgreSQL service container; the Ansible target is an SSH-enabled container without systemd-as-PID-1, and privileged-only cases move to the lab). Lab evidence is stored redacted in the repository under `docs/experiments/` and committed with DCO sign-off. Only a human operator moves a claim to `validated`. | — |
 | M3 | Agent 1 | **Phase 1 approval.** Work-in-progress drafts are pushed to `claude/openstack-vm-lifecycle-manager-9nf9cc` (authorized 2026-11-04). The final Phase 1 proposal still needs approval before implementation starts. | Publishing the documents |
 
 ## Wave 1 — 2026-11-04 (parallel, independent)
