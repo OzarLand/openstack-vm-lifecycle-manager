@@ -56,9 +56,18 @@ def _run_migrate() -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw[:1] == ["inventory"]:  # `ovlm inventory sync --cloud <name>` (E2-2); own sub-parser
+        from ovlm.inventory.cli import main as inventory_main
+
+        try:
+            return inventory_main(raw[1:])
+        except Exception as exc:  # noqa: BLE001 - last-resort handler for the process
+            logging.getLogger("ovlm.cli").error("fatal: %s", exc, exc_info=True)
+            return 1
     parser = argparse.ArgumentParser(prog="ovlm", description="OpenStack VM Lifecycle Manager")
     parser.add_argument("--version", action="version", version=f"ovlm {__version__}")
-    parser.add_argument("command", choices=["api", "worker", "migrate"])
+    parser.add_argument("command", choices=["api", "worker", "migrate", "inventory"])
     args = parser.parse_args(argv)
     runners = {"api": _run_api, "worker": _run_worker, "migrate": _run_migrate}
     try:
