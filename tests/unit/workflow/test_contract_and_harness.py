@@ -38,6 +38,7 @@ class _Ctx:
     def __init__(self) -> None:
         self.log: list[str] = []
         self.params: Mapping[str, Any] = {}
+        self.deadline_passed = False
 
     def gate(self, action: str) -> None:
         self.log.append(f"gate:{action}")
@@ -183,8 +184,13 @@ def test_worker_settings_validate_the_lease_relationships() -> None:
 def test_backoff_doubles_and_is_capped() -> None:
     eng = WorkflowEngine.__new__(WorkflowEngine)
     eng.config = EngineConfig(poll_initial=5, poll_max=60)
-    assert [eng._poll_delay(Wait(), n) for n in (1, 2, 3, 4, 5, 9)] == [5, 10, 20, 40, 60, 60]  # noqa: SLF001
-    assert eng._poll_delay(Wait(poll_after=2.5), 9) == 2.5  # noqa: SLF001
+    delays = [eng._poll_delay(Wait(), n, None) for n in (0, 1, 2, 3, 4, 8)]  # noqa: SLF001
+    assert delays == [5, 10, 20, 40, 60, 60]
+    assert eng._poll_delay(Wait(poll_after=2.5), 9, None) == 2.5  # noqa: SLF001
+    # SRE-C-5: never past the deadline
+    assert eng._poll_delay(Wait(), 4, 12.0) == 12.0  # noqa: SLF001
+    assert eng._poll_delay(Wait(poll_after=30), 0, 7.5) == 7.5  # noqa: SLF001
+    assert eng._poll_delay(Wait(), 0, -3.0) == 0.0  # noqa: SLF001
 
 
 def test_engine_never_computes_time_from_the_worker_wall_clock() -> None:

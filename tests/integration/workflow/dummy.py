@@ -191,12 +191,18 @@ class FlakyStep(_CloudStep):
 
 
 class FailStep(_CloudStep):
+    """Fails with the given class. With ``res``, the probe reads that fake resource and the step is Done once a
+    human set it to ``resolved`` (what an operator fixes by hand before ``mark_resolved``)."""
+
     key: ClassVar[str] = "fail"
 
     def probe(self, ctx: StepContext) -> Any:
-        return None
+        res = ctx.params.get("res")
+        return self.cloud.get(res)[0] if res else None
 
     def decide(self, ctx: StepContext, observed: Any) -> Decision:
+        if ctx.params.get("res") and observed == "resolved":
+            return Done({"resolved_seen_by_probe": True})
         return Fail(
             ErrorClass(ctx.params.get("cls", "fatal")),
             ctx.params.get("msg", "boom"),
@@ -409,6 +415,15 @@ class DummyDefinition(WorkflowDefinition):
         if kind == "probe":
             return "probe recorded"
         if kind == "rollback":
+            target = ctx.run.subject.get("rollback_to")
+            if target:
+                return Transition(
+                    next_step=StepSpec(target["key"], {**target.get("params", {}), "_i": 20_000}),
+                    phase="restore",
+                    acquire_locks=[
+                        LockSpec(t, k, "test") for t, k in target.get("acquire_locks", [])
+                    ],
+                )
             return Transition(run_state="rolled_back")
         if kind == "admit":
             return Wake()
