@@ -1,24 +1,33 @@
 {% extends "base.html" %}
 {% block title %}Two-factor authentication{% endblock %}
+{% block main_class %}auth{% endblock %}
 {% block content %}
-<h1>Two-factor authentication (TOTP)</h1>
-{% if error %}<p role="alert" class="error">{{ error }}</p>{% endif %}
-{% if confirmed %}
-  <p>TOTP is enrolled. To replace it, ask an administrator for a credential reset.</p>
-{% elif secret %}
-  <p>Add this key to your authenticator app (account <code>OVLM</code>), then enter the 6-digit code it shows.</p>
-  <p>Key: <code>{{ secret }}</code></p>
-  <p>Or open <code>{{ uri }}</code> on your device.</p>
-  <form method="post" action="/account/totp/confirm">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <p><label>Code <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required></label></p>
-    <p><button type="submit">Confirm</button></p>
-  </form>
-{% else %}
-  {% if required %}<p>Your role requires TOTP. Enrol it to continue.</p>{% endif %}
-  <form method="post" action="/account/totp/enrol">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <p><button type="submit">Generate a key</button></p>
-  </form>
-{% endif %}
+<div class="card">
+  <h1>Two-factor authentication (TOTP)</h1>
+  {% if error %}<p role="alert" class="banner error">{{ error }}</p>{% endif %}
+  {% if confirmed %}
+    <p role="status" class="banner ok">TOTP is enrolled.</p>
+    <p>To replace it, ask an administrator for a credential reset.</p>
+    <p><a href="/">Continue to the dashboard</a></p>
+  {% elif secret %}
+    <ol class="steps">
+      <li>Add this key to your authenticator app (account <code>OVLM</code>):<br><code class="key">{{ secret }}</code></li>
+      <li>Or open this link on your device: <code class="wrap">{{ uri }}</code></li>
+      <li>Enter the 6-digit code the app shows.</li>
+    </ol>
+    <form method="post" action="/account/totp/confirm">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <p><label for="code">Code</label>
+         <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required autofocus></p>
+      <p><button type="submit" class="primary">Confirm</button></p>
+    </form>
+  {% else %}
+    {% if required %}<p role="status" class="banner info">Your role requires TOTP. Enrol it to continue.</p>{% endif %}
+    <p>Generate a key, add it to an authenticator app, then confirm with a code.</p>
+    <form method="post" action="/account/totp/enrol">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <p><button type="submit" class="primary">Generate a key</button></p>
+    </form>
+  {% endif %}
+</div>
 {% endblock %}

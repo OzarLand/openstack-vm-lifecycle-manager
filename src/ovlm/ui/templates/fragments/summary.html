@@ -1,0 +1,18 @@
+{% macro stat(label, pair, href=None) %}
+<div class="stat">
+  <dt>{{ label }}</dt>
+  <dd>{% if href %}<a href="{{ href }}">{% endif %}{{ pair[0] }}{% if pair[1] %}+{% endif %}{% if href %}</a>{% endif %}</dd>
+</div>
+{% endmacro %}
+<section aria-labelledby="inv-h">
+  <h2 id="inv-h">Inventory (last sync)</h2>
+  <dl class="stats">
+    {{ stat("Servers", counts.servers, "/inventory") }}
+    {{ stat("Present", counts.present, "/inventory?status=present") }}
+    {{ stat("Gone", counts.gone, "/inventory?status=gone") }}
+    {{ stat("Unknown", counts.unknown, "/inventory?status=unknown") }}
+    {{ stat("Managed VMs", counts.managed, "/inventory?registered=yes") }}
+    {{ stat("Volumes", counts.volumes) }}
+    {{ stat("Floating IPs", counts.floating_ips) }}
+  </dl>
+</section>

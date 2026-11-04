@@ -1,14 +1,19 @@
 {% extends "base.html" %}
 {% block title %}Choose your password{% endblock %}
+{% block main_class %}auth{% endblock %}
 {% block content %}
-<h1>{% if purpose == "reset" %}Reset your credentials{% else %}Welcome, {{ username }}{% endif %}</h1>
-<p>Choose your own password (at least 12 characters). No one else, including administrators, ever sees or sets it.
-   This link works once.</p>
-{% if error %}<p role="alert" class="error">{{ error }}</p>{% endif %}
-<form method="post" action="/enrol/{{ link }}" autocomplete="off">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <p><label>New password <input name="password" type="password" required minlength="12" autocomplete="new-password"></label></p>
-  <p><label>Repeat password <input name="password_confirm" type="password" required minlength="12" autocomplete="new-password"></label></p>
-  <p><button type="submit">Set password</button></p>
-</form>
+<div class="card">
+  <h1>{% if purpose == "reset" %}Reset your credentials{% else %}Welcome, {{ username }}{% endif %}</h1>
+  <p>Choose your own password (at least 12 characters). No one else, including administrators, ever sees or sets it.
+     This link works once.</p>
+  {% if error %}<p role="alert" class="banner error">{{ error }}</p>{% endif %}
+  <form method="post" action="/enrol/{{ link }}" autocomplete="off">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p><label for="password">New password</label>
+       <input id="password" name="password" type="password" required minlength="12" autocomplete="new-password" autofocus></p>
+    <p><label for="password_confirm">Repeat password</label>
+       <input id="password_confirm" name="password_confirm" type="password" required minlength="12" autocomplete="new-password"></p>
+    <p><button type="submit" class="primary">Set password</button></p>
+  </form>
+</div>
 {% endblock %}
