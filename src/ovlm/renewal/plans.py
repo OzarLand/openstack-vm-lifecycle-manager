@@ -475,6 +475,27 @@ def tc_target(
         if g is not None and g["openstack_id"]
         else None
     )
+    phase = effective_phase(phase, *outage_marks(conn, run_id))
     if kind == "discard" or (kind in ("rollback", "abort") and phase == "build" and green_tc):
         return green_tc or ""
     return tc_of(resolved["blue"]["name"], resolved["blue"]["server_id"])
+
+
+def outage_marks(conn: Connection, run_id: str) -> tuple[Any, Any]:
+    """``(downtime_started_at, downtime_ended_at)`` of the run."""
+    row = conn.execute(
+        text("SELECT downtime_started_at, downtime_ended_at FROM workflow_run WHERE id = :r"),
+        {"r": run_id},
+    ).first()
+    return (None, None) if row is None else (row[0], row[1])
+
+
+def effective_phase(phase: str | None, downtime_started_at: Any, downtime_ended_at: Any) -> str:
+    """The phase a run action must be judged in (REN-1). Once W1 claimed (``downtime_started_at`` written, in the
+    same transaction that precedes the quiesce play), the run is inside the outage until ``downtime_ended_at``: a
+    stored ``build`` phase there is never trusted (blue may be quiesced), so it reads as ``window`` and every
+    rollback/abort restores blue instead of discarding green. Shared by the api (actions, TC) and the worker."""
+    p = phase or "build"
+    if p == "build" and downtime_started_at is not None and downtime_ended_at is None:
+        return "window"
+    return p

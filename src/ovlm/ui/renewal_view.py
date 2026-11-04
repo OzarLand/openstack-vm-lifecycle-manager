@@ -314,9 +314,49 @@ NEEDS_HUMAN: Mapping[str, tuple[str, list[str]]] = {
             "Fix the cause, then request a new retirement approval.",
         ],
     ),
+    "w1_rerun_unexpected_state": (
+        "The downtime had already started when the quiesce step ran again, and the old VM or its data volume is not "
+        "where OVLM left it. Nothing was run on the old VM.",
+        [
+            _PROBE,
+            "Read the evidence of this step: it lists what differs.",
+            "Rollback restores the old VM (read its effect below); Retry step only once the state is back.",
+        ],
+    ),  # fmt: skip
+    "w1_reclaim_refused": (
+        "The downtime had already started, and the quiesce step could not be claimed again. The run stays in the "
+        "window: it never goes back to the build phase while the old VM may be stopped.",
+        [_PROBE, "Rollback restores the old VM (read its effect below)."],
+    ),
+    "outage_open_build_refused": (
+        "OVLM refused to leave the downtime window for the build phase: the old VM may be stopped, and the build "
+        "phase can only delete the new VM. This is a safety stop.",
+        [
+            _PROBE,
+            "Rollback restores the old VM (read its effect below).",
+            "Report this to your OVLM administrator.",
+        ],
+    ),  # fmt: skip
+    "volume_not_on_blue": (
+        "During the restore, the data volume is not attached to the old VM, so OVLM did not start it: it would boot "
+        "without its data.",
+        [_PROBE, "Attach the data volume to the old VM (and only to it), then Retry step."],
+    ),
+    "green_unrecorded": (
+        "A server tagged for this run exists, but OVLM never recorded its id (the create answer was lost). OVLM did "
+        "not delete it.",
+        [
+            "Read the evidence of this step: it names the server.",
+            "Check that server in OpenStack and delete it by hand if it is the new VM of this run, then Retry step.",
+        ],
+    ),  # fmt: skip
     "state_lookup_failed": (
         "OVLM could not read a resource it needs.",
         [_PROBE, "Check that the resource exists in OpenStack.", _AFTER_FIX],
+    ),
+    "no_next_step": (
+        "The run finished a step and found no next step. This is a bug or a version mismatch.",
+        ["Do not retry. Ask your OVLM administrator."],
     ),
     "unknown_step": (
         "The run reached a step this OVLM version does not know. This is a bug or a version mismatch.",

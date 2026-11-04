@@ -10,15 +10,20 @@ Failure handling (:meth:`BlueGreenFipV1.on_failure`):
 * B1/B2 fatal: run ``failed`` (nothing created; B2 markers stay). Any later build failure parks the run
   (``BuildFailed``): locks kept, green kept for diagnosis, operator rollback (TC) deletes it. Never terminal while
   OVLM may hold a resource, so locks are never released under a live green.
-* W1 claim refused: back to G2 or B9, no outage.
+* W1 claim refused: back to G2 or B9, no outage. **Never once the outage started** (REN-1): from the moment W1 wrote
+  ``downtime_started_at`` (in the transaction that precedes the quiesce play) until ``downtime_ended_at``, no
+  transition may lead back to the build phase or to Discarding; :meth:`BlueGreenFipV1._seal` enforces it for every
+  transition the definition returns, and a rollback/abort in that state restores blue (S1-S10).
 * W1-W10: the closed table (:mod:`ovlm.renewal.closed_table`), D-1 = B. One automatic restore per run
   (``workflow_run.auto_restore_used``), audited ``restore.auto`` (system, authority = the G2 approval id).
 * Restore, retention, retirement, Discarding: needs_human.
 
 Signals (re-validated here, SEC-R-1): ``rollback``/``abort``/``revert``/``discard`` need an operator in scope, a
 consumed step-up ``run.<kind>`` on the run and the TC of the affected VM; ``mark_resolved`` additionally needs the
-approver role when the next step is destructive; ``probe`` refreshes the current-truth panel and, sent by the
-re-probe job for ``api_unreachable``, applies the self-resolution rules of section 5.1.
+approver role when the current step (re-queued by the engine, so its own act comes next) or the following step is
+destructive (REN-5); ``revert`` is refused once X1 has persisted its delete intent (REN-4); ``probe`` refreshes the
+current-truth panel and, sent by the re-probe job for ``api_unreachable``, applies the self-resolution rules of
+section 5.1.
 """
 
 from __future__ import annotations
@@ -40,7 +45,15 @@ from ovlm.renewal import closed_table, metrics
 from ovlm.renewal.base import Deps, RStep, project_of, read_truth
 from ovlm.renewal.config import RESTORE_STEPS, WINDOW_STEPS
 from ovlm.renewal.ledger import DbOwnershipRegistry, green_row, plan_resolved, snapshot_row
-from ovlm.renewal.plans import KIND, STRATEGY, STRATEGY_VERSION, load_facts, tc_target
+from ovlm.renewal.plans import (
+    KIND,
+    STRATEGY,
+    STRATEGY_VERSION,
+    effective_phase,
+    load_facts,
+    outage_marks,
+    tc_target,
+)
 from ovlm.renewal.steps_after import (
     AttachToOld,
     AwaitDiscard,
@@ -121,7 +134,8 @@ AFTER = ("retain_old", "await_retention", "await_retirement", "retire_old")
 HANDOFF = ("detach_volume", "snapshot_volume", "attach_volume_green", "data_attach_green")
 ORDER = (*BUILD, *WINDOW_STEPS, *AFTER)
 RESTORE_ORDER = (*RESTORE_STEPS, "await_discard")
-#: Steps after which the run's next step is destructive (mark_resolved then needs the approver role).
+#: Park reason when a transition would leave the outage for the build phase or Discarding (REN-1, by construction).
+OUTAGE_SEAL_REASON = "outage_open_build_refused"
 
 
 def phase_of(key: str, current: str | None = None) -> str:
@@ -223,6 +237,10 @@ class BlueGreenFipV1(WorkflowDefinition):
         return None
 
     def next(self, ctx: TxContext, done: Done) -> Transition:
+        sealed = self._seal(ctx, self._next(ctx, done))
+        return sealed if sealed is not None else Transition(park_reason=OUTAGE_SEAL_REASON)
+
+    def _next(self, ctx: TxContext, done: Done) -> Transition:
         c, run = ctx.conn, ctx.run
         key = ctx.step.step_key if ctx.step else ""
         resolved = plan_resolved(c, run.id)
@@ -288,6 +306,9 @@ class BlueGreenFipV1(WorkflowDefinition):
     # ---- failures --------------------------------------------------------------------------------------
 
     def on_failure(self, ctx: TxContext, fail: Fail) -> Transition | None:
+        return self._seal(ctx, self._on_failure(ctx, fail))
+
+    def _on_failure(self, ctx: TxContext, fail: Fail) -> Transition | None:
         c, run = ctx.conn, ctx.run
         key = ctx.step.step_key if ctx.step else ""
         detail = dict(fail.detail)
@@ -298,6 +319,10 @@ class BlueGreenFipV1(WorkflowDefinition):
         if key in ("preflight", "claim_resources") and fail.error_class == ErrorClass.FATAL:
             return None  # run failed: nothing was created
         if key == "quiesce_old" and fail.reason == "w1_claim_refused":
+            if _outage_started(c, run.id):
+                # REN-1: a refused claim after the outage started is a failure inside the window, never a way back
+                # to the build phase (blue may be quiesced). W1's re-claim probe does not refuse; this is the belt.
+                return Transition(park_reason="w1_reclaim_refused", phase="window")
             back = detail.get("back_to") or "await_cutover"
             return Transition(next_step=self.spec(back), phase="build")
         if key in BUILD:
@@ -312,6 +337,11 @@ class BlueGreenFipV1(WorkflowDefinition):
         self, ctx: TxContext, key: str, fail: Fail, reason: str, truth: Mapping[str, Any] | None
     ) -> Transition:
         c, run = ctx.conn, ctx.run
+        if reason == "deadline_exceeded" and not truth:
+            # REN-3: the deadline passed with no fresh probe attached (right after act, or before acting). The API
+            # was not shown unreachable, so this is not ``api_unreachable`` (no self-resolution, no automatic
+            # restore): park with the true reason; the operator's probe/retry decide from a fresh read.
+            return Transition(park_reason="deadline_exceeded")
         resolved = plan_resolved(c, run.id)
         g = green_row(c, run.id)
         flags = c.execute(
@@ -319,7 +349,7 @@ class BlueGreenFipV1(WorkflowDefinition):
         ).one()
         decision = closed_table.decide(
             key,
-            reason=reason if reason != "deadline_exceeded" or truth else "api_unreachable",
+            reason=reason,
             trigger=fail.detail.get("trigger"),
             truth=truth,
             blue_id=resolved["blue"]["server_id"],
@@ -382,9 +412,17 @@ class BlueGreenFipV1(WorkflowDefinition):
     # ---- abort -----------------------------------------------------------------------------------------
 
     def on_abort(self, ctx: TxContext, outcome: Outcome | None) -> Transition | None:
+        return self._seal(ctx, self._on_abort(ctx, outcome))
+
+    def _on_abort(self, ctx: TxContext, outcome: Outcome | None) -> Transition | None:
         key = ctx.step.step_key if ctx.step else ""
-        if key in BUILD:
+        in_outage = _outage_open(ctx.conn, ctx.run.id)
+        if key in BUILD and not in_outage:
             return Transition(next_step=self.spec("discard_green"), phase="build")
+        if key in BUILD or (in_outage and key == "discard_green"):
+            # REN-1 belt: a build step with the outage open (a run left there by an older version): restore blue.
+            return self._restore(ctx.conn, ctx.run, trigger="abort", step_key=key, fail=None, truth=None,
+                                 auto=False, actor=_abort_actor(ctx.conn, ctx.run.id))  # fmt: skip
         if key in WINDOW_STEPS:
             state = ctx.step.state if ctx.step else ""
             if outcome is None and state != "needs_human":
@@ -427,7 +465,7 @@ class BlueGreenFipV1(WorkflowDefinition):
             return "the actor does not hold the operator role in this scope"
         if sig.kind == "probe":
             return None
-        phase = run.phase or "build"
+        phase = effective_phase(run.phase, *outage_marks(c, run.id))
         if sig.kind == "abort" and (
             phase in ("restore", "retained", "retire") or step == "discard_green"
         ):
@@ -438,6 +476,10 @@ class BlueGreenFipV1(WorkflowDefinition):
             return "rollback is not available in this phase (use revert after cutover)"
         if sig.kind == "revert" and phase not in ("retained", "retire"):
             return "revert is only available after the cutover"
+        if sig.kind == "revert" and _retire_intent(c, run.id):
+            # REN-4: X1 persisted its unlock + delete intent; blue may be gone. A restore would park on a deleted
+            # blue with no terminal path. retry-step lets X1 finish (its probe sees the 404 and completes).
+            return "revert impossible: X1 has sent (or may have sent) the delete of the old VM"
         if sig.kind == "discard" and step != "await_discard":
             return "discard is only available once the service is restored to the old VM"
         destructive_retry = (
@@ -446,13 +488,22 @@ class BlueGreenFipV1(WorkflowDefinition):
         if sig.kind in ("retry_step",) and not destructive_retry:
             return None
         if sig.kind == "mark_resolved":
+            # REN-5: the engine re-queues the *current* step, so its own act is the next destructive call; the
+            # following step matters too (the current one may reach Done from its probe alone).
             nxt = (
                 self._following(step, resolved)
                 if step and step in (*ORDER, *RESTORE_ORDER)
                 else None
             )
-            if nxt is not None and getattr(self._steps[nxt], "destructive", False) and not approver:
-                return "the next step is destructive: mark-resolved needs the approver role"
+            current_destructive = ctx.step is not None and (
+                bool(ctx.step.destructive)
+                or getattr(self._steps.get(step or ""), "destructive", False)
+            )
+            next_destructive = nxt is not None and getattr(self._steps[nxt], "destructive", False)
+            if (current_destructive or next_destructive) and not approver:
+                return (
+                    "the current or next step is destructive: mark-resolved needs the approver role"
+                )
         target = tc_target(c, run.id, sig.kind, phase, resolved)
         return _check_confirmation(c, sig, run.id, target)
 
@@ -471,6 +522,10 @@ class BlueGreenFipV1(WorkflowDefinition):
             return {"api_reachable": False, "error": type(exc).__name__}
 
     def on_signal(self, ctx: TxContext) -> Transition | Wake | str | None:
+        res = self._on_signal(ctx)
+        return self._seal(ctx, res) if isinstance(res, Transition) else res
+
+    def _on_signal(self, ctx: TxContext) -> Transition | Wake | str | None:
         sig, run, c = ctx.signal, ctx.run, ctx.conn
         if sig is None:
             return None
@@ -493,7 +548,8 @@ class BlueGreenFipV1(WorkflowDefinition):
         if sig.kind == "discard":
             return Transition(next_step=self.spec("discard_green"), phase="restore")
         if sig.kind == "rollback":
-            if (run.phase or "build") == "build":
+            # REN-1: judged on the effective phase: with the outage open, rollback always restores blue.
+            if effective_phase(run.phase, *outage_marks(c, run.id)) == "build":
                 return Transition(next_step=self.spec("discard_green"), phase="build")
             return self._restore(c, run, trigger="rollback", step_key=key, fail=None, truth=None, auto=False,
                                  actor=sig.actor_id)  # fmt: skip
@@ -501,6 +557,28 @@ class BlueGreenFipV1(WorkflowDefinition):
             return self._restore(c, run, trigger="revert", step_key=key, fail=None, truth=None, auto=False,
                                  actor=sig.actor_id)  # fmt: skip
         return None
+
+    # ---- REN-1: the outage seal -------------------------------------------------------------------------
+
+    def _seal(self, ctx: TxContext, t: Transition | None) -> Transition | None:
+        """Make "back to build with the outage open" impossible by construction (REN-1). While
+        ``downtime_started_at`` is set and ``downtime_ended_at`` is not, blue may be quiesced: a transition to a
+        build step, to Discarding, to phase ``build``, or to a terminal state would discard the only way back (or
+        drop the locks under an open outage). Such a transition is replaced by needs_human in phase ``window``,
+        where rollback/abort restore blue (S1-S10)."""
+        if t is None or not _outage_open(ctx.conn, ctx.run.id):
+            return t
+        target = t.next_step.step_key if t.next_step is not None else None
+        if (
+            target in BUILD
+            or target == "discard_green"
+            or t.phase == "build"
+            or t.run_state is not None
+        ):
+            log.error("refused a transition out of the open outage: run=%s step=%s to=%s phase=%s state=%s",
+                      ctx.run.id, ctx.step.step_key if ctx.step else None, target, t.phase, t.run_state)  # fmt: skip
+            return Transition(park_reason=OUTAGE_SEAL_REASON, phase="window")
+        return t
 
     # ---- section 5.1: self-resolution of api_unreachable ------------------------------------------------
 
@@ -575,6 +653,29 @@ def _write_truth(c: Connection, run_id: str, truth: Mapping[str, Any]) -> None:
             "UPDATE workflow_run SET current_truth = CAST(:t AS jsonb), current_truth_at = now() WHERE id = :r"
         ),
         {"r": run_id, "t": json.dumps(out, default=str)},
+    )
+
+
+def _outage_started(c: Connection, run_id: str) -> bool:
+    return outage_marks(c, run_id)[0] is not None
+
+
+def _outage_open(c: Connection, run_id: str) -> bool:
+    started, ended = outage_marks(c, run_id)
+    return started is not None and ended is None
+
+
+def _retire_intent(c: Connection, run_id: str) -> bool:
+    """X1 persisted an intent (unlock + delete of blue decided; it may have been sent)."""
+    return (
+        c.execute(
+            text(
+                "SELECT 1 FROM workflow_step WHERE run_id = :r AND step_key = 'retire_old' AND intent IS NOT NULL "
+                "LIMIT 1"
+            ),
+            {"r": run_id},
+        ).first()  # fmt: skip
+        is not None
     )
 
 

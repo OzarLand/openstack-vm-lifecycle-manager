@@ -35,6 +35,7 @@ from ovlm.renewal.plans import (
     STRATEGY_VERSION,
     blast_radius,
     compute_plan_hash,
+    effective_phase,
     load_facts,
     policy_binding,
     resolve_plan,
@@ -424,14 +425,35 @@ def _snapshot_id(s: Any, run_id: str) -> str | None:
     return str(value) if value else None
 
 
+def _retire_sent(s: Any, run_id: str) -> bool:
+    """X1 persisted its unlock + delete intent (REN-4): revert is no longer possible."""
+    return (
+        s.execute(
+            text(
+                "SELECT 1 FROM workflow_step WHERE run_id = :r AND step_key = 'retire_old' AND intent IS NOT NULL "
+                "LIMIT 1"
+            ),
+            {"r": run_id},
+        ).first()  # fmt: skip
+        is not None
+    )
+
+
 def available_actions(
     run: Mapping[Any, Any],
     step: Mapping[Any, Any] | None,
     resolved: Mapping[str, Any],
     snapshot_id: str | None = None,
+    *,
+    retire_sent: bool = False,
 ) -> list[dict[str, Any]]:
-    """Each action with the role it needs and its concrete effect from the current state (SRE-R-9)."""
-    state, phase, key = run["state"], run["phase"] or "build", step["step_key"] if step else None
+    """Each action with the role it needs and its concrete effect from the current state (SRE-R-9). The phase is the
+    effective one (REN-1): with the outage open a stored ``build`` phase reads ``window``, so the page offers the
+    restore of blue, never "delete green"."""
+    state, key = run["state"], step["step_key"] if step else None
+    phase = effective_phase(
+        run["phase"], run.get("downtime_started_at"), run.get("downtime_ended_at")
+    )
     out: list[dict[str, Any]] = []
     if state == "requested":
         return [
@@ -458,7 +480,8 @@ def available_actions(
                 "effect": f"re-run {key} (starts with a probe)",
             }
         )
-        out.append({"action": "mark-resolved", "role": "operator (+approver if the next step is destructive)",
+        out.append({"action": "mark-resolved",
+                    "role": "operator (+approver if the current or next step is destructive)",
                     "effect": f"state the manual fix for {key}; the engine re-probes"})  # fmt: skip
     snap = bool((resolved.get("data_volume") or {}).get("snapshot_before_handoff"))
     if phase == "build":
@@ -490,6 +513,10 @@ def available_actions(
                 "effect": "current step finishes, then " + consequence,
             }
         )
+    elif phase in ("retained", "retire") and retire_sent:
+        out.append({"action": "revert", "role": "unavailable",
+                    "effect": "revert impossible: X1 has sent (or may have sent) the delete of the old VM; "
+                              "retry-step lets X1 finish"})  # fmt: skip
     elif phase in ("retained", "retire"):
         out.append({"action": "revert", "role": "operator + TC",
                     "effect": "restore to blue (FIP and volume back); voids any retirement approval"})  # fmt: skip
@@ -527,7 +554,13 @@ def run_body(s: Session, run_id: UUID | str) -> dict[str, Any]:
         "pending_signals": [_row(p) for p in pending],
         "worst_case_window_seconds": resolved["worst_case_window_seconds"],
         "max_window_duration_seconds": resolved["max_window_duration_seconds"],
-        "available_actions": available_actions(run, step, resolved, _snapshot_id(s, str(run_id))),
+        "available_actions": available_actions(
+            run,
+            step,
+            resolved,
+            _snapshot_id(s, str(run_id)),
+            retire_sent=_retire_sent(s, str(run_id)),
+        ),
         "last_worker_heartbeat": _iso(hb),
         "links": {"steps": f"/api/v1/runs/{run_id}/steps"},
     }

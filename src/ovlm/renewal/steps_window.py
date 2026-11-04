@@ -3,7 +3,10 @@
 * **W1 claim checks** run in W1's probe (read) and again in the first transaction of ``act``, which also writes
   ``downtime_started_at`` (first claim only) before the quiesce starts: G2 valid now with its evidence re-validated,
   policy window open, B9 younger than ``green_ready.max_age``, write credential and Keystone token valid beyond the
-  worst-case window. A refused claim sends the run back to G2 or B9 with no outage.
+  worst-case window. A refused claim sends the run back to G2 or B9 with no outage. **A re-claim inside the outage**
+  (``downtime_started_at`` already written: blue may be quiesced) never refuses on expiry, window, B9 age or
+  credential horizon; it re-validates G2's integrity and blue's state only, and any problem is needs_human inside
+  the window (REN-1).
 * **Budget** (SRE-R-6): before W2-W8, ``now - downtime_started_at > max_window_duration`` fails with trigger
   ``budget``; the closed table decides. From W9 the run finishes forward.
 * **Evidence** (SEC-R-1): G2 integrity (not expiry) is re-validated before W2, W3, W5 and W9.
@@ -110,6 +113,8 @@ class QuiesceOld(WindowAnsible):
         dv = r.get("data_volume") or {}
         if (f := self.interrupted(ctx, dv.get("mount_point"))) is not None:
             return {"fail": f}
+        if self.db_seconds_since(ctx, "downtime_started_at") is not None:
+            return self.reclaim_probe(ctx, r, dv)
         refusals: list[str] = []
         back = "await_cutover"
         g2 = gate_check(self, ctx, Gate.CUTOVER, check_expiry=True)
@@ -145,6 +150,33 @@ class QuiesceOld(WindowAnsible):
             return {"fail": self.fail(ctx, E.NEEDS_HUMAN, "approval_evidence_invalid", g2=g2)}
         return {"refusals": refusals, "back": back, "g2": g2}
 
+    def reclaim_probe(
+        self, ctx: StepContext, r: Mapping[str, Any], dv: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """W1 re-run inside the outage (REN-1): ``downtime_started_at`` is written, so blue may already be quiesced.
+        Nothing here can send the run back to the build phase: the checks that refuse a *first* claim (G2 expiry,
+        policy window, B9 age, credential and token horizon) are not applied ("an approval never expires
+        mid-outage", section 2.2); only G2's evidence integrity and blue's state are re-validated, and any problem
+        is needs_human inside the window (the closed table then never restores W1 automatically)."""
+        g2 = gate_check(self, ctx, Gate.CUTOVER, check_expiry=False)
+        if not g2["ok"]:
+            return {"fail": self.fail(ctx, E.NEEDS_HUMAN, "approval_evidence_invalid", g2=g2)}
+        problems: list[str] = []
+        blue = self.wc(ctx).get_server(r["blue"]["server_id"])
+        if blue.status != "ACTIVE" or blue.task_state is not None:
+            problems.append(f"blue {blue.status}/{blue.task_state}")
+        if dv:
+            v = self.wc(ctx).get_volume(dv["volume_id"])
+            if [a.server_openstack_id for a in v.attachments] != [r["blue"]["server_id"]]:
+                problems.append("volume not attached to blue only")
+        if problems:
+            return {
+                "fail": self.fail(
+                    ctx, E.NEEDS_HUMAN, "w1_rerun_unexpected_state", problems=problems
+                )
+            }
+        return {"refusals": [], "back": None, "g2": g2, "reclaim": True}
+
     def decide(self, ctx: StepContext, observed: Any) -> Decision:
         if "fail" in observed:
             fail: Fail = observed["fail"]
@@ -155,18 +187,24 @@ class QuiesceOld(WindowAnsible):
                 "w1_claim_refused",
                 {"refusals": observed["refusals"], "back_to": observed["back"]},
             )
-        return Act({"phase": "quiesce", "g2_approval_id": observed["g2"]["approval_id"]})
+        return Act({"phase": "quiesce", "g2_approval_id": observed["g2"]["approval_id"],
+                    "reclaim": bool(observed.get("reclaim"))})  # fmt: skip
 
     def act(self, ctx: StepContext, intent: Mapping[str, Any]) -> None:
+        # First claim: G2 must be unexpired in this very transaction. Re-claim inside the outage (the row already
+        # carries downtime_started_at): only the approval's integrity (approved, not void) counts (REN-1).
         claimed = fenced_write(
             self.d.db,
             ctx,
             "UPDATE workflow_run SET downtime_started_at = COALESCE(downtime_started_at, now()), updated_at = now() "
             "WHERE id = :r AND EXISTS (SELECT 1 FROM approval WHERE id = :a AND decision = 'approved' "
-            "AND void_reason IS NULL AND expires_at > now())",
+            "AND void_reason IS NULL AND (expires_at > now() OR workflow_run.downtime_started_at IS NOT NULL))",
             {"r": ctx.run.id, "a": intent["g2_approval_id"]},
         )
         if claimed != 1:
+            if intent.get("reclaim"):
+                raise StepRefusal(E.NEEDS_HUMAN, "approval_evidence_invalid",
+                                  refusals=["G2 no longer approved at re-claim"])  # fmt: skip
             raise StepRefusal(
                 E.FATAL,
                 "w1_claim_refused",
