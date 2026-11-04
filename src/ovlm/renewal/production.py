@@ -647,13 +647,19 @@ class RunnerGuestPort:
     ) -> HostKeyResult:  # fmt: skip
         resolved = self._resolved(run_id)
         creds, user = self._creds(resolved), resolved["guest_access"]["ssh_user"]
-        if accept:  # a re-run: only what the evidence already pinned
+        if accept:
+            # A re-run after a recorded pin (REN-2, ADR-0006 "interrupted rotation: accept only what the evidence
+            # pinned"): the real green no longer accepts the bootstrap key once the pin was recorded, so a host that
+            # still presents it is not green. Never fall back to the bootstrap key or to a scan: "unreachable"
+            # waits on the pinned key, anything else (mismatch, failed command) stops for a human.
             keys = [parse_public_key(k) for k in accept]
             res = self._ssh(target, user, keys, creds, ("true",))
             if res.exit_code == 0:
                 return HostKeyResult(True, "ok", tuple(k.line for k in keys), "rotated")
-            if not res.connected and bootstrap_public is None:
-                return HostKeyResult(False, _ssh_reason(res))
+            reason = _ssh_reason(res)
+            return HostKeyResult(
+                False, reason if reason == "unreachable" else "host key unverifiable"
+            )
         if policy == "injected":
             if not bootstrap_public:
                 return HostKeyResult(False, "no bootstrap key")
@@ -849,21 +855,9 @@ class _LazyRunner:
         return prepared
 
     def adopt_checkout(self, spec: AutomationSpec, workflow_id: str) -> PreparedAutomation | None:
-        """Local re-verification with the runner's own checks. Uses two private helpers of the automation module
-        (its run-dir naming and ``_verify``): a public ``reverify`` there would be cleaner (reported)."""
-        from ovlm.automation import checkout as co
-        from ovlm.automation import runner as runner_module
-
-        runner = self._get()
-        dest = runner.cfg.run_root / runner_module._safe_component(workflow_id) / "_checkout"  # noqa: SLF001
-        if not dest.is_dir():
-            return None
-        head = co._git(["rev-parse", "HEAD"], dest, runner.cfg.clone, retryable=False)  # noqa: SLF001 - local
-        if head != spec.ref:
-            raise AutomationError(
-                "the checkout on disk is not at the pinned SHA", Classification.NEEDS_HUMAN
-            )
-        prepared: PreparedAutomation = runner._verify(spec, workflow_id, dest, head, None, None)  # noqa: SLF001
+        """Local re-verification of the run's checkout with the runner's own checks (the automation module's public
+        :meth:`~ovlm.automation.runner.AutomationRunner.reverify_checkout`; never contacts the git host)."""
+        prepared: PreparedAutomation | None = self._get().reverify_checkout(spec, workflow_id)
         return prepared
 
     def run_phase(

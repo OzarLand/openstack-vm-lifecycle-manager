@@ -372,8 +372,10 @@ class WaitGreenSsh(RStep):
         if intent["policy"] == "console":
             console = self.wc(ctx).get_console_output(ref.server_id)
         accept = tuple(det.get("pinned") or ())
+        # Once a pin is recorded the bootstrap key is dead evidence (REN-2): never hand it to the guest port again.
+        bootstrap = None if accept else det.get("bootstrap_public")
         res = self.d.guest.pin_host_key(
-            run_id=ctx.run.id, target=ref, policy=intent["policy"], bootstrap_public=det.get("bootstrap_public"), accept=accept,
+            run_id=ctx.run.id, target=ref, policy=intent["policy"], bootstrap_public=bootstrap, accept=accept,
             console=console, fence=ctx.fence,
         )  # fmt: skip
         self.memo(ctx)["pin"] = res
