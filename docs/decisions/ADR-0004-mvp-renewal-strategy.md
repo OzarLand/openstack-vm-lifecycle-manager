@@ -82,3 +82,13 @@ fixed-IP or MAC preservation, Octavia/Designate cutover, hot-detach, blue locked
   blue's software with data written by green is the workload owner's responsibility (profile attestation, V1).
 - Risk: clouds whose member-visible flavors all have `disk=0` force boot-from-volume (booting zero-disk flavors from
   image is admin-only, §7 SOURCE-VERIFIED); MVP cannot renew there. Maintainer to confirm acceptable.
+
+## Maintainer decisions (2026-11-04)
+
+The maintainer accepted the three points raised by Agent 2:
+
+1. **MVP scope limits:** one data volume at most (or a stateless service), the replacement boots from an image, a
+   floating IP is required, and no temporary floating IPs are used.
+2. **Pre-handoff snapshot:** off by default. This remains subject to the independent SRE review (Agent 7 holds a veto
+   on unsafe lifecycle operations). If the SRE review rejects this default, the question goes back to the maintainer.
+3. **After a revert:** the new VM stays stopped until an operator discards it.

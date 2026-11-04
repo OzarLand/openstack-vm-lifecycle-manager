@@ -40,7 +40,8 @@ reports are below. Backend, Frontend and Docs get their conversations when they 
 |---|---|---|---|
 | ~~M1~~ | Agent 6, Agent 1 | ✅ **Decided 2026-11-04:** quick-lab extended with Cinder ([ADR-0001](decisions/ADR-0001-test-environment.md)). Still needed later: a cloud account to host the lab. | — |
 | ~~M2~~ | Agent 6 | ✅ **Decided 2026-11-04:** propose the Cinder option upstream to `openstack-quick-lab`. It is filed once the change has run at least once (backlog, Phase 2). | — |
-| M3 | Agent 1 | **Commit authorization.** Nothing is committed yet, per your brief. Approve the Phase 1 proposal to allow committing to `claude/openstack-vm-lifecycle-manager-9nf9cc`. | Publishing the documents |
+| ~~M4~~ | Agent 2 | ✅ **Decided 2026-11-04:** MVP scope limits accepted (one data volume, image boot, floating IP required, no temporary FIP); pre-handoff snapshot off by default (subject to the SRE review); the new VM stays stopped after a revert until discarded. Recorded in [ADR-0004](decisions/ADR-0004-mvp-renewal-strategy.md). | — |
+| M3 | Agent 1 | **Phase 1 approval.** Work-in-progress drafts are pushed to `claude/openstack-vm-lifecycle-manager-9nf9cc` (authorized 2026-11-04). The final Phase 1 proposal still needs approval before implementation starts. | Publishing the documents |
 
 ## Wave 1 — 2026-11-04 (parallel, independent)
 
