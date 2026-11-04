@@ -8,7 +8,7 @@ what needs the maintainer. Agent 1 (PM/EM) updates it after every handoff. Agent
 | # | Role | Model | Status | Output |
 |---|---|---|---|---|
 | 1 | Product / Engineering Manager | Opus 5.5 (main session) | Active: coordinating | `product-vision.md`, `functional-requirements.md`, `agent-team.md`, `model-selection-strategy.md`, ADR-0000, this log |
-| 2 | Chief Software Architect | Opus 5.5 | **Running** (Wave 2) | `architecture.md`, `data-model.md`, `api-design.md`, `renewal-workflow.md`, ADRs |
+| 2 | Chief Software Architect | Opus 5.5 | **Done** (Wave 2). Token count lost in a container restart: not reported | `architecture.md`, `data-model.md`, `api-design.md`, `renewal-workflow.md`, ADRs |
 | 3 | OpenStack Specialist | Sonnet 5.5 | **Done** (Wave 1): 233,687 tokens, 102 tool calls, 11 min 52 s | `openstack-integration.md` |
 | 4 | Backend Engineer | — | Not activated (no code before approval) | — |
 | 5 | Frontend Engineer / UX | — | Not activated | — |
@@ -181,7 +181,7 @@ against the `openstack-automation-review` skill.
 
 ## Wave 2 — 2026-11-04 (parallel: disjoint files, shared decisions fixed in both briefs)
 
-### Agent 2 — Chief Architect (Opus 5.5) — running
+### Agent 2 — Chief Architect (Opus 5.5) — done (token count not available: the completion notice was lost in a container restart)
 
 **Brief (summary):** write `architecture.md`, `data-model.md`, `api-design.md` and `renewal-workflow.md`, plus these
 ADRs:
@@ -196,7 +196,90 @@ Agent 2 must confirm or reject Agent 6's six assumptions and choose an SSH host-
 uses Agent 3's tags. No invented numbers: timeouts become named configuration keys. It must not edit the requirements;
 it lists requested changes instead.
 
-**Report:** pending.
+**Report (verbatim):**
+
+> I've written the Phase 1 architecture: 4 docs and 5 ADRs. No code, no commit, no edits to PM or security files. I
+> read security-model.md and applied Agent 8's six decisions.
+>
+> Files: architecture.md (211 lines), data-model.md (162), api-design.md (162), renewal-workflow.md (220),
+> ADR-0002-frontend, ADR-0003-workflow-engine, ADR-0004-mvp-renewal-strategy, ADR-0005-ownership-and-idempotency,
+> ADR-0006-guest-ssh-host-key-trust.
+>
+> **Key decisions**
+> - ADR-0002: Jinja2 + HTMX, no Node toolchain. UI and API share one service layer, and CI checks that every UI action
+>   has an API equivalent.
+> - ADR-0003: Postgres step executor in the worker. Steps are claimed with SKIP LOCKED, held by lease and heartbeat,
+>   and committed only if the fencing token still matches. Only one step per run can be running. The worker stops
+>   itself before its lease expires. Resource locks belong to the run (not the worker) and hold through retention.
+>   OpenStack waits are re-claim timers. Every step does probe → decide → act → verify. Celery, Temporal and
+>   APScheduler rejected.
+> - ADR-0004:
+>   - Approval gate G2 sits before quiesce and covers the whole downtime window; there is no gate inside it.
+>   - The old VM is always stopped before detach; no hot-detach.
+>   - The old VM is locked only after external verify and unlocked first on revert or retirement.
+>   - One restore sequence handles rollback and revert. Each step skips if its target state already holds.
+>   - MVP scope: exactly one data volume (or a stateless service), the new VM boots from image, a floating IP is
+>     required, no temporary floating IPs.
+> - ADR-0005: ownership uses a DB ledger plus Nova tags set at create; resume looks up by tag and exact name, and more
+>   than one match stops for a human. A first step, `claim_resources`, marks the old VM, the floating IP and the volume
+>   so Agent 8's ownership guard can pass.
+> - ADR-0006: host keys come from the console log by default; TOFU only as an audited per-profile opt-in. I preferred
+>   an injected key and gave way to Agent 8.
+>
+> **Changes made to align with security-model.md**
+> - Green is no longer deleted automatically after a build failure; an operator rollback with typed confirmation
+>   deletes it.
+> - Approvals are bound to the plan hash. Typed confirmation is the VM name plus the last 6 characters of its ID.
+>   Approve and confirm endpoints accept only a human session.
+> - The api process makes no OpenStack calls.
+>
+> **Requested FR changes (PM)**
+> - FR-UI-3: change to "the UI offers no capability the REST API lacks", with the exception that tokens cannot
+>   approve or confirm.
+> - FR-REN-4: the cutover gate is the downtime gate, placed before quiesce.
+> - FR-REN-5: say "rollback converges to the old VM serving again". Stuck volumes, admin locks and down hosts need a
+>   human or OpenStack admin.
+> - FR-REN-2: add the MVP scope limits from ADR-0004.
+> - FR-PLN-2: the capacity pre-check is quota-based and advisory only.
+> - FR-REG-2: the data volume is identified by filesystem UUID/label, not device name; add `guest_access`; the image
+>   is resolved at plan time and is part of the plan hash.
+> - FR-REN-8: abort takes effect at step boundaries; data-phase Ansible is not interrupted.
+> - NFR-2: add the fencing token, and state that OpenStack side effects cannot be fenced.
+>
+> **Disagreements**
+> - Agent 6:
+>   - Rejected: quiesce removing the fstab line. Revert needs it.
+>   - Rejected: the contract timeouts as defaults; they are now config keys tuned in the lab.
+>   - Changed: failure-injection rows 2–4 — capacity failure is fatal, and green is deleted by operator rollback.
+> - Agent 3: hot-detach as a per-profile opt-in, rejected for MVP.
+> - Agent 8: needs to review two points:
+>   - Automatic in-window restore (`renewal.auto_rollback_in_window`, default true). Their table only lists
+>     operator-initiated revert.
+>   - `claim_resources`, the one mutation exempt from the "must already carry the tag" rule.
+>
+> **Top 5 risks**
+> 1. The worker must reach the new VM's fixed IP over SSH, by a direct route or a jump host. This is unverified in
+>    the lab (Agent 6).
+> 2. Clouds that only offer `disk=0` flavors force boot-from-volume, so the MVP cannot renew there.
+> 3. Real floating-IP cutover time and downtime are unknown (data plane documented but not source-verified; the lab
+>    runs on slow emulation).
+> 4. Stuck volume states and down hosts need a cloud admin. A run can stay stopped mid-downtime until one acts.
+> 5. Our own engine (fencing, leases) is critical code and needs crash tests in CI against real PostgreSQL.
+>
+> **Needs the maintainer**
+> - Accept the MVP scope limits (one volume, image boot, floating IP required, no temporary floating IP).
+> - Default of the optional snapshot before handoff: I set it to off.
+> - Keep the new VM stopped after a revert until an operator discards it.
+> - Whether the console-output API is available to a project member is unverified. If the lab says no, a VM's host
+>   key can't be verified and that profile has to opt into TOFU to proceed (ADR-0006).
+
+**Agent 1 disposition:** accepted.
+- All eight requested requirement changes are applied.
+- The disagreements with Agents 3 and 6 are resolved in Agent 2's favour (Architect authority); they are recorded in
+  ADR-0004.
+- The two security points go to the independent Security reviewer: automatic in-window rollback, and the tag
+  exemption of `claim_resources`.
+- The maintainer questions are added to the milestone.
 
 ### Agent 8 — Security Engineer, authoring (Opus 5.5) — done, 115,807 tokens, 11 tool calls, 4 min 34 s
 
