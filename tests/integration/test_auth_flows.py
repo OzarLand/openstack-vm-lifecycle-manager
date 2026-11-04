@@ -118,6 +118,7 @@ def test_only_the_owner_can_submit_a_password_structural() -> None:
         ("POST", "/enrol/{link}"),
         ("POST", "/api/v1/session"),
         ("POST", "/api/v1/session/reauth"),
+        ("POST", "/account/stepup"),  # the UI form for the same reauth call
     }
 
 
@@ -330,7 +331,12 @@ def test_every_unsafe_authenticated_route_enforces_csrf_and_origin(env: Env) -> 
             ("no origin", no_origin),
         ):
             assert r.status_code == 403, (method, path, name, r.status_code)
-            assert r.json()["code"] == "csrf-failed", (method, path, name)
+            code = (
+                r.json()["code"]
+                if r.headers["content-type"].startswith("application/")
+                else re.search(r'data-code="([^"]+)"', r.text).group(1)  # type: ignore[union-attr]
+            )  # UI pages are HTML: the error page carries the same code
+            assert code == "csrf-failed", (method, path, name)
     # and the same routes are reachable with a correct token + origin (not CSRF-blocked)
     r = admin.post(
         "/api/v1/users",

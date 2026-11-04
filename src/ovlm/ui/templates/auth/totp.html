@@ -11,7 +11,7 @@
     <p><a href="/">Continue to the dashboard</a></p>
   {% elif secret %}
     <ol class="steps">
-      <li>Add this key to your authenticator app (account <code>OVLM</code>):<br><code class="key">{{ secret }}</code></li>
+      <li>Add this key to your authenticator app (account <code>OVLM</code>):<br>Key: <code class="key">{{ secret }}</code></li>
       <li>Or open this link on your device: <code class="wrap">{{ uri }}</code></li>
       <li>Enter the 6-digit code the app shows.</li>
     </ol>

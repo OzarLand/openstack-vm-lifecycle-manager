@@ -105,10 +105,21 @@ def render(
 
 
 def error_page(
-    request: Request, status: int, title: str, detail: str, next_action: str | None = None
+    request: Request,
+    status: int,
+    title: str,
+    detail: str,
+    next_action: str | None = None,
+    code: str = "",
 ) -> HTMLResponse:
     return render(
-        request, "error.html", status, title=title, detail=detail, next_action=next_action
+        request,
+        "error.html",
+        status,
+        title=title,
+        detail=detail,
+        next_action=next_action,
+        code=code,
     )
 
 
@@ -139,10 +150,12 @@ class UiRoute(APIRoute):
                 ):  # a privileged user who has not enrolled TOTP holds no grants yet: send them to enrol
                     return _redirect(request, "/account/totp")
                 return error_page(
-                    request, exc.status_code, exc.title, str(exc.detail), exc.next_action
+                    request, exc.status_code, exc.title, str(exc.detail), exc.next_action, exc.code
                 )
             except DomainError as exc:
-                return error_page(request, exc.status, exc.title, exc.detail, exc.next_action)
+                return error_page(
+                    request, exc.status, exc.title, exc.detail, exc.next_action, exc.code
+                )
 
         return handler
 

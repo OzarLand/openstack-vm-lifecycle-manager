@@ -2,7 +2,7 @@
 {% block title %}{{ title }}{% endblock %}
 {% block content %}
 <h1>{{ title }}</h1>
-<p role="alert" class="banner error">{{ detail }}</p>
+<p role="alert" class="banner error"{% if code %} data-code="{{ code }}"{% endif %}>{{ detail }}</p>
 {% if next_action %}<p><strong>What to do:</strong> {{ next_action }}</p>{% endif %}
 <p><a href="/">Back to the dashboard</a></p>
 {% endblock %}
