@@ -75,7 +75,9 @@ def _fire(mode: Mode, name: str) -> None:
     sys.stderr.flush()
     if mode == "exit":
         os._exit(137)
-    os.kill(os.getpid(), signal.SIGSTOP)
+    # Directed at the calling thread so the stop takes effect before this thread runs any further code
+    # (``os.kill(getpid())`` lets the kernel pick a thread, and this one could race past its next check).
+    signal.pthread_kill(threading.get_ident(), signal.SIGSTOP)
 
 
 @dataclass

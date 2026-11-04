@@ -43,8 +43,11 @@ class SystemClock:
 class FakeClock:
     """Deterministic clock for tests: time moves only through ``advance`` and ``sleep``."""
 
-    def __init__(self, start: float = 1000.0) -> None:
+    def __init__(self, start: float = 1000.0, *, sleep_advances: bool = True) -> None:
+        """``sleep_advances=False``: ``sleep`` waits (really, interruptibly) without moving fake time, for
+        tests where a step polls in a loop and time must only move when the test says so."""
         self._now = start
+        self._sleep_advances = sleep_advances
         self._lock = threading.Lock()
         self.sleeps: list[float] = []
 
@@ -60,5 +63,7 @@ class FakeClock:
         self.sleeps.append(seconds)
         if interrupt is not None and interrupt.is_set():
             return True
+        if not self._sleep_advances:
+            return interrupt.wait(seconds) if interrupt is not None else False
         self.advance(max(seconds, 0.0))
         return bool(interrupt and interrupt.is_set())
