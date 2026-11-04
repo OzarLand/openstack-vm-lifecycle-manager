@@ -59,7 +59,9 @@ smoke:  ## Assertions on a running stack (`make up` first); used by CI
 	echo "== api answers on loopback"; \
 	curl -fsS http://127.0.0.1:8000/healthz; echo; \
 	curl -fsS http://127.0.0.1:8000/readyz; echo; \
-	curl -fsS http://127.0.0.1:8000/ | grep -q htmx; \
+	echo "== anonymous / redirects to the login page, which loads htmx"; \
+	test "$$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' http://127.0.0.1:8000/)" = "303 http://127.0.0.1:8000/login"; \
+	curl -fsS http://127.0.0.1:8000/login | grep -q htmx; \
 	echo "== /metrics is not on the public port"; \
 	test "$$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/metrics)" = 404; \
 	echo "== metrics on the internal ports (Compose network only)"; \

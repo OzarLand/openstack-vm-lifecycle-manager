@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<div id="summary" hx-get="/ui/fragments/summary" hx-trigger="every 60s" hx-swap="innerHTML">
+  {% include "fragments/summary.html" %}
+</div>
+<section aria-labelledby="attn">
+  <h2 id="attn">Upcoming renewals and runs needing attention</h2>
+  <p class="muted">Nothing to show yet: renewal plans and runs arrive with the renewal workflow.</p>
+</section>
+{% endblock %}
