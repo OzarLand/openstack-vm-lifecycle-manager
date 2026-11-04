@@ -3,14 +3,39 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
   <meta name="htmx-config" content='{"includeIndicatorStyles": false}'>
-  <title>{% block title %}OVLM{% endblock %} - OpenStack VM Lifecycle Manager</title>
+  <title>{% block title %}OVLM{% endblock %} · OVLM</title>
   <link rel="stylesheet" href="/static/ovlm.css">
-  <script src="/static/htmx.min.js"></script>
+  <script src="/static/htmx.min.js" defer></script>
 </head>
-<body>
-  <header><strong>OVLM</strong> <span class="muted">OpenStack VM Lifecycle Manager</span></header>
-  <main>{% block content %}{% endblock %}</main>
-  <footer class="muted">OVLM {{ version }}</footer>
+{# The CSRF token rides on every HTMX request (security-model.md 2.3); plain forms carry it as a hidden field. #}
+{% set who = request.state.principal %}
+<body{% if who and who.csrf_token %} hx-headers='{{ {"X-CSRF-Token": who.csrf_token} | tojson | forceescape }}'{% endif %}>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="mark" aria-hidden="true"></span>OVLM <span class="muted">OpenStack VM Lifecycle Manager</span></a>
+    {% if who %}
+    <div class="who">
+      <span class="user">{{ who.username }}</span>
+      <span class="roles">{% for role, scope in (roles or []) %}<span class="chip">{{ role }} · {{ scope }}</span>{% endfor %}</span>
+      <form method="post" action="/logout" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+        <button type="submit" class="link">Log out</button>
+      </form>
+    </div>
+    {% endif %}
+  </header>
+  {% if who and not who.totp_enrolment_required %}
+  <nav class="nav" aria-label="Main">
+    <ul>
+      {% for key, href, label in nav %}
+      <li><a href="{{ href }}"{% if key == active %} aria-current="page"{% endif %}>{{ label }}</a></li>
+      {% endfor %}
+    </ul>
+  </nav>
+  {% endif %}
+  <main id="main" class="{% block main_class %}{% endblock %}">{% block content %}{% endblock %}</main>
+  <footer class="muted">OVLM {{ version }} · Apache-2.0 · an <a href="https://github.com/OzarLand">OzarLand</a> project</footer>
 </body>
 </html>

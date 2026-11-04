@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}{{ server.name or server.openstack_id }}{% endblock %}
+{% block content %}
+{% set d = server.data %}
+{% set obs = server.observation %}
+<p class="crumbs"><a href="/inventory">Inventory</a> / {{ server.name or server.openstack_id }}</p>
+<h1>{{ server.name or server.openstack_id }}
+  {% if obs.status == "gone" %}<span class="badge gone">gone</span>{% elif obs.status == "unknown" %}<span class="badge warn">unknown</span>{% endif %}
+  {% if managed %}<span class="badge managed">managed</span>{% else %}<span class="badge">not managed</span>{% endif %}</h1>
+{% if notice %}<p role="status" class="banner ok">{{ notice }}</p>{% endif %}
+{% if error %}<p role="alert" class="banner error"><strong>{{ error.title }}.</strong> {{ error.detail }}{% if error.next_action %} {{ error.next_action }}{% endif %}</p>{% endif %}
+{% if obs.status == "gone" %}<p class="banner warn">The last syncs did not see this server since {{ obs.gone_at | timestamp }}. Showing its last known state.</p>{% endif %}
+
+<div class="sides">
+  <section aria-labelledby="desired-h" class="panel">
+    <h2 id="desired-h">Desired state</h2>
+    {% if managed %}
+      <dl class="kv">
+        <dt>Service</dt><dd>{% if service %}{{ service.name }} <span class="muted mono">{{ service.slug }}</span>{% endif %}</dd>
+        <dt>Role</dt><dd>{{ managed.role }}</dd>
+        <dt>Profile</dt><dd>{% if desired and desired.profile_id %}<span class="mono">{{ desired.profile_id | short_id }}</span>{% if desired.profile_version %} v{{ desired.profile_version }}{% endif %}{% else %}<span class="muted">no profile assigned</span>{% endif %}</dd>
+        <dt>Registered</dt><dd>{{ managed.registered_at | timestamp }}</dd>
+        <dt>SSH host key</dt><dd>{% if managed.host_key_confirmed_at %}confirmed {{ managed.host_key_confirmed_at | timestamp }}{% else %}<span class="muted">not confirmed</span>{% endif %}</dd>
+      </dl>
+      <p class="muted">Profile contents and drift against the observed state arrive with the profiles module.</p>
+    {% else %}
+      <p class="empty"><strong>Not managed.</strong> OVLM only observes this server; there is no desired state to compare.</p>
+      {% if who.roles() and ("operator" in who.roles()) %}
+        {% if can_register %}
+        <h3>Register as managed VM</h3>
+        {% if services %}
+        <form method="post" action="/inventory/servers/{{ server.id }}/register" hx-boost="true">
+          <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+          <label>Service
+            <select name="service_id" required>
+              <option value="">choose a service</option>
+              {% for svc in services %}<option value="{{ svc.id }}">{{ svc.name }} ({{ svc.slug }})</option>{% endfor %}
+            </select>
+          </label>
+          <button type="submit">Register as managed VM</button>
+        </form>
+        <p class="muted">The VM becomes the service's current VM. Only services of this server's project are offered.</p>
+        {% else %}
+        <p>No service exists in this server's project. <a href="/services">Create a service</a> first.</p>
+        {% endif %}
+        {% else %}
+        <p class="muted">Only servers that are present in the last sync can be registered.</p>
+        {% endif %}
+      {% endif %}
+    {% endif %}
+  </section>
+
+  <section aria-labelledby="observed-h" class="panel">
+    <h2 id="observed-h">Observed state</h2>
+    <dl class="kv">
+      <dt>Status</dt><dd>{{ d.status }}{% if d.vm_state %} <span class="muted">({{ d.vm_state }}{% if d.task_state %}, task {{ d.task_state }}{% endif %})</span>{% endif %}</dd>
+      <dt>Age</dt><dd>{{ (d.launched_at or d.created) | age }} <span class="muted">launched {{ (d.launched_at or d.created) | timestamp }}</span></dd>
+      <dt>Flavor</dt><dd>{{ d.flavor_original_name or "unknown" }}{% if d.flavor_vcpus %} <span class="muted">{{ d.flavor_vcpus }} vCPU, {{ d.flavor_ram }} MB RAM, {{ d.flavor_disk }} GB disk</span>{% endif %}</dd>
+      <dt>Image</dt><dd>{% if d.image_id %}<span class="mono">{{ d.image_id | short_id }}</span>{% else %}<span class="muted">boot from volume</span>{% endif %}</dd>
+      <dt>Zone</dt><dd>{{ d.availability_zone or "unknown" }}</dd>
+      <dt>Locked</dt><dd>{{ "yes" if d.locked else "no" }}{% if d.locked_reason %} <span class="muted">{{ d.locked_reason }}</span>{% endif %}</dd>
+      <dt>Tags</dt><dd>{% for t in d.tags or [] %}<span class="chip">{{ t }}</span> {% else %}<span class="muted">none</span>{% endfor %}</dd>
+      <dt>Server ID</dt><dd class="mono">{{ server.openstack_id }}</dd>
+      <dt>Project</dt><dd class="mono">{{ server.project_connection_id }}</dd>
+      <dt>Last sync</dt><dd>{{ obs.synced_at | timestamp }}{% if obs.missed_syncs %} <span class="muted">missed {{ obs.missed_syncs }}</span>{% endif %}</dd>
+    </dl>
+    <h3>Volumes</h3>
+    {% if server.attachments %}<ul class="plain">{% for a in server.attachments %}<li><span class="mono">{{ a.data.volume_openstack_id }}</span> {% if a.data.device %}<span class="muted">{{ a.data.device }}</span>{% endif %}</li>{% endfor %}</ul>{% else %}<p class="muted">None attached.</p>{% endif %}
+    <h3>Network</h3>
+    {% if server.ports %}<ul class="plain">{% for p in server.ports %}<li>{% for ip in p.data.fixed_ips or [] %}<span class="mono">{{ ip[0] if ip is not string else ip }}</span> {% endfor %}<span class="muted">{{ p.name or p.openstack_id | short_id }}</span></li>{% endfor %}</ul>{% else %}<p class="muted">No ports.</p>{% endif %}
+    <h3>Floating IPs</h3>
+    {% if server.floating_ips %}<ul class="plain">{% for f in server.floating_ips %}<li><span class="mono">{{ f.data.floating_ip_address }}</span></li>{% endfor %}</ul>{% else %}<p class="muted">None.</p>{% endif %}
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Inventory{% endblock %}
+{% block content %}
+<h1>Inventory</h1>
+<p class="muted">Servers as seen by the last sync. Inventory is read-only observation.</p>
+{% for p in problems %}<p role="alert" class="banner error">{{ p }}</p>{% endfor %}
+<form method="get" action="/inventory" class="filters" role="search" aria-label="Filter servers"
+      hx-get="/inventory" hx-target="#results" hx-select="#results" hx-push-url="true" hx-trigger="submit, change from:select">
+  <label>Project <input name="project" value="{{ filters.project }}" placeholder="project connection id" size="38" spellcheck="false"></label>
+  <label>Status
+    <select name="status">
+      <option value="">any</option>
+      {% for s in statuses %}<option value="{{ s }}"{% if s == filters.status %} selected{% endif %}>{{ s }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>Managed
+    <select name="registered">
+      <option value="">any</option>
+      <option value="yes"{% if filters.registered == "yes" %} selected{% endif %}>managed</option>
+      <option value="no"{% if filters.registered == "no" %} selected{% endif %}>not managed</option>
+    </select>
+  </label>
+  <button type="submit">Filter</button>
+  <a href="/inventory">Reset</a>
+</form>
+<div id="results">
+  {% if rows %}
+  <table>
+    <caption class="sr">Servers</caption>
+    <thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Age</th><th scope="col">Volumes</th><th scope="col">Floating IPs</th><th scope="col">Project</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+    {% set s = r.item %}
+    <tr{% if s.observation.status == "gone" %} class="gone"{% endif %}>
+      <th scope="row"><a href="/inventory/servers/{{ s.id }}">{{ s.name or s.openstack_id }}</a>
+        {% if r.managed %}<span class="badge managed">managed</span>{% endif %}
+        <div class="muted mono">{{ s.openstack_id | short_id }}</div></th>
+      <td>
+        {% if s.observation.status == "gone" %}<span class="badge gone">gone</span> <span class="muted">since {{ s.observation.gone_at | timestamp }}</span>
+        {% elif s.observation.status == "unknown" %}<span class="badge warn">unknown</span>
+        {% else %}<span class="badge ok">{{ s.data.status or "present" }}</span>{% endif %}
+      </td>
+      <td>{{ (s.data.launched_at or s.data.created) | age }}</td>
+      <td>{% for v in r.volumes %}<span class="mono">{{ v.id | short_id }}</span>{% if v.device %} <span class="muted">{{ v.device }}</span>{% endif %}{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">none</span>{% endfor %}</td>
+      <td>{% for ip in r.floating_ips %}<span class="mono">{{ ip }}</span>{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">none</span>{% endfor %}</td>
+      <td class="mono">{{ s.project_connection_id | short_id }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="pager">
+    {% if next_cursor %}<a rel="next" href="/inventory?{{ {"project": filters.project, "status": filters.status, "registered": filters.registered, "cursor": next_cursor} | urlencode }}">Next page</a>{% endif %}
+  </p>
+  {% elif not problems %}
+  <p class="empty">No servers match. If the inventory is empty, run an inventory sync.</p>
+  {% endif %}
+</div>
+{% endblock %}
