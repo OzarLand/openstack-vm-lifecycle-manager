@@ -1,0 +1,254 @@
+[← OVLM home](../README.md)
+
+# Install guide (evaluation, Docker Compose)
+
+| Field | Value |
+|---|---|
+| Status | **Implemented, partly integration tested.** The stack in this guide starts and passes `make smoke` in CI. A TLS-fronted install and a real cloud connection are **not** lab validated. |
+| Audience | An operator who wants to evaluate OVLM on a throw-away host |
+| Last updated | 2026-11-04 |
+
+> [!WARNING]
+> **OVLM is pre-alpha and not lab validated.** The renewal workflow has not run end to end on a real cloud.
+> Do not point it at a production cloud or a project with workloads you cannot lose.
+>
+> 🛑 **The encrypted credential store is still being finished.** The design
+> ([security-model.md §5](security-model.md)) seals OpenStack credentials in the database. That code is not
+> written yet (`src/ovlm/secrets` is a stub). Today:
+> - the web UI and the API **cannot store an OpenStack credential**;
+> - a renewal is **rejected at admission** ("no credential store"), by design, so no run starts without one;
+> - the only way to use a read credential is the `ovlm inventory sync` command with a `clouds.yaml` file (§7).
+>
+> This guide shows what works today and where the gaps are. It does not describe a finished product.
+
+## 1. What you get
+
+```mermaid
+flowchart LR
+    B["Browser"] -->|HTTPS| P["Your TLS proxy<br/>(required, not included)"]
+    P -->|HTTP, loopback| A["api<br/>127.0.0.1:8000"]
+    A <--> D[("PostgreSQL<br/>Compose network only")]
+    W["worker<br/>no inbound port"] <--> D
+    W -.->|"later: Keystone application<br/>credentials (reader, member)"| O["OpenStack APIs"]
+```
+
+Four Compose services: `postgres`, `migrate` (runs once), `api` and `worker`. PostgreSQL and the metrics ports are
+never published. The api listens on **loopback only** (`127.0.0.1:8000`).
+
+## 2. Prerequisites
+
+| Need | Notes |
+|---|---|
+| A Linux host you can throw away | Not a shared or production host |
+| Docker with the Compose plugin, and GNU Make | `make up` runs `docker compose` |
+| A TLS-terminating reverse proxy | **Required.** OVLM sets `Secure` cookies and refuses to start without an external URL (§5) |
+| A DNS name for OVLM and a certificate for it | Use `ovlm.example.org` in your notes, never a real name in an issue |
+| An authenticator app (TOTP) | Mandatory for the `admin` and `approver` roles |
+| Access to an OpenStack project for the credentials (§6) | Optional for a first look; a **dedicated** project |
+
+Clone the repository and stay in its directory for every command below:
+
+```bash
+git clone https://github.com/OzarLand/openstack-vm-lifecycle-manager.git
+cd openstack-vm-lifecycle-manager
+```
+
+## 3. Generate the secrets and start the stack
+
+```bash
+make secrets   # random database passwords in ./secrets (git-ignored, files, never env values)
+make up        # builds both images, starts postgres, migrate, api and worker, waits until healthy
+```
+
+`make secrets` never overwrites an existing file. `make up` runs `make secrets` itself, so the first command is
+only there to show you where the secrets live.
+
+Check it:
+
+```bash
+make smoke     # assertions against the running stack; prints "smoke OK" at the end
+```
+
+Back up `./secrets` with the same care as the database. Do not commit it or paste its content into an issue.
+
+> [!NOTE]
+> `compose.yaml` is the **development and CI** file. It sets `OVLM_DEVELOPMENT_MODE: "true"` and publishes the api
+> on loopback. §5 shows how to switch the api to production-mode checks. Nothing in this guide makes the stack
+> highly available or backed up.
+
+## 4. Create the first admin (enrolment link)
+
+There is no default account and no password option. You create the admin without a password and get a
+**single-use enrolment link**:
+
+```bash
+docker compose exec api ovlm admin create --username alice --display-name "Alice Example" --enrol-link
+```
+
+The link is printed on stdout. It works **once** and is valid for 72 hours by default (`auth.enrolment_link_hours`).
+Without `OVLM_EXTERNAL_URL` (the unmodified Compose file) the command prints only the path, `/enrol/<token>`. Put
+your address in front of it, for example `http://127.0.0.1:8000/enrol/<token>` for a local look, or your external
+URL once §5 is done. Open it in your browser, then:
+
+1. Choose a password. The form refuses a password that breaks the policy.
+2. Sign in, then open `/account/totp` and enrol your authenticator app. Scan the code, then confirm with a
+   six-digit code. TOTP is mandatory for `admin` and `approver`. Approvals and destructive confirmations ask for a
+   fresh code each time.
+3. Create other users through the API (`POST /api/v1/users`). Each one gets an enrolment link too. The admin never
+   sets anyone's password.
+
+If you lose the link before using it, running the command again with the same username fails (`a user with this
+username already exists`, exit code 2). Use another username, or, on an evaluation host, start clean (🛑 deletes the database, see §9) with
+`make down` and `make up`.
+
+Every use of this command is audited with `principal_type=system`, `auth_method=cli`.
+
+## 5. Put a TLS proxy in front (required)
+
+OVLM does not terminate TLS. Its session and form cookies carry the `Secure` flag, so a login over plain HTTP from
+another machine does not work and must not be attempted.
+
+⚠️ **State-changing.** The settings below change how the api checks requests. Do this on the evaluation host only.
+
+Create `compose.override.yaml` next to `compose.yaml` (Compose reads it automatically):
+
+```yaml
+services:
+  api:
+    environment:
+      OVLM_DEVELOPMENT_MODE: "false"
+      OVLM_EXTERNAL_URL: "https://ovlm.example.org"   # the public origin; CSRF check and enrolment links use it
+      OVLM_HTTP__TRUSTED_PROXIES: "127.0.0.1/32"      # the address(es) the api sees your proxy as, see below
+```
+
+Then recreate the api: `docker compose up -d --wait api`.
+
+What the proxy must do:
+
+| Requirement | Why |
+|---|---|
+| Terminate TLS with a valid certificate for the external URL | Cookies are `Secure` |
+| Forward to `http://127.0.0.1:8000` on the same host | The api is published on loopback only |
+| Set `X-Forwarded-For` to the real client address, and drop any value the client sent | OVLM trusts that header **only** from `trusted_proxies` and uses it for audit |
+| Not expose `/metrics` | The api answers 404 for it on the public port; keep it so |
+| Not cache or rewrite responses | The UI uses HTMX fragments |
+
+⚠️ **Check the address the api sees.** With Docker's port publishing, the api may see the Docker bridge gateway
+instead of `127.0.0.1`. If every client in the audit log has the same address, add that address to
+`OVLM_HTTP__TRUSTED_PROXIES` (a comma-separated list). **This guide has not verified this on a real host.** Never
+trust a wider range than your proxy.
+
+With `OVLM_DEVELOPMENT_MODE` off, the api **refuses to start without** `OVLM_EXTERNAL_URL`, and the worker refuses
+to start without its separate Ansible user (`compose.yaml` sets it). Treat a start-up error as the check working.
+
+## 6. Create the two Keystone application credentials
+
+OVLM uses two credentials, one per purpose, in **one dedicated project**:
+
+| Credential | Role | Used for |
+|---|---|---|
+| `ovlm-inventory` (reader) | `reader` | Inventory and readiness. Read only. |
+| `ovlm-renewal` (member) | `member` | Renewal steps only, and only after a human approves |
+
+Why a dedicated project: a `member` can delete **any** server in its project. The blast radius of the write
+credential is the whole project, so give OVLM a project that holds only the VMs it manages
+([security-model.md §4.2](security-model.md)).
+
+The cloud administrator should:
+
+1. Create a **dedicated project** and a **dedicated Keystone service user** (not a human account).
+2. Give that user the `reader` and `member` roles in that project only. No `admin`, no other project.
+3. As that user, create the two application credentials. Replace the date with an expiry of at most 180 days:
+
+```bash
+# ⚠️ State-changing: creates a credential. The secret is shown ONCE; store it in a password manager or a secret file.
+openstack application credential create ovlm-inventory --role reader --expiration 2027-01-31T00:00:00
+
+openstack application credential create ovlm-renewal --role member --expiration 2027-01-31T00:00:00
+```
+
+Do **not** pass `--unrestricted`. Without it, the credential cannot create other credentials or trusts. Do not
+paste the output anywhere. (These are standard OpenStack client commands, not OVLM commands. Flags differ a little
+between client releases; check `openstack application credential create --help`.)
+
+Least-privilege checklist:
+
+- [ ] One project, one purpose. No other workloads in it.
+- [ ] Roles are exactly `reader` and `member`. The design has OVLM reject a credential whose token shows other roles.
+- [ ] Neither credential is unrestricted.
+- [ ] Both have an expiry. The design warns at 30 and 7 days before it. Rotation is done by the cloud administrator, out of band.
+- [ ] Access rules for the reader credential are recommended (`GET` only) but optional. For the member credential
+      they are **not** recommended in the MVP ([security-model.md §4.4](security-model.md)).
+- [ ] TLS verification to the cloud stays on. OVLM refuses `insecure`.
+- [ ] You asked the cloud administrator which policy defaults apply (`enforce_new_defaults`). If the cloud differs
+      from what the design assumes, please [tell us](../.github/ISSUE_TEMPLATE/cloud-behaviour-report.yml).
+
+🛑 **Where the credentials go today.** OVLM has nowhere to store them yet. Do not put the member credential into
+the database, an environment value or `compose.yaml`. The interim for lab use is a worker-only file source
+(`renewal.credentials_dir`), documented in the code of `src/ovlm/renewal/production.py`. It is opt-in, owner and
+permission checked, and a **reported deviation from the design**, not the finished store. Do not use it outside a
+disposable lab.
+
+## 7. Try the read-only inventory (the one thing that works with a credential)
+
+The `ovlm inventory sync` command reads one project and prints counts only. With `--dry-run` it writes nothing and
+needs no database. Create `clouds.yaml` from the **reader** credential, mode 0600, outside the repository:
+
+```yaml
+clouds:
+  ovlm-reader:
+    auth_type: v3applicationcredential
+    auth:
+      auth_url: https://keystone.example.org:5000/v3
+      application_credential_id: "<id>"
+      application_credential_secret: "<secret>"
+    region_name: RegionOne
+    interface: public
+```
+
+Run it from a source checkout (`make install` first, see [CONTRIBUTING.md](../CONTRIBUTING.md)):
+
+```bash
+uv run --frozen ovlm inventory sync --cloud ovlm-reader --clouds-yaml /path/to/clouds.yaml --dry-run
+```
+
+The command sends only GET and HEAD requests (plus the token request). Environment variables are not read.
+Without `--dry-run` it writes to the database as the worker role, which this Compose stack does not expose. Treat
+that mode as developer-only for now.
+
+## 8. What does not work yet
+
+| Gap | Status |
+|---|---|
+| Encrypted credential store (seal in the api, unseal in the worker) | 🛑 Being finished. Renewals are rejected without it |
+| Registering a cloud project from the UI or API | ⬜ Depends on the credential store |
+| Scheduled inventory sync by the worker | ⬜ Depends on project connections |
+| End-to-end renewal on a real cloud | ⬜ Not started. Not lab validated |
+| TLS proxy example configuration | ⬜ Not provided. Bring your own |
+| Backup and restore of the database and the key | ⬜ Designed ([security-model.md §5](security-model.md)), not documented as a procedure |
+| Upgrades between versions | ⬜ No upgrade guide. Expect to start clean |
+
+The day-by-day state is in [team-log.md](team-log.md) and the backlog in [roadmap.md](roadmap.md).
+
+## 9. Stop and clean up
+
+```bash
+docker compose down        # stops the stack, keeps the database volume
+```
+
+🛑 **Destructive.** Deletes the database volume `pgdata`: all users, audit records and inventory. It cannot be
+undone without a backup. Run it only on an evaluation host:
+
+```bash
+make down
+```
+
+To remove the generated secrets as well, delete the `./secrets` directory yourself after `make down`.
+
+## 10. Help
+
+- A step fails or a command does not match this guide: open a *Bug report* issue.
+- Your cloud behaves differently from what is described: open a *Cloud behaviour report*.
+- Questions: [OzarLand Discussions](https://github.com/OzarLand/ozarland/discussions).
+
+Never paste secrets, `clouds.yaml`, tokens, real hostnames or addresses.
