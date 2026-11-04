@@ -742,3 +742,11 @@ merged: the write client, RBAC, the Ansible runner, readiness, and the engine an
   `project_connection` table, tracked). The report is
   [verification-review-fixes-wave3.md](reviews/verification-review-fixes-wave3.md). A short, focused verifier cost a
   fraction of a long Fable re-review.
+
+**Started 20:10 UTC (Sonnet, disjoint from `src/ovlm/renewal/`):**
+- Felcloud lab kit for E5-6 (runbook, scripts, before/after snapshot guard, scenarios):
+  https://claude.ai/code/session_016ti9w3LhNK9CTFMZjUkS6M (`claude/ovlm-lab-kit`).
+- Runner wiring (runtime image with the `automation` group, settings, orphan sweep, separate-user mechanism,
+  restricted-artefact endpoint): https://claude.ai/code/session_016ti9vzQN4PBKzmXYQ7MYMW (`claude/ovlm-runner-wiring`).
+
+The renewal strategy (E5-4/E5-5, Opus) continues: https://claude.ai/code/session_016ti9w2W4u5bRegw53P7dqM.
