@@ -1,0 +1,17 @@
+---
+- name: "Decide: {{ case.name }}"
+  ansible.builtin.include_role:
+    name: data_volume
+    tasks_from: decide
+  vars:
+    dv_blkid_rc: "{{ case.rc }}"
+    dv_blkid_out: "{{ case.out }}"
+    ovlm_fs_type: ext4
+    ovlm_first_use: "{{ case.first_use }}"
+
+- name: "Check: {{ case.name }}"
+  ansible.builtin.assert:
+    that:
+      - dv_decision.action == case.action
+      - dv_decision.classification == case.cls
+    quiet: true

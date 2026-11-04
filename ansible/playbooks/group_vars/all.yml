@@ -1,0 +1,46 @@
+---
+# Shared defaults for every phase playbook. Everything the contract passes arrives in the
+# `ovlm` dict (env/extravars JSON); these variables only give it short names and defaults.
+# Extra-vars (including `ovlm_test_mode`, see README) always win over this file.
+
+# --- contract inputs (automation-contract.md section 3) ---
+ovlm_role: "{{ ovlm.role | default('new') }}"
+ovlm_volume_id: "{{ ovlm.data_volume.id | default('') }}"
+ovlm_expected_serial: "{{ ovlm.data_volume.expected_serial | default(ovlm_volume_id) }}"
+ovlm_mount_point: "{{ ovlm.data_volume.mount_point | default('/srv/data') }}"
+ovlm_fs_type: "{{ ovlm.data_volume.fs_type | default('ext4') }}"
+ovlm_first_use: "{{ ovlm.data_volume.first_use | default(false) | bool }}"
+
+# --- profile inventory_vars (ovlm.vars, non-secret) ---
+ovlm_app_port: "{{ ovlm.vars.app_port | default(8080) | int }}"
+ovlm_data_marker: "{{ ovlm.vars.data_marker | default('.ovlm-marker') }}"
+ovlm_service_units: "{{ ovlm.vars.service_units | default(['ovlm-counter.service']) }}"
+ovlm_min_free_root_mib: "{{ ovlm.vars.min_free_root_mib | default(512) | int }}"
+ovlm_device_wait_seconds: "{{ ovlm.vars.device_wait_seconds | default(120) | int }}"
+# Pinned package versions (contract 3.2: "versions pinned in vars"). An empty string means
+# "any installed version"; fill in exact versions for the real lab (apt `name=version`).
+ovlm_packages:
+  python3: ""
+  psmisc: ""        # fuser, used by quiesce
+  e2fsprogs: ""     # blkid helpers and the read-only e2fsck -n in data_attach
+  util-linux: ""    # mountpoint, findmnt
+
+# --- optional values OVLM may pass (healthcheck) ---
+ovlm_expected_marker: "{{ ovlm.expected_marker_checksum | default('') }}"
+ovlm_expected_fs_uuid: "{{ ovlm.expected_fs_uuid | default('') }}"
+
+# --- where the ovlm.result/1 JSON is written (on the controller) ---
+ovlm_result_path: "{{ lookup('ansible.builtin.env', 'PWD') }}/artifacts/result.json"
+
+# --- CI only, never set by OVLM: run the service without systemd and without a real mount ---
+ovlm_test_mode: false
+ovlm_test_fs_uuid: "00000000-0000-4000-8000-000000000001"
+
+# --- fixed ids so file ownership on the data volume survives a VM replacement ---
+counter_uid: 9101
+counter_gid: 9101
+counter_user: ovlm-counter
+counter_app_dir: /opt/ovlm-counter
+counter_env_dir: /etc/ovlm-counter
+counter_run_dir: /run/ovlm-counter
+counter_state_dir: /var/lib/ovlm-counter-state   # ROOT DISK, never the data volume (quiesce records)

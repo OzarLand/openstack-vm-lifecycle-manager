@@ -1,0 +1,134 @@
+---
+# counter_app (configure): user, app file, env file, systemd unit. It NEVER enables or starts the
+# service (that is start_service) and never touches data-volume contents (contract 3.2 invariant).
+# Every task here is STATE-CHANGING on the target VM.
+
+- name: Create the service group with a fixed gid (STATE-CHANGING)
+  ansible.builtin.group:
+    name: "{{ counter_user }}"
+    gid: "{{ counter_gid }}"
+    system: true
+  register: ca_group
+
+- name: Create the service user with a fixed uid (STATE-CHANGING)
+  # Fixed uid/gid: files on the data volume must stay owned by the same id after a VM replacement.
+  ansible.builtin.user:
+    name: "{{ counter_user }}"
+    uid: "{{ counter_uid }}"
+    group: "{{ counter_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+  register: ca_user
+
+- name: Create app and config directories (STATE-CHANGING)
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ counter_app_dir }}"
+    - "{{ counter_env_dir }}"
+  register: ca_dirs
+
+- name: Install the app (STATE-CHANGING)
+  ansible.builtin.copy:
+    src: ovlm_counter.py
+    dest: "{{ counter_app_dir }}/ovlm_counter.py"
+    owner: root
+    group: root
+    mode: "0755"
+  register: ca_app
+
+- name: Install the environment file, no secrets in it (STATE-CHANGING)
+  ansible.builtin.template:
+    src: ovlm-counter.env.j2
+    dest: "{{ counter_env_dir }}/ovlm-counter.env"
+    owner: root
+    group: root
+    mode: "0644"
+  register: ca_env
+
+- name: Probe whether the data mount point is already a mount (read-only)
+  # On the CURRENT VM in --check mode the volume is mounted: then we must not "fix" the directory.
+  ansible.builtin.command: mountpoint -q {{ ovlm_mount_point | quote }}
+  register: counter_mp_probe
+  changed_when: false
+  failed_when: counter_mp_probe.rc not in [0, 1, 32]
+  check_mode: false
+
+- name: Create the empty mount-point directory, root-owned and mode 0000 (STATE-CHANGING)
+  # Nothing can write to the root disk by mistake. Skipped in test mode and when already mounted.
+  ansible.builtin.file:
+    path: "{{ ovlm_mount_point }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0000"
+  when: not ovlm_test_mode | bool and counter_mp_probe.rc != 0
+  register: ca_mp
+
+- name: Make the empty mount-point directory immutable (STATE-CHANGING; DOCUMENTED-UNVERIFIED on the target fs)
+  ansible.builtin.file:
+    path: "{{ ovlm_mount_point }}"
+    attributes: i
+  when: not ovlm_test_mode | bool and counter_mp_probe.rc != 0
+  register: ca_mpi
+
+- name: TEST MODE ONLY - mount-point stand-in owned by the service user (STATE-CHANGING)
+  ansible.builtin.file:
+    path: "{{ ovlm_mount_point }}"
+    state: directory
+    owner: "{{ counter_user }}"
+    group: "{{ counter_user }}"
+    mode: "0750"
+  when: ovlm_test_mode | bool
+  register: ca_mptest
+
+- name: Install the systemd unit, NOT enabled and NOT started (STATE-CHANGING)
+  ansible.builtin.template:
+    src: ovlm-counter.service.j2
+    dest: /etc/systemd/system/ovlm-counter.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: counter_unit
+  when: not ovlm_test_mode | bool
+
+- name: Reload systemd after a unit change (STATE-CHANGING)
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: not ovlm_test_mode | bool and counter_unit is changed
+
+- name: TEST MODE ONLY - launcher script and run directory instead of systemd (STATE-CHANGING)
+  ansible.builtin.template:
+    src: run-testmode.sh.j2
+    dest: "{{ counter_app_dir }}/run-testmode.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  when: ovlm_test_mode | bool
+  register: ca_launch
+
+- name: TEST MODE ONLY - run directory for pid and log (STATE-CHANGING)
+  ansible.builtin.file:
+    path: "{{ counter_run_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: ovlm_test_mode | bool
+  register: ca_run
+
+- name: Record what configure did
+  ansible.builtin.set_fact:
+    ovlm_facts:
+      app: "{{ counter_app_dir }}/ovlm_counter.py"
+      mount_point: "{{ ovlm_mount_point }}"
+      service_mode: "{{ 'test-no-systemd' if ovlm_test_mode | bool else 'systemd' }}"
+    ovlm_changed: >-
+      {{ [base_pkgs, ca_group, ca_user, ca_dirs, ca_app, ca_env, ca_mp, ca_mpi, ca_mptest, counter_unit, ca_launch, ca_run]
+         | select('defined') | map(attribute='changed', default=false) | select | list | length > 0 }}
+    ovlm_message: "configured (service not started)"

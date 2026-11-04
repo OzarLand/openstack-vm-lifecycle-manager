@@ -1,0 +1,25 @@
+---
+# CI test of the data_attach decision table (automation-contract.md 3.3) with canned blkid output.
+# No device, no cloud, no root needed: it only exercises roles/data_volume/tasks/decide.yml.
+- name: Decision table cases
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    cases:
+      - {name: blank, first_use: false, rc: 2, out: "", action: stop, cls: needs_human}
+      - {name: blank_first_use, first_use: true, rc: 2, out: "", action: stop, cls: fatal}
+      - {name: ext4_match, first_use: false, rc: 0, out: "DEVNAME=/dev/vdb\nUUID=11111111-2222-4333-8444-555555555555\nBLOCK_SIZE=4096\nTYPE=ext4\n", action: mount, cls: ok}
+      - {name: ext4_match_first_use_flag_ignored, first_use: true, rc: 0, out: "UUID=11111111-2222-4333-8444-555555555555\nTYPE=ext4\n", action: mount, cls: ok}
+      - {name: other_fs, first_use: false, rc: 0, out: "UUID=aaaaaaaa-2222-4333-8444-555555555555\nTYPE=xfs\n", action: stop, cls: needs_human}
+      - {name: partition_table, first_use: false, rc: 0, out: "PTUUID=abcd\nPTTYPE=gpt\n", action: stop, cls: needs_human}
+      - {name: lvm, first_use: false, rc: 0, out: "UUID=abc\nTYPE=LVM2_member\n", action: stop, cls: needs_human}
+      - {name: fs_without_uuid, first_use: false, rc: 0, out: "TYPE=ext4\n", action: stop, cls: needs_human}
+      - {name: luks_even_if_first_use, first_use: true, rc: 0, out: "UUID=abc\nTYPE=crypto_LUKS\n", action: stop, cls: needs_human}
+  tasks:
+    - name: Run every case
+      ansible.builtin.include_tasks: decision_case.yml
+      loop: "{{ cases }}"
+      loop_control:
+        loop_var: case
+        label: "{{ case.name }}"

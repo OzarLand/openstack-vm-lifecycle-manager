@@ -1,0 +1,23 @@
+# Managed by Ansible (ovlm-counter).
+[Unit]
+Description=OVLM reference workload (counter on the data volume)
+After=network-online.target local-fs.target
+Wants=network-online.target
+# The service must never run on the root disk: it needs the data volume mount.
+RequiresMountsFor={{ ovlm_mount_point }}
+
+[Service]
+User={{ counter_user }}
+Group={{ counter_user }}
+EnvironmentFile={{ counter_env_dir }}/ovlm-counter.env
+ExecStart=/usr/bin/python3 {{ counter_app_dir }}/ovlm_counter.py
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths={{ ovlm_mount_point }}
+
+[Install]
+WantedBy=multi-user.target

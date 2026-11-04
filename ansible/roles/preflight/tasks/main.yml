@@ -1,0 +1,64 @@
+---
+# preflight: READ-ONLY, assert-only. Contract 3.1. Nothing here changes the target.
+- name: Minimal facts (read-only)
+  ansible.builtin.setup:
+    gather_subset: [min]
+
+- name: Privilege escalation works (read-only)
+  ansible.builtin.command: id -u
+  register: pf_id
+  changed_when: false
+  check_mode: false
+
+- name: Free space on the root filesystem in MiB (read-only)
+  ansible.builtin.command: df --output=avail -BM /
+  register: pf_df
+  changed_when: false
+  check_mode: false
+
+- name: Required commands are present (read-only)
+  ansible.builtin.command: sh -c 'command -v {{ item }}'
+  register: pf_cmds
+  loop: [blkid, mountpoint, findmnt, fuser, readlink, e2fsck, start-stop-daemon]
+  loop_control:
+    label: "{{ item }}"
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Check that systemd is the init system (read-only; not required in test mode)
+  ansible.builtin.stat:
+    path: /run/systemd/system
+  register: pf_systemd
+  check_mode: false
+
+- name: Evaluate
+  ansible.builtin.set_fact:
+    pf_free_mib: "{{ (pf_df.stdout_lines[-1] | trim | regex_replace('M$', '')) | int }}"
+    pf_missing: "{{ pf_cmds.results | rejectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+
+- name: Record checks
+  ansible.builtin.set_fact:
+    ovlm_changed: false
+    ovlm_checks:
+      - {name: become_root, ok: "{{ pf_id.stdout == '0' }}", detail: "uid after become: {{ pf_id.stdout }}", observed: "{{ pf_id.stdout }}", expected: "0"}
+      - {name: disk_space, ok: "{{ pf_free_mib | int >= ovlm_min_free_root_mib | int }}", detail: "{{ pf_free_mib }} MiB free on /", observed: "{{ pf_free_mib }}", expected: ">= {{ ovlm_min_free_root_mib }}"}
+      - {name: commands, ok: "{{ pf_missing | length == 0 }}", detail: "missing: {{ pf_missing | join(',') | default('none', true) }}", observed: "{{ pf_missing }}", expected: []}
+      - {name: init_system, ok: "{{ pf_systemd.stat.exists or ovlm_test_mode | bool }}", detail: "systemd present: {{ pf_systemd.stat.exists }}", observed: "{{ pf_systemd.stat.exists }}", expected: true}
+    ovlm_facts:
+      os: "{{ ansible_facts.distribution | default('?') }} {{ ansible_facts.distribution_version | default('?') }}"
+      python: "{{ ansible_facts.python_version | default('?') }}"
+      free_root_mib: "{{ pf_free_mib }}"
+
+- name: Name the failed checks
+  ansible.builtin.set_fact:
+    pf_failed: "{{ ovlm_checks | rejectattr('ok') | map(attribute='name') | list }}"
+
+- name: Fail (retryable) when a prerequisite is missing
+  ansible.builtin.fail:
+    msg: "preflight failed: {{ pf_failed | join(', ') }}"
+  when: pf_failed | length > 0
+
+- name: Passed
+  ansible.builtin.set_fact:
+    ovlm_message: "preflight ok"

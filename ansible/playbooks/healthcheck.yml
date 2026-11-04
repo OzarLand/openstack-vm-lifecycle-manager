@@ -1,0 +1,34 @@
+---
+# OVLM phase: healthcheck  (READ-ONLY, any number of times, check mode safe)
+# Exit 0 healthy, 2 unhealthy; see README for exit 1/3.
+# Contract: docs/automation-contract.md section 3.6. Writes ovlm.result/1 to ovlm_result_path.
+# Failure handling: any failure is caught, classified, written to the result file, then re-raised
+# (ansible-playbook exit 2). Planned failures set ovlm_class; unplanned ones get the phase default.
+- name: "OVLM phase healthcheck"
+  hosts: ovlm_target        # the only pattern the contract allows
+  become: true
+  gather_facts: false
+  vars:
+    ovlm_phase: healthcheck
+    ovlm_default_class: retryable
+  tasks:
+    - name: "Run the healthcheck phase"
+      block:
+        - name: "Role healthcheck"
+          ansible.builtin.include_role:
+            name: healthcheck
+      rescue:
+        - name: Remember the failure
+          ansible.builtin.set_fact:
+            ovlm_failed: true
+            ovlm_message: "{{ (ansible_failed_task.name | default('task')) ~ ': ' ~ (ansible_failed_result.msg | default('failed')) }}"
+      always:
+        - name: Write the ovlm.result/1 document
+          ansible.builtin.include_role:
+            name: ovlm_result
+            tasks_from: write
+
+    - name: Fail the play when the phase failed (exit code 2)
+      ansible.builtin.fail:
+        msg: "{{ ovlm_message }}"
+      when: ovlm_failed | default(false) | bool

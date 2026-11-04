@@ -1,0 +1,134 @@
+---
+# quiesce (OLD VM, before OVLM detaches the volume). Contract 3.4.
+# STATE-CHANGING: stops units (never disables), sync, umount. Never edits fstab, never forces.
+# Downtime starts here; OVLM records the maintenance-window decision before calling it.
+
+- name: Is the data volume mounted right now? (read-only)
+  ansible.builtin.command: mountpoint -q {{ ovlm_mount_point | quote }}
+  register: q_mp_before
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Stop the service units (STATE-CHANGING; stopped, never disabled)
+  ansible.builtin.include_role:
+    name: counter_app
+    tasks_from: service_stop
+
+- name: Read the marker checksum before unmounting (read-only)
+  ansible.builtin.stat:
+    path: "{{ ovlm_mount_point }}/{{ ovlm_data_marker }}"
+    checksum_algorithm: sha256
+  register: q_marker
+  check_mode: false
+  when: q_mp_before.rc == 0 or ovlm_test_mode | bool
+
+- name: Read the checksum recorded by a previous quiesce on the root disk (read-only)
+  ansible.builtin.slurp:
+    src: "{{ counter_state_dir }}/last-quiesce.json"
+  register: q_prev
+  failed_when: false
+  check_mode: false
+  when: q_mp_before.rc != 0 and not ovlm_test_mode | bool
+
+- name: Decide the marker checksum to report
+  ansible.builtin.set_fact:
+    q_marker_sha: >-
+      {{ q_marker.stat.checksum if (q_marker is defined and q_marker.stat is defined and q_marker.stat.exists | default(false))
+         else ((q_prev.content | b64decode | from_json).marker_sha256 if (q_prev is defined and q_prev.content is defined) else none) }}
+    q_was_mounted: "{{ q_mp_before.rc == 0 }}"
+
+- name: Stop - the volume is not mounted and no earlier quiesce record exists
+  ansible.builtin.set_fact:
+    ovlm_class: needs_human
+  when: q_mp_before.rc != 0 and not ovlm_test_mode | bool and q_prev.content is not defined
+
+- name: Fail - nothing to compare against
+  ansible.builtin.fail:
+    msg: "{{ ovlm_mount_point }} is not mounted and there is no earlier quiesce record: state is unknown"
+  when: q_mp_before.rc != 0 and not ovlm_test_mode | bool and q_prev.content is not defined
+
+- name: Confirm no process holds the mount (read-only; fuser -m rc 0 means somebody does)
+  ansible.builtin.command: fuser -vm {{ ovlm_mount_point | quote }}
+  register: q_fuser
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: q_mp_before.rc == 0 and not ovlm_test_mode | bool
+
+- name: Refuse to detach while the mount is in use
+  ansible.builtin.set_fact:
+    ovlm_class: needs_human
+  when: q_mp_before.rc == 0 and not ovlm_test_mode | bool and q_fuser.rc == 0
+
+- name: Fail - mount busy
+  ansible.builtin.fail:
+    msg: "processes still use {{ ovlm_mount_point }}: {{ q_fuser.stderr | default('') | truncate(150) }}"
+  when: q_mp_before.rc == 0 and not ovlm_test_mode | bool and q_fuser.rc == 0
+
+- name: Flush filesystem buffers (STATE-CHANGING in effect; no data changes)
+  ansible.builtin.command: sync
+  changed_when: false
+  when: q_mp_before.rc == 0 and not ovlm_test_mode | bool
+
+- name: Unmount WITHOUT touching fstab and without force (STATE-CHANGING)
+  # The unmounted state leaves the fstab entry alone (the removal state would edit it). No lazy/force option exists here.
+  ansible.posix.mount:
+    path: "{{ ovlm_mount_point }}"
+    state: unmounted
+  register: q_umount
+  until: q_umount is succeeded
+  retries: 5
+  delay: 3
+  failed_when: false
+  when: q_mp_before.rc == 0 and not ovlm_test_mode | bool
+
+- name: Verify the volume is no longer mounted (read-only)
+  ansible.builtin.command: mountpoint -q {{ ovlm_mount_point | quote }}
+  register: q_mp_after
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: not ovlm_test_mode | bool
+
+- name: Refuse when the unmount did not happen
+  ansible.builtin.set_fact:
+    ovlm_class: needs_human
+  when: not ovlm_test_mode | bool and not ansible_check_mode and q_mp_after.rc == 0
+
+- name: Fail - still mounted after the bounded wait
+  ansible.builtin.fail:
+    msg: "umount of {{ ovlm_mount_point }} failed after retries; OVLM must not detach (no force flag exists)"
+  when: not ovlm_test_mode | bool and not ansible_check_mode and q_mp_after.rc == 0
+
+- name: Record the marker checksum on the ROOT DISK for idempotent reruns (STATE-CHANGING, root disk only)
+  ansible.builtin.file:
+    path: "{{ counter_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  when: q_marker_sha is not none
+
+- name: Write the quiesce record (STATE-CHANGING, root disk only)
+  ansible.builtin.copy:
+    dest: "{{ counter_state_dir }}/last-quiesce.json"
+    content: "{{ {'marker_sha256': q_marker_sha} | to_json }}\n"
+    owner: root
+    group: root
+    mode: "0600"
+  register: q_record
+  when: q_marker_sha is not none
+
+- name: Record the result
+  ansible.builtin.set_fact:
+    ovlm_changed: "{{ (q_umount is defined and q_umount is changed) or (counter_tm_stop is defined and counter_tm_stop is changed) or (q_record is defined and q_record is changed) }}"
+    ovlm_facts:
+      marker_sha256: "{{ q_marker_sha }}"
+      was_mounted: "{{ q_was_mounted }}"
+      mount_point: "{{ ovlm_mount_point }}"
+      unmount: "{{ 'simulated (test mode)' if ovlm_test_mode | bool else 'done' }}"
+    ovlm_checks:
+      - {name: units_stopped, ok: true, detail: "{{ ovlm_service_units | join(',') }} stopped, not disabled", observed: stopped, expected: stopped}
+      - {name: unmounted, ok: true, detail: "{{ 'SIMULATED: test mode has no real mount' if ovlm_test_mode | bool else 'not a mount point' }}", observed: unmounted, expected: unmounted}
+    ovlm_message: "quiesced; marker sha256 {{ q_marker_sha | default('none', true) }}"
