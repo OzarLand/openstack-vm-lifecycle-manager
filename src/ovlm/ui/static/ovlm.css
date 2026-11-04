@@ -94,3 +94,30 @@ tr.gone th a { color: var(--muted); }
 .readiness .rec { margin: 0 0 .25rem; }
 .readiness details > summary { cursor: pointer; color: var(--muted); }
 .readiness .kv { grid-template-columns: 11rem 1fr; }
+
+/* renewal pages (E6-3, E6-4): planning, approvals, run timeline */
+.badge.info { background: var(--info-bg); color: var(--info); border-color: var(--info); }
+.panel { margin: 0 0 1rem; }
+.panel.attention { border-color: var(--warn); border-width: 2px; }
+.stack label { display: block; margin: .25rem 0; font-weight: 400; }
+.actions { margin-top: .75rem; display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; }
+button.danger, a.button.danger { background: var(--err); color: var(--panel); border-color: var(--err); font-weight: 600; }
+a.button { display: inline-block; text-decoration: none; border: 1px solid var(--line); border-radius: 4px; padding: .35rem .8rem; background: var(--panel); color: var(--text); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 1rem; }
+label.choice { display: inline-block; font-weight: 400; margin-right: 1.25rem; }
+.card label { margin-top: .5rem; }
+.card textarea, .card input[type="text"], .card input:not([type]) { width: 100%; }
+textarea { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--muted); border-radius: 4px; padding: .35rem .5rem; width: 100%; }
+.timer { font-size: 1.1rem; margin: 0 0 .5rem; }
+progress { width: 100%; height: 1rem; }
+ul.actions-list { list-style: none; margin: 0; padding: 0; display: grid; gap: .75rem; }
+ul.actions-list li { border: 1px solid var(--line); border-radius: 6px; padding: .6rem .8rem; }
+ol.timeline { list-style: none; margin: 0; padding: 0; border-left: 3px solid var(--line); }
+ol.timeline > li { padding: .4rem 0 .6rem .9rem; position: relative; }
+ol.timeline > li.succeeded { border-left: 0; }
+ol.timeline > li.running, ol.timeline > li.waiting, ol.timeline > li.ready { background: var(--info-bg); }
+ol.timeline > li.needs_human, ol.timeline > li.failed { background: var(--err-bg); }
+ol.timeline .code { display: inline-block; min-width: 2.5rem; color: var(--muted); }
+ol.timeline details > summary { cursor: pointer; color: var(--muted); }
+ol.timeline .kv { grid-template-columns: 11rem 1fr; }

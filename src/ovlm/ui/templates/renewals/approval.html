@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}{{ gate_text[0] }} {{ gate_text[1] }}{% endblock %}
+{% block content %}
+<p class="crumbs"><a href="/renewals">Renewals</a> › <a href="/renewals/plans/{{ plan.id }}">Plan <span class="mono">{{ plan.id | short_id }}</span></a>{% if run %} › <a href="/renewals/runs/{{ run.id }}">Run</a>{% endif %} › {{ gate_text[0] }}</p>
+<h1>{{ gate_text[0] }}: {{ gate_text[1] }} <span class="badge {{ {'open': 'info', 'approved': 'ok', 'rejected': 'err', 'voided': 'err', 'expired': 'warn'}.get(state, '') }}">{{ state }}</span>
+  {% if approval.self_approved %}<span class="badge warn">self-approved</span>{% endif %}</h1>
+<p>{{ gate_text[2] }}</p>
+{% if notice %}<p role="status" class="banner ok">{{ notice }}</p>{% endif %}
+{% if error %}<p role="alert" class="banner error"><strong>{{ error.title }}.</strong> {{ error.detail }}{% if error.next_action %} <em>{{ error.next_action }}</em>{% endif %}</p>{% endif %}
+{% if approval.self_approved %}<p role="alert" class="banner warn"><strong>Self-approved.</strong> The decider was in the requester set or also holds the operator role. The installation allows this; it is recorded here, on the run and in the audit log.</p>{% endif %}
+{% if state == "voided" %}<p role="alert" class="banner error"><strong>Void:</strong> {{ approval.void_reason }}. The plan, profile version or policy changed after this was requested. Request a new approval.</p>{% endif %}
+{% if state == "expired" %}<p role="alert" class="banner warn">This approval expired {{ approval.expires_at | age }} ago. Request a new one.</p>{% endif %}
+
+<section class="panel" aria-labelledby="blast-h">
+  <h2 id="blast-h">Blast radius</h2>
+  {% set b = approval.blast_radius %}
+  <dl class="kv">
+    <dt>Service</dt><dd>{{ b.service }}</dd>
+    <dt>Old VM (blue)</dt><dd class="mono">{{ b.vms[0].name }} · {{ b.vms[0].openstack_id }}</dd>
+    <dt>Data volume</dt><dd class="mono">{{ b.volume or "none: a stateless service" }}</dd>
+    <dt>Floating IP</dt><dd class="mono">{{ b.floating_ip }}</dd>
+    {% if gate == "cutover" %}
+    <dt>Outage starts</dt><dd>{{ b.outage_start }}</dd>
+    <dt>Worst-case downtime</dt><dd><strong>{{ b.worst_case_window_seconds | duration }}</strong> (the sum of every step's deadline in the window)</dd>
+    <dt>Budget you accept</dt><dd><strong>{{ b.max_window_duration_seconds | duration }}</strong>{% if b.worst_case_window_seconds > b.max_window_duration_seconds %} <span class="badge warn">the worst case is longer than the budget</span>{% endif %}</dd>
+    <dt>Snapshot</dt><dd>{{ b.snapshot }}</dd>
+    <dt>Automatic restore</dt><dd>{{ b.automatic_restore }}</dd>
+    {% elif gate == "retirement" %}
+    <dt>Effect</dt><dd><strong>Deletes the old VM. This cannot be undone.</strong> The data volume stays attached to the new VM and is not touched.</dd>
+    {% endif %}
+  </dl>
+  {% if gate == "retirement" and truth %}
+    <h3>What the worker will re-check before it deletes</h3>
+    <p class="muted">The last observed state (probe {{ truth_age | duration if truth_age is not none else "time unknown" }} ago). The worker probes again at the moment of deletion and stops if anything differs.</p>
+    {% for section, rows in truth %}<h4>{{ section }}</h4><dl class="kv">{% for k, v in rows %}<dt>{{ k }}</dt><dd class="mono">{{ v }}</dd>{% endfor %}</dl>{% endfor %}
+  {% endif %}
+</section>
+
+{% if restore %}
+<section class="panel" aria-labelledby="restore-h">
+  <h2 id="restore-h">Automatic restore: when it can happen</h2>
+  <p>{% if restore.enabled %}Automatic restore is <strong>on</strong> for this policy. {{ restore.once }}
+     {% if restore.snapshot %}A snapshot is taken before the handoff and kept as a manual way back (OVLM never restores from it itself).
+     {% else %}No snapshot is taken: after the service has started on the new VM, the old VM would start on data the new VM may have changed, so OVLM stops and pages an operator instead.{% endif %}
+  {% else %}Automatic restore is <strong>off</strong> for this policy: every failure in the window stops and pages an operator.{% endif %}</p>
+  <table>
+    <thead><tr><th scope="col">If this fails</th><th scope="col">Does OVLM restore the old VM by itself?</th></tr></thead>
+    <tbody>{% for row in restore.rows %}<tr><td>{{ row.trigger }}</td><td>{% if row.restores %}<span class="badge ok">yes</span>{% else %}{{ row.outcome }}{% endif %}</td></tr>{% endfor %}</tbody>
+  </table>
+  <p class="muted">Anything not in this table also stops and waits for an operator. Rolling back by hand is always possible with the typed confirmation.</p>
+</section>
+{% endif %}
+
+{% include "renewals/_hash_inputs.html" %}
+
+<section class="panel" aria-labelledby="who-h">
+  <h2 id="who-h">Who is involved</h2>
+  <dl class="kv">
+    <dt>Requested by</dt><dd>{{ names.get(approval.requested_by, approval.requested_by | short_id) }} at {{ approval.requested_at | timestamp }}</dd>
+    <dt>Requester set (may not approve)</dt><dd>{% for u in approval.requester_set %}{{ names.get(u, u | short_id) }}{{ ", " if not loop.last }}{% else %}nobody{% endfor %}
+      <br><span class="muted">The people who wrote the profile, made the plan, started the run, last edited the policy or asked for this approval.</span></dd>
+    {% if approval.decision %}
+    <dt>Decision</dt><dd><strong>{{ approval.decision }}</strong> by {{ names.get(approval.decided_by, approval.decided_by | short_id) }} at {{ approval.decided_at | timestamp }}{% if approval.expires_at %}; valid until {{ approval.expires_at | timestamp }}{% endif %}
+      <br><span class="muted">authenticated with {{ approval.auth_method }}</span>{% if approval.comment %}<br>Comment: {{ approval.comment }}{% endif %}</dd>
+    {% if approval.account_provenance %}<dt>Decider's account</dt><dd>{% set p = approval.account_provenance %}created by {{ p.created_by or "the system" }} on {{ p.created_at | timestamp }} ({{ p.created_via }}){% if p.credential_reset_at %}; credential last reset by {{ p.credential_reset_by or "the user" }} on {{ p.credential_reset_at | timestamp }}{% endif %}</dd>{% endif %}
+    {% endif %}
+    {% if my_provenance %}<dt>Your account (recorded with your decision)</dt><dd>created by {{ my_provenance.created_by or "the system" }} on {{ my_provenance.created_at | timestamp }} ({{ my_provenance.created_via }}){% if my_provenance.credential_reset_at %}; credential last reset by {{ my_provenance.credential_reset_by or "the user" }} on {{ my_provenance.credential_reset_at | timestamp }}{% endif %}
+      <br><span class="muted">The two-person rule only holds if a second, different human decides. This record lets an auditor check it.</span></dd>{% endif %}
+  </dl>
+</section>
+
+{% if state == "open" %}
+<section class="panel" aria-labelledby="decide-h">
+  <h2 id="decide-h">Your decision</h2>
+  {% if is_token %}
+    <p role="alert" class="banner warn"><strong>API tokens cannot approve.</strong> Approvals and typed confirmations are for people only. Sign in to this interface with your own account (password and authenticator code) to decide.</p>
+  {% elif blocked %}
+    <p role="alert" class="banner warn"><strong>You cannot decide this.</strong> {{ blocked }}</p>
+  {% else %}
+    {% if self_approval %}<p role="alert" class="banner warn"><strong>This will be recorded as self-approved.</strong> You are in the requester set ({{ reasons | join("; ") }}). The installation allows it for this gate; it is flagged on the approval and the run.</p>{% endif %}
+    <form method="post" action="/approvals/{{ approval.id }}/decision" class="card">
+      <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+      <fieldset>
+        <legend>Decision</legend>
+        <label class="choice"><input type="radio" name="decision" value="approved"{% if form.decision == "approved" %} checked{% endif %} required> Approve</label>
+        <label class="choice"><input type="radio" name="decision" value="rejected"{% if form.decision == "rejected" %} checked{% endif %}> Reject</label>
+      </fieldset>
+      {% if needs_tc %}
+      <p><label for="tc">Typed confirmation (to approve)</label>
+        Type the server's name, a space, and the last 6 characters of its id.<br>
+        This approval concerns <strong class="mono">{{ tc_target.name }}</strong>, whose id ends in <strong class="mono">{{ tc_target.tail }}</strong>.
+        <input id="tc" name="typed_confirmation" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="tc-help"></p>
+      <p id="tc-help" class="muted">Checked on the server against the current record, not against this page.</p>
+      {% endif %}
+      <p><label for="comment">Comment (optional)</label><input id="comment" name="comment" maxlength="2000" value="{{ form.comment or '' }}"></p>
+      <p class="muted">Deciding asks for your password{% if who.totp_confirmed %} and a current authenticator code{% endif %} again. The confirmation works once, for this approval only.</p>
+      <p><label for="pw">Password</label><input id="pw" name="password" type="password" required autocomplete="current-password"></p>
+      {% if who.totp_confirmed %}<p><label for="otp">Authenticator code</label><input id="otp" name="totp_code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required></p>{% endif %}
+      <p><button type="submit" class="primary">Record my decision</button></p>
+    </form>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

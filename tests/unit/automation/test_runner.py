@@ -663,3 +663,37 @@ def test_ssh_control_path_is_per_run_short_and_removed(env: Any, tmp_path: Path)
         assert not list((short / "r" / ".cp").iterdir()), "removed with the run"
     finally:
         shutil.rmtree(short, ignore_errors=True)
+
+
+# ---- reverify_checkout (public API used by the renewal code) ------------------------------------------------
+
+
+def test_reverify_checkout_adopts_the_checkout_left_by_prepare(env: Any) -> None:
+    runner, prepared, _ = env
+    again = runner.reverify_checkout(prepared.spec, "wf1")
+    assert again is not None
+    assert (again.sha, again.checkout, again.requirements_hash) == (
+        prepared.sha,
+        prepared.checkout,
+        prepared.requirements_hash,
+    )
+    assert again.ansible_core_version == prepared.ansible_core_version
+
+
+def test_reverify_checkout_returns_none_without_a_checkout(env: Any) -> None:
+    runner, prepared, _ = env
+    assert runner.reverify_checkout(prepared.spec, "other-run") is None
+
+
+def test_reverify_checkout_refuses_a_checkout_at_another_sha(env: Any) -> None:
+    runner, prepared, _ = env
+    other = AutomationSpec(repo=prepared.spec.repo, ref="0" * 40)
+    with pytest.raises(AutomationError) as exc:
+        runner.reverify_checkout(other, "wf1")
+    assert exc.value.classification is Classification.NEEDS_HUMAN
+
+
+def test_reverify_checkout_rejects_an_unsafe_workflow_id(env: Any) -> None:
+    runner, prepared, _ = env
+    with pytest.raises(AutomationError):
+        runner.reverify_checkout(prepared.spec, "../etc")

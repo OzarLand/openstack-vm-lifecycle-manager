@@ -727,3 +727,92 @@ The maintainer said "reprends". Per [HANDOFF.md](HANDOFF.md):
 - PR #7 opened;
 - a short, fresh Opus session verifies the fixes against the findings before the merge;
 - the renewal-strategy agent resumes.
+
+## PR #7 merged — 2026-11-04 20:10 UTC
+
+[OzarLand/openstack-vm-lifecycle-manager#7](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/7) is
+merged: the write client, RBAC, the Ansible runner, readiness, and the engine and security review fixes. CI was green,
+**including the first run of the runner's integration tests against a real Ubuntu container over pinned SSH**.
+
+- **CI caught a real bug** that the root sandboxes had hidden. A non-root worker could not run
+  `ansible --version`, because Ansible needs a writable `HOME`, so every Ansible run would have failed in production.
+  Agent 1 reproduced it as a non-root user and fixed it. The working rules now require running the unit tests as
+  non-root.
+- **Independent verification of the fixes** (fresh Opus session, $2.65): 20 of 21 fixed; SEC-C-8 partial (needs a
+  `project_connection` table, tracked). The report is
+  [verification-review-fixes-wave3.md](reviews/verification-review-fixes-wave3.md). A short, focused verifier cost a
+  fraction of a long Fable re-review.
+
+**Started 20:10 UTC (Sonnet, disjoint from `src/ovlm/renewal/`):**
+- Felcloud lab kit for E5-6 (runbook, scripts, before/after snapshot guard, scenarios):
+  https://claude.ai/code/session_016ti9w3LhNK9CTFMZjUkS6M (`claude/ovlm-lab-kit`).
+- Runner wiring (runtime image with the `automation` group, settings, orphan sweep, separate-user mechanism,
+  restricted-artefact endpoint): https://claude.ai/code/session_016ti9vzQN4PBKzmXYQ7MYMW (`claude/ovlm-runner-wiring`).
+
+The renewal strategy (E5-4/E5-5, Opus) continues: https://claude.ai/code/session_016ti9w2W4u5bRegw53P7dqM.
+
+## Batch integrated, lab decisions — 2026-11-04 20:45 UTC
+
+Renewal strategy (E5-4/E5-5, Opus), runner wiring (Sonnet) and the Felcloud lab kit (Sonnet) are merged into the
+working branch. **Verified by Agent 1:**
+- lint clean;
+- 1052 unit tests pass as root, and pass as a **non-root** user (1050 passed, 2 skipped because they need root);
+- 383 integration tests pass (the automation-container tests run in CI).
+
+Renewal: implemented and tested through cutover, restore and discard. **Still to do:**
+- register the strategy in the worker;
+- implement the W4 pre-handoff snapshot for real (today only a test double).
+
+**Maintainer decisions for the Felcloud lab (popup, 2026-11-04):**
+- **Cost approved:** `ovlm-lab-host` (at least 2 vCPU / 4 GB, OVLM in Docker) plus small test VMs, `ovlm-*` only,
+  deleted after each campaign.
+- **Approvals:** two lab-only human test accounts (approver A and B) with TOTP held by the lab session. This tests the
+  real separation of duties, including G3.
+- **Floating IP:** reuse the set-aside address, returned unassociated after each campaign.
+- **Failure scenario "failed Ansible configuration":** the lab may push a throw-away branch
+  `claude/ovlm-lab-broken-config`, which is never merged and is deleted after the campaign.
+
+**Started 20:42 UTC:**
+- Finish renewal (worker registration, real W4 snapshot, full renewal through the real worker loop with a crash
+  mid-window), Opus: https://claude.ai/code/session_016ti9w4DAiZDp81ZVjxTTAN (`claude/ovlm-renewal-finish`).
+- UI E6-3/E6-4 (planning, approvals with hash inputs and diff, run timeline, readiness), Sonnet:
+  https://claude.ai/code/session_016ti9w2vMuJizEbKqyJdCQQ (`claude/ovlm-ui-renewal`).
+
+**Next:** an independent Fable review of the renewal code in a fresh session (SRE + security lenses), then a PR to
+`main`, then the Felcloud acceptance campaign through `ozar-dev`.
+
+## Renewal finished, wave 5 — 2026-11-04 22:10 UTC
+
+**Renewal finish (Opus, $15.47) merged into the working branch:**
+- the strategy is registered in the worker;
+- the real W4 snapshot is implemented (OVLM never deletes it);
+- a full renewal runs **through the real worker loop with a worker crash mid-window**, and the restarted worker
+  resumes without re-sending the volume attach.
+
+**Integration fix by Agent 1:** the UI test caught a new `needs_human` reason (`snapshot_adoption_refused`) with no
+operator wording, now added. **Verified:** lint clean, 1127 unit and 414 integration tests pass.
+
+**Blockers before the Felcloud lab:**
+- no encrypted credential store yet;
+- the worker image has no `ssh`/`git`.
+
+**Started (parallel, disjoint files):**
+- Encrypted credential store + project connections (also closes SEC-C-8), Opus:
+  https://claude.ai/code/session_016ti9vzvtr3eKwtKW8Zsf9r (`claude/ovlm-credential-store`).
+- Worker image `ssh`/`git`, public automation re-verify API, doc alignment (X1 keeps the snapshot, probe identity
+  contract), Sonnet: https://claude.ai/code/session_016ti9w331zgube8YxrVFJcc (`claude/ovlm-image-docs`).
+- **Independent review of the renewal code** (SRE + security lenses, fresh Fable session, focused scope):
+  https://claude.ai/code/session_016ti9vzJHS8tvkKt1uiSYrX (`claude/ovlm-review-renewal`).
+
+## Renewal review and wave 5 results — 2026-11-04 22:35 UTC
+
+- **Independent renewal review (Fable, fresh session):** accept with required changes.
+  - REN-1 (High): a refused W1 claim after quiesce could route back to the build phase, where a rollback would leave
+    blue stopped.
+  - REN-2 (High, security): a B5 re-run could fall back to the bootstrap key after rotation.
+  - Plus mediums and lows.
+  - Fix round (Opus): https://claude.ai/code/session_016ti9vzmwavtQYQf87fVLGZ (`claude/ovlm-fix-renewal`).
+- **Merged into the working branch:** worker image with `ssh`/`git`, the public `reverify_checkout`, doc alignment
+  (X1 keeps the snapshot, probe identity contract, `sudo NOPASSWD` open for security). 1131 unit tests pass.
+- **Credential store agent:** blocked on a permission prompt (a harmless edit of `Makefile`, `compose.yaml` and the
+  worker entrypoint, which wire the KEK). It needs the maintainer's approval in its own conversation.

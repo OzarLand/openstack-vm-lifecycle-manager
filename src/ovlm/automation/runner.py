@@ -65,6 +65,7 @@ from ovlm.automation.rundir import RunDir, RunUser, processes_referencing
 from ovlm.automation.types import (
     KILL_GRACE_SECONDS,
     AutomationError,
+    Classification,
     Phase,
 )
 
@@ -153,10 +154,41 @@ class AutomationRunner:
             co.remove_tree(dest)
         sha = co.clone_verified(spec.repo, spec.ref, dest, self.cfg.clone)
         try:
+            self._sha_file(dest).write_text(sha + "\n", encoding="ascii")
             return self._verify(spec, workflow_id, dest, sha, waivers, on_waiver)
         except BaseException:
             co.remove_tree(dest)
+            self._sha_file(dest).unlink(missing_ok=True)
             raise
+
+    @staticmethod
+    def _sha_file(dest: Path) -> Path:
+        """The verified commit, recorded next to the checkout: ``clone_verified`` drops ``.git``, so the commit
+        cannot be read back from the (read-only) tree."""
+        return dest.parent / "_checkout.sha"
+
+    def reverify_checkout(
+        self, spec: AutomationSpec, workflow_id: str
+    ) -> PreparedAutomation | None:
+        """Re-verify, locally, the run-level checkout that :meth:`prepare_automation` left on disk (no git host
+        contact). Returns ``None`` when there is no checkout for ``workflow_id``. Refuses (``NEEDS_HUMAN``) when
+        the checkout is not at ``spec.ref`` (the commit recorded by ``prepare_automation``); otherwise runs the same lint / pin / collection checks as
+        ``prepare_automation`` and returns a fresh :class:`PreparedAutomation`. Used by the renewal code to adopt
+        a checkout after a crash; replaces its use of ``_safe_component``, ``_git`` and ``_verify``."""
+        dest = self.cfg.run_root / _safe_component(workflow_id) / "_checkout"
+        if not dest.is_dir():
+            return None
+        try:
+            head = self._sha_file(dest).read_text(encoding="ascii").strip()
+        except (
+            OSError
+        ):  # a checkout from before the record existed: ask git (works only if .git is present)
+            head = co._git(["rev-parse", "HEAD"], dest, self.cfg.clone, retryable=False)  # noqa: SLF001
+        if head != spec.ref:
+            raise AutomationError(
+                "the checkout on disk is not at the pinned SHA", Classification.NEEDS_HUMAN
+            )
+        return self._verify(spec, workflow_id, dest, head, None, None)
 
     def _verify(
         self,
@@ -229,6 +261,7 @@ class AutomationRunner:
     def release(self, prepared: PreparedAutomation) -> None:
         """Remove the run-level checkout (end of the run)."""
         co.remove_tree(prepared.checkout)
+        self._sha_file(prepared.checkout).unlink(missing_ok=True)
         with contextlib.suppress(OSError):
             prepared.checkout.parent.rmdir()
 

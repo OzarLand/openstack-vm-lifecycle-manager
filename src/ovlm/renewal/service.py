@@ -1,0 +1,710 @@
+"""Renewal plans, approvals, runs and run actions for the api (api-design.md 3.6, 3.7, 4). Api-safe module.
+
+The api never acts on OpenStack: it inserts a plan, approval rows, a run in ``requested`` and ``run_signal`` rows,
+and the worker re-validates everything before acting (SEC-R-1). What the api checks here is what it can check for
+a clear early answer: scope, role, human session, the single-use TOTP step-up bound to (action, target), the typed
+confirmation against current DB values (``422 confirmation-mismatch``), SoD (``403 sod-violation``), the bound hash
+(``409 approval-voided``). Every write is audited in the same transaction.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+from collections.abc import Mapping
+from datetime import datetime
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from ovlm import audit
+from ovlm.auth.authz import authorize
+from ovlm.auth.principal import Principal
+from ovlm.auth.sod import Gate, account_provenance, check_approval_eligibility
+from ovlm.auth.stepup import consume_stepup
+from ovlm.policies.service import effective_policy
+from ovlm.registry.errors import DomainError
+from ovlm.renewal.config import RenewalConfig
+from ovlm.renewal.evidence import APPROVAL_STEPUP_ACTION, CUTOVER_STEPUP_ACTION
+from ovlm.renewal.plans import (
+    KIND,
+    STRATEGY,
+    STRATEGY_VERSION,
+    blast_radius,
+    compute_plan_hash,
+    effective_phase,
+    load_facts,
+    policy_binding,
+    resolve_plan,
+    tc_of,
+    tc_target,
+)
+from ovlm.workflow.ids import new_id
+from ovlm.workflow.requests import request_run, send_signal
+
+TERMINAL = ("rejected", "cancelled", "failed", "completed", "rolled_back")
+#: action path segment -> (signal kind, needs TC + step-up + human session)
+ACTIONS: Mapping[str, tuple[str, bool]] = {
+    "probe": ("probe", False),
+    "retry-step": ("retry_step", False),
+    "abort": ("abort", True),
+    "rollback": ("rollback", True),
+    "revert": ("revert", True),
+    "discard": ("discard", True),
+    "mark-resolved": ("mark_resolved", True),
+}
+
+
+def not_found(what: str) -> DomainError:
+    return DomainError(
+        404, f"{what}-not-found", f"{what.capitalize()} not found", f"No such {what}."
+    )
+
+
+def _audit(
+    s: Session,
+    who: Principal,
+    action: str,
+    target_type: str,
+    target_id: str,
+    scope: str | None,
+    **after: Any,
+) -> None:
+    audit.record(
+        s, action=action, target_type=target_type, target_id=target_id, actor_id=who.user_id,
+        principal_type=who.principal_type, auth_method=who.auth_method, source_ip=who.source_ip,
+        project_scope=scope, after=after or None,
+    )  # fmt: skip
+
+
+def _iso(v: Any) -> Any:
+    return v.isoformat() if isinstance(v, datetime) else (str(v) if isinstance(v, UUID) else v)
+
+
+def _row(r: Mapping[Any, Any]) -> dict[str, Any]:
+    return {str(k): _iso(v) for k, v in r.items()}
+
+
+# --- idempotency (api-design.md 1) ----------------------------------------------------------------------------
+
+
+def body_hash(body: Any) -> str:
+    return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def replay(
+    s: Session, who: Principal, key: str | None, method: str, path: str, bhash: str
+) -> dict[str, Any] | None:
+    if not key or not 8 <= len(key) <= 200:
+        raise DomainError(400, "idempotency-key-required", "Idempotency-Key required",
+                          "POSTs that start work need an Idempotency-Key header (8-200 characters).")  # fmt: skip
+    row = s.execute(
+        text(
+            "SELECT method, path, body_hash, response FROM api_idempotency WHERE principal_id = :p AND key = :k"
+        ),
+        {"p": who.user_id, "k": key},
+    ).first()
+    if row is None:
+        return None
+    if (row.method, row.path, row.body_hash) != (method, path, bhash):
+        raise DomainError(409, "idempotency-key-reuse", "Idempotency-Key reused",
+                          "This key was used for a different request.")  # fmt: skip
+    stored: dict[str, Any] = row.response
+    return stored
+
+
+def remember(
+    s: Session, who: Principal, key: str, method: str, path: str, bhash: str, resp: Any
+) -> None:
+    s.execute(
+        text("INSERT INTO api_idempotency (principal_id, key, method, path, body_hash, status, response) "
+             "VALUES (:p, :k, :m, :path, :h, 202, CAST(:r AS jsonb))"),
+        {"p": who.user_id, "k": key, "m": method, "path": path, "h": bhash, "r": json.dumps(resp, default=str)},
+    )  # fmt: skip
+
+
+# --- plans ------------------------------------------------------------------------------------------------------
+
+
+def plan_scope(s: Session, plan_id: UUID, who: Principal) -> Mapping[Any, Any]:
+    row = (
+        s.execute(text("SELECT * FROM renewal_plan WHERE id = :i"), {"i": plan_id})
+        .mappings()
+        .first()
+    )
+    if row is None or not authorize(who, "viewer", row["resolved"]["scope"]):
+        raise not_found("plan")
+    return row
+
+
+def plan_body(s: Session, row: Mapping[Any, Any]) -> dict[str, Any]:
+    out = _row(row)
+    out["blast_radius"] = blast_radius(row["resolved"], "plan")
+    return out
+
+
+def create_plan(
+    s: Session, who: Principal, cfg: RenewalConfig, managed_vm_id: UUID, window: datetime | None
+) -> dict[str, Any]:
+    vm = s.execute(
+        text("SELECT v.service_id, sv.project_connection_id FROM managed_vm v JOIN service sv ON sv.id = v.service_id "
+             "WHERE v.id = :i"), {"i": managed_vm_id}).first()  # fmt: skip
+    scope = f"project:{vm.project_connection_id}" if vm else None
+    if vm is None or not authorize(who, "operator", scope):
+        raise not_found("managed-vm")
+    eff = effective_policy(s, vm.service_id)
+    if not eff or not eff["policy"]:
+        raise DomainError(
+            409, "no-policy", "No policy", "No policy applies to this service (FR-POL-4)."
+        )
+    prow = (
+        s.execute(text("SELECT * FROM policy WHERE id = :i"), {"i": eff["policy"]["id"]})
+        .mappings()
+        .one()
+    )
+    conn = s.connection()
+    resolved = resolve_plan(conn, managed_vm_id, cfg, policy_row=prow)
+    pv = resolved["profile_version"]
+    sha = s.execute(
+        text("SELECT automation_sha FROM profile_version WHERE id = :i"), {"i": pv["id"]}
+    ).scalar()
+    phash = compute_plan_hash(resolved=resolved, profile_version_id=pv["id"], spec_hash=pv["spec_hash"],
+                              automation_sha=sha, policy=policy_binding(prow))  # fmt: skip
+    prev = s.execute(
+        text("SELECT pl.resolved -> 'automation' ->> 'sha' FROM renewal_plan pl WHERE pl.service_id = :s "
+             "AND pl.state IN ('approved', 'started') ORDER BY pl.created_at DESC LIMIT 1"),
+        {"s": vm.service_id}).scalar()  # fmt: skip
+    diff = {"previous_approved_sha": prev, "sha": sha,
+            "summary": "first approval of this repo" if prev is None else ("unchanged" if prev == sha else "changed"),
+            "changed_files": None, "note": "file-level diff is a worker job not in this release"}  # fmt: skip
+    pid = new_id()
+    s.execute(
+        text("INSERT INTO renewal_plan (id, managed_vm_id, service_id, profile_version_id, policy_id, policy_version, "
+             "resolved, automation_diff, plan_hash, planned_window_start, state, created_by) VALUES (:i, :vm, :s, "
+             ":pv, :pol, :pver, CAST(:r AS jsonb), CAST(:d AS jsonb), :h, :w, 'draft', :u)"),
+        {"i": pid, "vm": managed_vm_id, "s": vm.service_id, "pv": pv["id"], "pol": prow["id"],
+         "pver": prow["version"], "r": json.dumps(resolved), "d": json.dumps(diff), "h": phash, "w": window,
+         "u": who.user_id},
+    )  # fmt: skip
+    _audit(s, who, "plan.create", "renewal_plan", pid, scope, managed_vm_id=str(managed_vm_id),
+           policy_version=prow["version"])  # fmt: skip
+    return plan_body(
+        s, s.execute(text("SELECT * FROM renewal_plan WHERE id = :i"), {"i": pid}).mappings().one()
+    )
+
+
+def request_approval(
+    s: Session, who: Principal, *, gate: Gate, plan_id: str, run_id: str | None, scope: str
+) -> dict[str, Any]:
+    facts = load_facts(s.connection(), plan_id)
+    if facts.recomputed_hash is None or facts.recomputed_hash != facts.plan["plan_hash"]:
+        raise DomainError(409, "plan-stale", "Plan is stale", "The plan's profile version or policy changed.",
+                          "Create a new plan.")  # fmt: skip
+    starter = None
+    if run_id:
+        starter = s.execute(
+            text("SELECT started_by FROM workflow_run WHERE id = :r"), {"r": run_id}
+        ).scalar()
+    rs = facts.requester_set(run_starter=starter, approval_requester=who.user_id)
+    aid = new_id()
+    subject = plan_id if gate is Gate.PLAN else run_id
+    try:
+        with s.begin_nested():
+            s.execute(
+                text("INSERT INTO approval (id, subject_type, subject_id, plan_id, run_id, scope, bound_hash, "
+                     "hash_inputs, requester_set, requested_by) VALUES (:i, :t, :s, :p, :r, :scope, :h, "
+                     "CAST(:hi AS jsonb), CAST(:rs AS uuid[]), :u)"),
+                {"i": aid, "t": gate.value, "s": subject, "p": plan_id, "r": run_id, "scope": scope,
+                 "h": facts.recomputed_hash, "u": who.user_id,
+                 "hi": json.dumps({"resolved": facts.resolved, "policy": facts.policy,
+                                   "automation_diff": facts.plan.get("automation_diff")}, default=str),
+                 "rs": "{" + ",".join(str(u) for u in rs.members()) + "}"},
+            )  # fmt: skip
+    except Exception:  # unique index: one open request per subject
+        raise DomainError(409, "approval-open", "Approval already requested",
+                          "An open approval request exists for this subject.") from None  # fmt: skip
+    if gate is Gate.PLAN:
+        s.execute(text("UPDATE renewal_plan SET state = 'awaiting_approval', updated_at = now(), version = version + 1 "
+                       "WHERE id = :p AND state = 'draft'"), {"p": plan_id})  # fmt: skip
+    _audit(
+        s,
+        who,
+        "approval.request",
+        "approval",
+        aid,
+        scope,
+        subject_type=gate.value,
+        subject_id=str(subject),
+    )
+    return approval_body(s, aid)
+
+
+def approval_body(s: Session, aid: str | UUID) -> dict[str, Any]:
+    row = s.execute(text("SELECT * FROM approval WHERE id = :i"), {"i": aid}).mappings().one()
+    plan = s.execute(
+        text("SELECT resolved FROM renewal_plan WHERE id = :p"), {"p": row["plan_id"]}
+    ).scalar_one()
+    out = _row(row)
+    out["blast_radius"] = blast_radius(plan, row["subject_type"])
+    out["requester_set"] = [str(u) for u in row["requester_set"]]
+    return out
+
+
+def decide(
+    s: Session, who: Principal, cfg: RenewalConfig, aid: UUID, *, decision: str, typed: str | None,
+    comment: str | None, stepup_id: UUID,
+) -> dict[str, Any]:  # fmt: skip
+    row = (
+        s.execute(text("SELECT * FROM approval WHERE id = :i FOR UPDATE"), {"i": aid})
+        .mappings()
+        .first()
+    )
+    if row is None or not authorize(who, "viewer", row["scope"]):
+        raise not_found("approval")
+    if row["decision"] is not None or row["void_reason"] is not None:
+        raise DomainError(
+            409,
+            "approval-closed",
+            "Approval closed",
+            "This approval was already decided or voided.",
+        )
+    gate = Gate(row["subject_type"])
+    facts = load_facts(s.connection(), str(row["plan_id"]))
+    if facts.recomputed_hash != row["bound_hash"]:
+        s.execute(text("UPDATE approval SET void_reason = 'bound hash changed', version = version + 1 WHERE id = :i"),
+                  {"i": aid})  # fmt: skip
+        _audit(s, who, "approval.voided", "approval", str(aid), row["scope"], decision="voided")
+        s.commit()
+        raise DomainError(409, "approval-voided", "Approval voided", "What it approved changed (plan hash).",
+                          "Request a new approval.")  # fmt: skip
+    starter = None
+    if row["run_id"]:
+        starter = s.execute(
+            text("SELECT started_by FROM workflow_run WHERE id = :r"), {"r": row["run_id"]}
+        ).scalar()
+    prior: set[UUID] = set()
+    if gate is not Gate.PLAN:
+        for earlier in (Gate.PLAN, Gate.CUTOVER):
+            if earlier is gate:
+                break
+            subj = row["plan_id"] if earlier is Gate.PLAN else row["run_id"]
+            d = s.execute(
+                text("SELECT decided_by FROM approval WHERE subject_type = :t AND subject_id = :s AND decision = "
+                     "'approved' AND NOT operator_confirmed ORDER BY decided_at DESC LIMIT 1"),
+                {"t": earlier.value, "s": subj}).scalar()  # fmt: skip
+            if d:
+                prior.add(d)
+    elig = check_approval_eligibility(
+        s, who, gate=gate, scope=row["scope"],
+        requester_set=facts.requester_set(run_starter=starter, approval_requester=row["requested_by"]),
+        prior_gate_deciders=prior,
+        require_distinct_approvers=bool((facts.policy or {}).get("require_distinct_approvers")),
+    )  # fmt: skip
+    if not elig.allowed:
+        _audit(
+            s, who, "approval.decide.refused", "approval", str(aid), row["scope"], decision=decision
+        )
+        s.commit()
+        raise elig.problem()
+    if gate is not Gate.PLAN and decision == "approved":
+        expected = tc_of(facts.resolved["blue"]["name"], facts.resolved["blue"]["server_id"])
+        if not hmac.compare_digest(" ".join((typed or "").split()), expected):
+            raise DomainError(422, "confirmation-mismatch", "Typed confirmation does not match",
+                              "Type the server name and the last 6 characters of its id.")  # fmt: skip
+    consume_stepup(s, who, stepup_id, action=APPROVAL_STEPUP_ACTION, target_id=str(aid))
+    validity = {Gate.PLAN: cfg.validity_plan, Gate.CUTOVER: cfg.validity_cutover}.get(
+        gate, cfg.validity_retirement
+    )
+    if validity is None:
+        raise DomainError(409, "renewal-config-incomplete", "Configuration incomplete",
+                          "approval.validity.retirement is not configured.")  # fmt: skip
+    s.execute(
+        text("UPDATE approval SET decided_by = :u, decision = :d, typed_confirmation = :tc, auth_method = :am, "
+             "stepup_id = :su, self_approved = :sa, account_provenance = CAST(:prov AS jsonb), comment = :c, "
+             "decided_at = now(), expires_at = now() + make_interval(secs => :v), version = version + 1 "
+             "WHERE id = :i"),
+        {"u": who.user_id, "d": decision, "tc": typed, "am": who.auth_method, "su": stepup_id,
+         "sa": elig.self_approved, "prov": json.dumps(account_provenance(s, who.user_id)), "c": comment,
+         "v": float(validity), "i": aid},
+    )  # fmt: skip
+    if gate is Gate.PLAN and decision == "approved":
+        s.execute(text("UPDATE renewal_plan SET state = 'approved', updated_at = now(), version = version + 1 "
+                       "WHERE id = :p"), {"p": row["plan_id"]})  # fmt: skip
+    if gate is not Gate.PLAN and row["run_id"]:
+        send_signal(
+            s.connection(),
+            str(row["run_id"]),
+            "approve",
+            actor_id=str(who.user_id),
+            approval_id=str(aid),
+        )
+    _audit(s, who, "approval.decide", "approval", str(aid), row["scope"], subject_type=gate.value,
+           decision=decision, self_approved=elig.self_approved)  # fmt: skip
+    return approval_body(s, aid)
+
+
+def start(s: Session, who: Principal, plan_id: UUID) -> dict[str, Any]:
+    plan = (
+        s.execute(text("SELECT * FROM renewal_plan WHERE id = :i FOR UPDATE"), {"i": plan_id})
+        .mappings()
+        .first()
+    )
+    if plan is None or not authorize(who, "operator", plan["resolved"]["scope"]):
+        raise not_found("plan")
+    scope = plan["resolved"]["scope"]
+    facts = load_facts(s.connection(), plan_id)
+    if facts.recomputed_hash != plan["plan_hash"]:
+        raise DomainError(
+            409, "plan-stale", "Plan is stale", "The profile version or policy changed."
+        )
+    if ((facts.policy or {}).get("approvals") or {}).get("plan"):
+        ok = s.execute(
+            text("SELECT 1 FROM approval WHERE subject_type = 'plan' AND subject_id = :p AND decision = 'approved' "
+                 "AND void_reason IS NULL AND expires_at > now() AND bound_hash = :h"),
+            {"p": plan_id, "h": plan["plan_hash"]}).first()  # fmt: skip
+        if ok is None:
+            raise DomainError(
+                409,
+                "approval-missing",
+                "Plan not approved",
+                "A valid plan approval (G1) is required.",
+            )
+    level = s.execute(
+        text("SELECT level FROM readiness_assessment WHERE managed_vm_id = :v ORDER BY created_at DESC LIMIT 1"),
+        {"v": plan["managed_vm_id"]}).scalar()  # fmt: skip
+    if level != "ready":
+        raise DomainError(409, "readiness-not-ready", "VM not ready", f"Latest readiness level: {level or 'none'}.",
+                          "Run a readiness assessment and fix the blockers.")  # fmt: skip
+    busy = s.execute(
+        text("SELECT id FROM workflow_run WHERE kind = :k AND service_id = :s AND NOT (state = ANY(:t))"),
+        {"k": KIND, "s": plan["service_id"], "t": list(TERMINAL)}).scalar()  # fmt: skip
+    if busy is not None:
+        raise DomainError(
+            409, "resource-locked", "Service busy", f"Run {busy} of this service is not finished."
+        )
+    run_id = request_run(
+        s.connection(), kind=KIND, strategy=STRATEGY, strategy_version=STRATEGY_VERSION,
+        service_id=str(plan["service_id"]), renewal_plan_id=str(plan_id), started_by=str(who.user_id),
+    )  # fmt: skip
+    _audit(s, who, "run.start", "renewal_run", run_id, scope, plan_id=str(plan_id))
+    return run_body(s, run_id)
+
+
+# --- runs ------------------------------------------------------------------------------------------------------
+
+
+def run_row(s: Session, run_id: UUID | str, who: Principal) -> tuple[Mapping[Any, Any], Any]:
+    run = (
+        s.execute(
+            text("SELECT * FROM workflow_run WHERE id = :i AND kind = :k"), {"i": run_id, "k": KIND}
+        )
+        .mappings()
+        .first()
+    )
+    if run is None:
+        raise not_found("run")
+    resolved = s.execute(
+        text("SELECT resolved FROM renewal_plan WHERE id = :p"), {"p": run["renewal_plan_id"]}
+    ).scalar()
+    if resolved is None or not authorize(who, "viewer", resolved["scope"]):
+        raise not_found("run")
+    return run, resolved
+
+
+def _snapshot_id(s: Any, run_id: str) -> str | None:
+    """The W4 snapshot of the run, once W4 succeeded (ledger ``present`` and the step ``succeeded``)."""
+    value = s.execute(
+        text("SELECT o.openstack_id FROM owned_resource o JOIN workflow_step w ON w.run_id = o.run_id "
+             "AND w.step_key = 'snapshot_volume' AND w.state = 'succeeded' "
+             "WHERE o.run_id = :r AND o.role = 'snapshot' AND o.state = 'present' LIMIT 1"),
+        {"r": run_id},
+    ).scalar()  # fmt: skip
+    return str(value) if value else None
+
+
+def _retire_sent(s: Any, run_id: str) -> bool:
+    """X1 persisted its unlock + delete intent (REN-4): revert is no longer possible."""
+    return (
+        s.execute(
+            text(
+                "SELECT 1 FROM workflow_step WHERE run_id = :r AND step_key = 'retire_old' AND intent IS NOT NULL "
+                "LIMIT 1"
+            ),
+            {"r": run_id},
+        ).first()  # fmt: skip
+        is not None
+    )
+
+
+def available_actions(
+    run: Mapping[Any, Any],
+    step: Mapping[Any, Any] | None,
+    resolved: Mapping[str, Any],
+    snapshot_id: str | None = None,
+    *,
+    retire_sent: bool = False,
+) -> list[dict[str, Any]]:
+    """Each action with the role it needs and its concrete effect from the current state (SRE-R-9). The phase is the
+    effective one (REN-1): with the outage open a stored ``build`` phase reads ``window``, so the page offers the
+    restore of blue, never "delete green"."""
+    state, key = run["state"], step["step_key"] if step else None
+    phase = effective_phase(
+        run["phase"], run.get("downtime_started_at"), run.get("downtime_ended_at")
+    )
+    out: list[dict[str, Any]] = []
+    if state == "requested":
+        return [
+            {
+                "action": "abort",
+                "role": "operator",
+                "effect": "waiting for worker admission; abort cancels it",
+            }
+        ]
+    if state in TERMINAL:
+        return []
+    out.append(
+        {
+            "action": "probe",
+            "role": "operator",
+            "effect": "read-only re-probe; refreshes the current truth",
+        }
+    )
+    if state == "needs_human":
+        out.append(
+            {
+                "action": "retry-step",
+                "role": "operator",
+                "effect": f"re-run {key} (starts with a probe)",
+            }
+        )
+        out.append({"action": "mark-resolved",
+                    "role": "operator (+approver if the current or next step is destructive)",
+                    "effect": f"state the manual fix for {key}; the engine re-probes"})  # fmt: skip
+    snap = bool((resolved.get("data_volume") or {}).get("snapshot_before_handoff"))
+    if phase == "build":
+        out.append(
+            {
+                "action": "rollback",
+                "role": "operator + TC",
+                "effect": "delete green; blue keeps serving",
+            }
+        )
+        out.append(
+            {
+                "action": "abort",
+                "role": "operator + TC",
+                "effect": "stop at the step boundary; delete green",
+            }
+        )
+    elif phase == "window":
+        # renewal-workflow.md 4.1 (D-1): name the snapshot when one reached ``available`` in W4, else say none exists
+        consequence = ("stop green, attach the volume to blue, start blue, move the FIP back to blue; "
+                       + (f"the pre-handoff snapshot {snapshot_id} is kept as a manual way back (OVLM never "
+                          "deletes it)" if snap and snapshot_id else
+                          "blue will start on data the new VM may have changed; no snapshot exists"))  # fmt: skip
+        out.append({"action": "rollback", "role": "operator + TC", "effect": consequence})
+        out.append(
+            {
+                "action": "abort",
+                "role": "operator + TC",
+                "effect": "current step finishes, then " + consequence,
+            }
+        )
+    elif phase in ("retained", "retire") and retire_sent:
+        out.append({"action": "revert", "role": "unavailable",
+                    "effect": "revert impossible: X1 has sent (or may have sent) the delete of the old VM; "
+                              "retry-step lets X1 finish"})  # fmt: skip
+    elif phase in ("retained", "retire"):
+        out.append({"action": "revert", "role": "operator + TC",
+                    "effect": "restore to blue (FIP and volume back); voids any retirement approval"})  # fmt: skip
+    elif key == "await_discard":
+        out.append(
+            {
+                "action": "discard",
+                "role": "operator + TC of green",
+                "effect": "delete the stopped green",
+            }
+        )
+    return out
+
+
+def run_body(s: Session, run_id: UUID | str) -> dict[str, Any]:
+    run = (
+        s.execute(text("SELECT * FROM workflow_run WHERE id = :i"), {"i": run_id}).mappings().one()
+    )
+    resolved = s.execute(
+        text("SELECT resolved FROM renewal_plan WHERE id = :p"), {"p": run["renewal_plan_id"]}
+    ).scalar_one()
+    step = s.execute(
+        text("SELECT step_key, state, attempt, lease_owner, lease_expires_at, heartbeat_at, deadline_at, error "
+             "FROM workflow_step WHERE run_id = :r AND state IN ('ready','running','waiting','needs_human')"),
+        {"r": run_id}).mappings().first()  # fmt: skip
+    locks = s.execute(text("SELECT resource_type, resource_key FROM resource_lock WHERE holder_run_id = :r"),
+                      {"r": run_id}).all()  # fmt: skip
+    pending = s.execute(text("SELECT kind, actor_id, created_at FROM run_signal WHERE run_id = :r AND consumed_at IS "
+                             "NULL ORDER BY created_at"), {"r": run_id}).mappings().all()  # fmt: skip
+    hb = s.execute(text("SELECT max(last_seen_at) FROM worker_heartbeat")).scalar()
+    body = _row(run)
+    body |= {
+        "current_step": _row(step) if step else None,
+        "locks": [{"resource_type": t, "resource_key": k} for t, k in locks],
+        "pending_signals": [_row(p) for p in pending],
+        "worst_case_window_seconds": resolved["worst_case_window_seconds"],
+        "max_window_duration_seconds": resolved["max_window_duration_seconds"],
+        "available_actions": available_actions(
+            run,
+            step,
+            resolved,
+            _snapshot_id(s, str(run_id)),
+            retire_sent=_retire_sent(s, str(run_id)),
+        ),
+        "last_worker_heartbeat": _iso(hb),
+        "links": {"steps": f"/api/v1/runs/{run_id}/steps"},
+    }
+    return body
+
+
+def steps(s: Session, run_id: UUID) -> list[dict[str, Any]]:
+    rows = s.execute(
+        text("SELECT id, seq, step_key, state, attempt, destructive, evidence, error, error_class, deadline_at, "
+             "lease_owner, lease_expires_at, heartbeat_at, created_at, finished_at FROM workflow_step "
+             "WHERE run_id = :r ORDER BY seq"), {"r": run_id}).mappings().all()  # fmt: skip
+    return [_row(r) for r in rows]
+
+
+def cutover_request(
+    s: Session,
+    who: Principal,
+    cfg: RenewalConfig,
+    run_id: UUID,
+    *,
+    typed: str | None,
+    stepup_id: UUID | None,
+) -> dict[str, Any]:
+    run, resolved = run_row(s, run_id, who)
+    if not authorize(who, "operator", resolved["scope"]):
+        raise not_found("run")
+    step = s.execute(text("SELECT step_key FROM workflow_step WHERE run_id = :r AND state = 'waiting'"),
+                     {"r": run_id}).scalar()  # fmt: skip
+    if step != "await_cutover":
+        raise DomainError(
+            409, "not-awaiting-cutover", "Not at the cutover gate", "The run is not waiting at G2."
+        )
+    facts = load_facts(s.connection(), str(run["renewal_plan_id"]))
+    if ((facts.policy or {}).get("approvals") or {}).get("cutover"):
+        return request_approval(s, who, gate=Gate.CUTOVER, plan_id=facts.plan_id, run_id=str(run_id),
+                                scope=resolved["scope"])  # fmt: skip
+    # No cutover approval required: the operator's own request, human session + step-up + TC (security-model 7.1).
+    if not who.is_human or stepup_id is None:
+        raise DomainError(403, "human-session-required", "Human session required",
+                          "Entering the downtime window needs a human session, TOTP step-up and typed confirmation.")  # fmt: skip
+    expected = tc_of(resolved["blue"]["name"], resolved["blue"]["server_id"])
+    if not hmac.compare_digest(" ".join((typed or "").split()), expected):
+        raise DomainError(422, "confirmation-mismatch", "Typed confirmation does not match",
+                          "Type the server name and the last 6 characters of its id.")  # fmt: skip
+    consume_stepup(s, who, stepup_id, action=CUTOVER_STEPUP_ACTION, target_id=str(run_id))
+    aid = new_id()
+    s.execute(
+        text("INSERT INTO approval (id, subject_type, subject_id, plan_id, run_id, scope, bound_hash, requester_set, "
+             "requested_by, decided_by, decision, typed_confirmation, auth_method, stepup_id, operator_confirmed, "
+             "decided_at, expires_at) VALUES (:i, 'cutover', :r, :p, :r, :scope, :h, '{}', :u, :u, 'approved', :tc, "
+             ":am, :su, true, now(), now() + make_interval(secs => :v))"),
+        {"i": aid, "r": run_id, "p": facts.plan_id, "scope": resolved["scope"], "h": facts.recomputed_hash,
+         "u": who.user_id, "tc": typed, "am": who.auth_method, "su": stepup_id,
+         "v": float(cfg.validity_cutover)},
+    )  # fmt: skip
+    send_signal(s.connection(), str(run_id), "approve", actor_id=str(who.user_id), approval_id=aid)
+    _audit(s, who, "approval.decide", "approval", aid, resolved["scope"], subject_type="cutover",
+           decision="approved", operator_confirmed=True)  # fmt: skip
+    return approval_body(s, aid)
+
+
+def retirement_request(s: Session, who: Principal, run_id: UUID) -> dict[str, Any]:
+    run, resolved = run_row(s, run_id, who)
+    if not authorize(who, "operator", resolved["scope"]):
+        raise not_found("run")
+    step = s.execute(text("SELECT step_key FROM workflow_step WHERE run_id = :r AND state = 'waiting'"),
+                     {"r": run_id}).scalar()  # fmt: skip
+    if step != "await_retirement":
+        raise DomainError(409, "retention-not-elapsed", "Not at the retirement gate",
+                          "Retirement can be requested once the retention period has elapsed.")  # fmt: skip
+    return request_approval(s, who, gate=Gate.RETIREMENT, plan_id=str(run["renewal_plan_id"]), run_id=str(run_id),
+                            scope=resolved["scope"])  # fmt: skip
+
+
+def action(
+    s: Session, who: Principal, run_id: UUID, name: str, *, typed: str | None, stepup_id: UUID | None,
+    attestation: str | None,
+) -> dict[str, Any]:  # fmt: skip
+    if name not in ACTIONS:
+        raise not_found("action")
+    kind, confirmed = ACTIONS[name]
+    run, resolved = run_row(s, run_id, who)
+    scope = resolved["scope"]
+    role_ok = authorize(who, "operator", scope) or (
+        kind == "mark_resolved" and authorize(who, "approver", scope)
+    )
+    if not role_ok:
+        raise DomainError(
+            403, "forbidden", "Forbidden", "The operator role in this project is required."
+        )
+    if not who.is_human and "operate" not in who.token_scopes:
+        raise DomainError(
+            403, "token-scope", "Forbidden", "The API token's scope does not allow this action."
+        )
+    payload: dict[str, Any] = {}
+    if confirmed:
+        if not who.is_human or stepup_id is None:
+            raise DomainError(403, "human-session-required", "Human session required",
+                              "This action needs a human session, TOTP step-up and typed confirmation.")  # fmt: skip
+        expected = tc_target(s.connection(), str(run_id), kind, run["phase"] or "build", resolved)
+        if not expected or not hmac.compare_digest(" ".join((typed or "").split()), expected):
+            raise DomainError(422, "confirmation-mismatch", "Typed confirmation does not match",
+                              "Type the affected server's name and the last 6 characters of its id.")  # fmt: skip
+        consume_stepup(s, who, stepup_id, action=f"run.{kind}", target_id=str(run_id))
+        payload = {"typed_confirmation": typed, "stepup_id": str(stepup_id)}
+    if attestation:
+        payload["attestation"] = attestation[:2000]
+    sig = send_signal(s.connection(), str(run_id), kind, actor_id=str(who.user_id), payload=payload)
+    _audit(
+        s, who, f"run.{kind}.request", "renewal_run", str(run_id), scope, kind=kind, signal_id=sig
+    )
+    return run_body(s, run_id)
+
+
+def list_runs(
+    s: Session, who: Principal, *, state: str | None, service: UUID | None
+) -> list[dict[str, Any]]:
+    rows = s.execute(
+        text("SELECT r.id, p.resolved ->> 'scope' AS scope FROM workflow_run r JOIN renewal_plan p ON p.id = "
+             "r.renewal_plan_id WHERE r.kind = :k AND (CAST(:st AS text) IS NULL OR r.state = :st) AND "
+             "(CAST(:sv AS uuid) IS NULL OR r.service_id = :sv) ORDER BY r.created_at DESC LIMIT 200"),
+        {"k": KIND, "st": state, "sv": service}).all()  # fmt: skip
+    return [run_body(s, r.id) for r in rows if authorize(who, "viewer", r.scope)]
+
+
+def list_approvals(s: Session, who: Principal, *, open_only: bool) -> list[dict[str, Any]]:
+    rows = s.execute(
+        text("SELECT id, scope FROM approval WHERE (NOT :o OR (decision IS NULL AND void_reason IS NULL)) "
+             "ORDER BY created_at DESC LIMIT 200"), {"o": open_only}).all()  # fmt: skip
+    return [approval_body(s, r.id) for r in rows if authorize(who, "viewer", r.scope)]
+
+
+def list_plans(s: Session, who: Principal) -> list[dict[str, Any]]:
+    rows = (
+        s.execute(text("SELECT * FROM renewal_plan ORDER BY created_at DESC LIMIT 200"))
+        .mappings()
+        .all()
+    )
+    return [plan_body(s, r) for r in rows if authorize(who, "viewer", r["resolved"]["scope"])]
+
+
+def approval_exists(s: Session, aid: UUID) -> bool:
+    return s.execute(text("SELECT 1 FROM approval WHERE id = :i"), {"i": aid}).first() is not None
+
+
+def visible(who: Principal, scope: str) -> bool:
+    return authorize(who, "viewer", scope)

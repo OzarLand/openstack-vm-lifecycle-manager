@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
+    NoDecode,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
     TomlConfigSettingsSource,
@@ -125,9 +128,62 @@ class AlertSettings(_Section):
     after: float = Field(default=300.0, gt=0)
 
 
+class RenewalGreenReady(_Section):
+    #: ``green_ready.max_age``: B9 success must be younger than this when W1 is claimed. Default TBD in lab.
+    max_age: float | None = Field(default=None, gt=0)
+
+
+class RenewalHealthcheck(_Section):
+    #: ``healthcheck.max_attempts`` / ``healthcheck.interval`` (W8). Defaults TBD in lab.
+    max_attempts: int | None = Field(default=None, ge=1)
+    interval: float | None = Field(default=None, ge=0)
+
+
+class RenewalExternalVerify(_Section):
+    #: ``external_verify.required_successes`` / ``external_probe.interval`` (W10, S9). Defaults TBD in lab.
+    required_successes: int | None = Field(default=None, ge=1)
+    interval: float | None = Field(default=None, ge=0)
+
+
+class RenewalRetire(_Section):
+    #: ``retire.health_max_age``: X1 needs a green healthcheck younger than this. Default TBD in lab.
+    health_max_age: float | None = Field(default=None, gt=0)
+
+
+class RenewalApprovalValidity(_Section):
+    #: ``approval.validity.*`` in seconds. Plan 24 h and cutover 4 h are the security-model.md 7.1 defaults; the
+    #: retirement validity has no documented default and must be configured.
+    plan: float = Field(default=24 * 3600, gt=0)
+    cutover: float = Field(default=4 * 3600, gt=0)
+    retirement: float | None = Field(default=None, gt=0)
+
+
 class RenewalSettings(_Section):
     #: Global cap on admitted (non-terminal, non-requested) renewal runs (NFR-9). Checked at admission.
     max_concurrent_runs: int = Field(default=5, ge=1)
+    #: ``timeouts.<key>`` of renewal-workflow.md (seconds). **No defaults** (TBD in lab): a run whose strategy
+    #: needs a key that is not configured is rejected at admission with the list of missing keys.
+    timeouts: dict[str, float] = Field(default_factory=dict)
+    #: ``automation.timeout.<phase>`` (seconds) as the renewal uses them for step deadlines, leases and the
+    #: worst-case window shown at G2. No defaults (renewal-workflow.md section 8 item 11: TBD in lab).
+    automation_timeouts: dict[str, float] = Field(default_factory=dict)
+    green_ready: RenewalGreenReady = RenewalGreenReady()
+    healthcheck: RenewalHealthcheck = RenewalHealthcheck()
+    external_verify: RenewalExternalVerify = RenewalExternalVerify()
+    retire: RenewalRetire = RenewalRetire()
+    approval_validity: RenewalApprovalValidity = RenewalApprovalValidity()
+    #: **Interim, lab only** (until the encrypted credential store of security-model.md 5.1 exists): a worker-only
+    #: directory holding ``<project_connection_id>.json`` (write application credential) and ``<id>.guest_key``
+    #: (OpenSSH private key of the guest ``ovlm`` user), owned by the worker user, mode 0700/0600. Unset (the
+    #: default): no renewal is admitted, because no credential is available.
+    credentials_dir: Path | None = None
+
+    @field_validator("credentials_dir")
+    @classmethod
+    def _absolute(cls, value: Path | None) -> Path | None:
+        if value is not None and not value.is_absolute():
+            raise ValueError("renewal.credentials_dir must be an absolute path")
+        return value
 
 
 class AuthSettings(_Section):
@@ -147,6 +203,101 @@ class AuthSettings(_Section):
     #: escalates: only the per-account backoff doubles (up to 15 minutes), so a shared or misattributed source
     #: address can slow other users for seconds, never lock them out (SEC-C-1).
     login_ip_delay_seconds: int = Field(default=10, ge=1, le=60)
+
+
+AUTOMATION_PHASES: tuple[str, ...] = (
+    "preflight",
+    "configure",
+    "quiesce",
+    "data_attach",
+    "start_service",
+    "healthcheck",
+    "rollback_hooks",
+)
+_OS_USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+
+
+class AutomationSettings(_Section):
+    """``automation.*`` (architecture.md section 5, automation-contract.md section 11). Worker only: the api never
+    reads it. Secrets are files (``*_file``); nothing here holds a secret value."""
+
+    #: Parent of the per-attempt run directories. tmpfs in the worker container (secrets touch only memory).
+    run_root: Path = Path("/run/ovlm")
+    require_tmpfs: bool = False
+    #: Directory holding ``ansible`` and ``ansible-runner`` (the worker image's venv). ``None``: the running
+    #: interpreter's directory.
+    ansible_bin_dir: Path | None = None
+    #: Pre-provisioned, pinned collections (the worker image ships ``ansible.posix`` at this path). Never filled at
+    #: run time: Galaxy is not contacted (SEC-R-12).
+    collections_paths: Annotated[tuple[Path, ...], NoDecode] = (Path("/opt/ovlm/collections"),)
+    #: OS user ansible runs as. ``None`` runs it as the worker user: refused outside development mode.
+    run_user: str | None = "ovlm-ansible"
+    #: Command prepended to ``kill`` when a direct signal to the runner user's processes is refused (e.g.
+    #: ``["sudo", "-n", "-u", "ovlm-ansible"]``). Unneeded when the worker holds CAP_KILL (the container image does).
+    signal_prefix: Annotated[tuple[str, ...], NoDecode] = ()
+    #: Per-phase overrides, seconds. A phase absent keeps the contract default (section 6).
+    timeout: dict[str, int] = Field(default_factory=dict)
+    idle_timeout: dict[str, int] = Field(default_factory=dict)
+    #: Hard ceiling per phase: the effective timeout is min(profile value, this). Absent: 4 x the default.
+    max_timeout: dict[str, int] = Field(default_factory=dict)
+    result_max_bytes: int = Field(default=1024 * 1024, ge=1024, le=64 * 1024 * 1024)
+    log_max_bytes: int = Field(default=5 * 1024 * 1024, ge=1024, le=256 * 1024 * 1024)
+    #: Days restricted artefacts (log, events, diff) are kept; separate from the audit retention.
+    artifact_retention_days: int = Field(default=30, ge=1, le=3650)
+    #: Allowlisted automation repository URL prefixes (https or ssh). Empty refuses every repository.
+    allowed_repos: Annotated[tuple[str, ...], NoDecode] = ()
+    #: Optional deploy key (ssh URLs): files, mode 0600, and the git host's known_hosts.
+    git_ssh_key_file: Path | None = None
+    git_ssh_known_hosts_file: Path | None = None
+
+    @field_validator("allowed_repos", "collections_paths", mode="before")
+    @classmethod
+    def _split(cls, value: object) -> object:
+        # an environment variable carries the list as comma separated text (TOML: a real list)
+        if isinstance(value, str):
+            return tuple(v for v in (p.strip() for p in value.split(",")) if v)
+        return value
+
+    @field_validator("signal_prefix", mode="before")
+    @classmethod
+    def _split_words(cls, value: object) -> object:
+        return (
+            tuple(value.split()) if isinstance(value, str) else value
+        )  # "sudo -n -u ovlm-ansible"
+
+    @model_validator(mode="after")
+    def _check(self) -> AutomationSettings:
+        for name in ("timeout", "idle_timeout", "max_timeout"):
+            table: dict[str, int] = getattr(self, name)
+            for phase, seconds in table.items():
+                if phase not in AUTOMATION_PHASES:
+                    raise ValueError(f"automation.{name}: unknown phase {phase!r}")
+                if seconds <= 0:
+                    raise ValueError(f"automation.{name}.{phase} must be positive")
+        if self.run_user is not None and not _OS_USER.match(self.run_user):
+            raise ValueError("automation.run_user is not a valid OS user name")
+        if not self.run_root.is_absolute():
+            raise ValueError("automation.run_root must be an absolute path")
+        if self.ansible_bin_dir is not None and not self.ansible_bin_dir.is_absolute():
+            raise ValueError("automation.ansible_bin_dir must be an absolute path")
+        if any(not p.is_absolute() for p in self.collections_paths):
+            raise ValueError("automation.collections_paths must be absolute paths")
+        for url in self.allowed_repos:
+            parts = urlsplit(url)
+            if (
+                parts.scheme not in {"https", "ssh"}
+                or not parts.hostname
+                or parts.password
+                or (parts.username and parts.scheme == "https")
+            ):
+                raise ValueError(
+                    "automation.allowed_repos entries must be https:// or ssh:// URL prefixes without credentials"
+                )
+        if (self.git_ssh_key_file is None) != (self.git_ssh_known_hosts_file is None):
+            raise ValueError(
+                "automation.git_ssh_key_file and automation.git_ssh_known_hosts_file go together"
+            )
+        return self
 
 
 class Settings(BaseSettings):
@@ -175,6 +326,7 @@ class Settings(BaseSettings):
     signal: AlertSettings = AlertSettings()
     renewal: RenewalSettings = RenewalSettings()
     auth: AuthSettings = AuthSettings()
+    automation: AutomationSettings = AutomationSettings()
 
     @model_validator(mode="after")
     def _check(self) -> Settings:
@@ -187,6 +339,11 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "external_url is required for the api (CSRF Origin check, enrolment links); "
                     "set development_mode = true only on a development installation"
+                )
+            if self.process_role == "worker" and self.automation.run_user is None:
+                raise ValueError(
+                    "automation.run_user must name the separate OS user (security-model.md 6.5); "
+                    "null (ansible as the worker user) is for development_mode only"
                 )
             if self.log.openstack_http_debug:
                 raise ValueError(

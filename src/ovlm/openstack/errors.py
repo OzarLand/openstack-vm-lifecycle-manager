@@ -157,6 +157,8 @@ def translate_http_error(status: int, message: str) -> OpenStackError:
         return NoFloatingIpAvailableError(message, status=status)
     if status == 403 and _OVER_QUOTA.search(message):
         return QuotaExceededError(message, status=status)
+    if status == 413:  # Cinder: SnapshotLimitExceeded, VolumeSizeExceedsAvailableQuota (OverLimit)
+        return QuotaExceededError(message, status=status)
     by_status: dict[int, type[OpenStackError]] = {
         400: BadRequestError,
         401: AuthenticationError,

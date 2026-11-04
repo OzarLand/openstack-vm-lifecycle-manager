@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from ovlm.openstack.types import (
+    BlockStorageLimits,
     CreateServerSpec,
     FlavorInfo,
     FloatingIpInfo,
@@ -27,6 +28,7 @@ from ovlm.openstack.types import (
     ServerInfo,
     VolumeAttachmentInfo,
     VolumeInfo,
+    VolumeSnapshotInfo,
     VolumeTypeInfo,
 )
 
@@ -156,4 +158,21 @@ class WriteClient(ReadClient, Protocol):
 
     def write_microversions(self) -> dict[str, str | None]:
         """Microversions the write calls pin, and what the cloud offers; recorded in step evidence."""
+        ...
+
+    def create_volume_snapshot(
+        self, volume_id: str, name: str, metadata: Mapping[str, str]
+    ) -> VolumeSnapshotInfo:
+        """Cinder snapshot of an ``available`` volume (W4), never ``force``. Asynchronous: returns ``creating``;
+        poll :meth:`get_volume_snapshot`. There is no snapshot delete anywhere in OVLM."""
+        ...
+
+    def list_volume_snapshots(self, *, name: str | None = None) -> list[VolumeSnapshotInfo]:
+        """The project's snapshots; ``name`` matched exactly (re-checked client side)."""
+        ...
+
+    def get_volume_snapshot(self, snapshot_id: str) -> VolumeSnapshotInfo: ...
+
+    def block_storage_limits(self) -> BlockStorageLimits:
+        """Cinder absolute limits (snapshots, gigabytes): the B1 quota pre-check of W4 (SRE-R-7)."""
         ...

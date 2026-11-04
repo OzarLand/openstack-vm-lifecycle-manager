@@ -29,14 +29,17 @@ test-unit:
 test-integration:  ## Starts a throw-away PostgreSQL container unless OVLM_TEST_DATABASE_URL is set
 	$(UV) run --frozen --group automation pytest tests/integration
 
-lock:  ## Re-resolve uv.lock and regenerate requirements.lock (used by the Dockerfile)
+lock:  ## Re-resolve uv.lock; regenerate requirements.lock (api image) and requirements-worker.lock (worker image: + automation group)
 	$(UV) lock
 	$(UV) export --frozen --no-dev --group build --no-emit-project --format requirements-txt --no-header -o requirements.lock >/dev/null
+	$(UV) export --frozen --no-dev --group build --group automation --no-emit-project --format requirements-txt --no-header -o requirements-worker.lock >/dev/null
 
 lock-check:  ## Fail if the lock files are stale
 	$(UV) lock --check
 	$(UV) export --frozen --no-dev --group build --no-emit-project --format requirements-txt --no-header -o /tmp/requirements.lock.check >/dev/null
 	diff -u requirements.lock /tmp/requirements.lock.check
+	$(UV) export --frozen --no-dev --group build --group automation --no-emit-project --format requirements-txt --no-header -o /tmp/requirements-worker.lock.check >/dev/null
+	diff -u requirements-worker.lock /tmp/requirements-worker.lock.check
 
 secrets:  ## Generate random development secrets in ./secrets (git-ignored)
 	@umask 077; mkdir -p secrets; \
@@ -45,8 +48,9 @@ secrets:  ## Generate random development secrets in ./secrets (git-ignored)
 	  chmod 0444 secrets/$$s; \
 	done
 
-build:  ## Build the image
-	docker build -t ovlm:dev .
+build:  ## Build both images: ovlm:dev (api, migrate) and ovlm-worker:dev (worker: ansible + collections)
+	docker build --target runtime -t ovlm:dev .
+	docker build --target worker -t ovlm-worker:dev .
 
 up: secrets  ## Build and start postgres, migrate, api and worker; wait until healthy
 	docker compose up -d --build --wait
@@ -71,8 +75,11 @@ smoke:  ## Assertions on a running stack (`make up` first); used by CI
 	test "$$(docker inspect -f '{{.State.ExitCode}}' $$(docker compose ps -a -q migrate))" = 0; \
 	echo "== non-root, distinct users"; \
 	test "$$(docker compose exec -T api id -u)" = 10001; \
-	test "$$(docker compose exec -T worker id -u)" = 10001; \
-	docker compose run --rm --no-deps --entrypoint id api ovlm-ansible | grep -q 'uid=10002'; \
+		docker compose run --rm --no-deps --entrypoint id api ovlm-ansible | grep -q 'uid=10002'; \
+	echo "== worker image: has ssh, ssh-keyscan, git; ansible --version runs as ovlm-ansible; worker holds only setuid/setgid/kill"; \
+	docker compose exec -T worker /usr/local/bin/ovlm-worker-entrypoint -- python - < tests/smoke/worker_checks.py; \
+	echo "== api image: no ansible, ssh or git"; \
+	docker compose exec -T api python - < tests/smoke/api_checks.py; \
 	echo "== secret isolation: api/worker never see the owner secret"; \
 	test "$$(docker compose exec -T api ls /run/secrets)" = db_api_password; \
 	test "$$(docker compose exec -T worker ls /run/secrets)" = db_worker_password; \

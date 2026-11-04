@@ -17,6 +17,7 @@ where the lab tag says otherwise:
 | Server names are not unique | OSI s.3 (SV) |
 | ``changes_since`` listing includes deleted servers (tombstones); a plain listing does not | OSI s.1 (SV) |
 | Minimal construct (status ``UNKNOWN``, few fields) for a server in an unreachable cell | OSI s.1 (DU) |
+| Cinder snapshot (no ``force``): volume must be ``available`` (400 otherwise); ``creating`` -> ``available`` after ``snapshot_delay``, or ``error``, or stuck ``creating`` (``snapshot_outcome``); over the ``snapshots``/``gigabytes`` limit: 413; the volume is unchanged | Cinder API reference (AS: not traced in the source, lab item) |
 | Floating IP update without a router path: **404** ``External network ... is not reachable from subnet ...`` | OSI s.6.1 (SV) |
 | Floating IP whose target port already has one on that network: 409 | OSI s.6.1 (SV) |
 | Empty floating IP pool: 400 ``Unable to find any IP address on external network`` although the quota is free | LAB-OBSERVED (EXP-01) |
@@ -70,6 +71,7 @@ from ovlm.openstack.types import (
     STATUS_DELETED,
     STATUS_UNKNOWN,
     AttachedVolume,
+    BlockStorageLimits,
     CreateServerSpec,
     FlavorInfo,
     FloatingIpInfo,
@@ -80,6 +82,7 @@ from ovlm.openstack.types import (
     ServerInfo,
     VolumeAttachmentInfo,
     VolumeInfo,
+    VolumeSnapshotInfo,
     VolumeTypeInfo,
 )
 
@@ -89,6 +92,7 @@ _MUTATING = frozenset(
         "create_server", "delete_server", "stop_server", "start_server", "lock_server", "unlock_server",
         "add_server_tag", "attach_volume", "detach_volume", "update_floating_ip", "get_console_output",
         "add_floating_ip_tag", "merge_volume_metadata", "create_volume", "allocate_floating_ip",
+        "create_volume_snapshot",
     }
 )  # fmt: skip
 _ATTACHABLE_VM_STATES = frozenset(
@@ -151,6 +155,17 @@ class _Volume:
 
 
 @dataclass
+class _Snapshot:
+    id: str
+    name: str
+    volume_id: str
+    size: int
+    metadata: dict[str, str]
+    created: datetime
+    status: str = "creating"  # creating -> available | error
+
+
+@dataclass
 class _Rule:
     op: str
     error: Exception
@@ -172,6 +187,7 @@ class FakeOpenStack:
     start_delay = 12.0
     build_delay = 30.0
     fip_status_delay = 1.0
+    snapshot_delay = 10.0
 
     def __init__(
         self,
@@ -217,6 +233,13 @@ class FakeOpenStack:
         self._rules: list[_Rule] = []
         self._counts: Counter[str] = Counter()
         self._hidden: set[str] = set()
+        self._snapshots: dict[str, _Snapshot] = {}
+        #: Cinder absolute limits (``None``: unlimited). Snapshots count toward ``gigabytes`` (Cinder default).
+        self.quota_snapshots: int | None = None
+        self.quota_gigabytes: int | None = None
+        #: How the next snapshots end: ``available``, ``error`` (the backend failed) or ``stuck`` (stays
+        #: ``creating`` for ever, the case renewal-workflow.md W4 reports as an orphan candidate).
+        self.snapshot_outcome: Literal["available", "error", "stuck"] = "available"
 
     # --- clock ---------------------------------------------------------------------------------------------
 
@@ -452,6 +475,10 @@ class FakeOpenStack:
                 for v in self._volumes.values()
             },
             "floating_ips": {f.openstack_id: f.port_id for f in self._fips.values()},
+            "snapshots": {
+                sn.id: {"status": sn.status, "volume_id": sn.volume_id, "name": sn.name}
+                for sn in self._snapshots.values()
+            },
         }
 
     # --- lookups ---------------------------------------------------------------------------------------------
@@ -927,6 +954,87 @@ class FakeOpenStack:
             "block_storage_max": f"{self.block_storage_max[0]}.{self.block_storage_max[1]}",
             "network": None,
         }
+
+    # --- Cinder snapshots (W4) ------------------------------------------------------------------------------
+
+    def _snapshot_info(self, sn: _Snapshot) -> VolumeSnapshotInfo:
+        return VolumeSnapshotInfo(
+            sn.id, sn.name, sn.status, sn.volume_id, sn.size, dict(sn.metadata), sn.created
+        )
+
+    def create_volume_snapshot(
+        self, volume_id: str, name: str, metadata: Mapping[str, str]
+    ) -> VolumeSnapshotInfo:
+        """Cinder ``POST /snapshots`` without ``force``: the volume must be ``available`` (400 otherwise, as for an
+        in-use volume without force); over the snapshot or gigabytes limit: 413. The volume itself is unchanged."""
+        with self._call("create_volume_snapshot"):
+            v = self._volume_raw(volume_id)
+            if v.status != "available":
+                raise BadRequestError(
+                    f"Invalid volume: Volume {volume_id} status must be available, but current status is: "
+                    f"{v.status}.",
+                    status=400,
+                )
+            used_gb = sum(x.size for x in self._snapshots.values())
+            if self.quota_snapshots is not None and len(self._snapshots) + 1 > self.quota_snapshots:
+                raise QuotaExceededError(
+                    f"Maximum number of snapshots allowed ({self.quota_snapshots}) exceeded",
+                    status=413,
+                )
+            if self.quota_gigabytes is not None and used_gb + v.size > self.quota_gigabytes:
+                raise QuotaExceededError(
+                    "Requested volume or snapshot exceeds allowed gigabytes quota", status=413
+                )
+            sn = _Snapshot(self._new_id(), name, volume_id, v.size, dict(metadata), self.now)
+            self._snapshots[sn.id] = sn
+            outcome = self.snapshot_outcome
+
+            def done() -> None:
+                if outcome != "stuck":
+                    sn.status = outcome
+
+            self._later(self.snapshot_delay, done)
+            return self._snapshot_info(sn)
+
+    def list_volume_snapshots(self, *, name: str | None = None) -> list[VolumeSnapshotInfo]:
+        with self._call("list_volume_snapshots"):
+            return [
+                self._snapshot_info(sn)
+                for sn in self._snapshots.values()
+                if name is None or sn.name == name
+            ]
+
+    def get_volume_snapshot(self, snapshot_id: str) -> VolumeSnapshotInfo:
+        with self._call("get_volume_snapshot"):
+            sn = self._snapshots.get(snapshot_id)
+            if sn is None:
+                raise NotFoundError(f"Snapshot {snapshot_id} could not be found.", status=404)
+            return self._snapshot_info(sn)
+
+    def block_storage_limits(self) -> BlockStorageLimits:
+        with self._call("block_storage_limits"):
+            return BlockStorageLimits(
+                self.quota_snapshots if self.quota_snapshots is not None else -1,
+                len(self._snapshots),
+                self.quota_gigabytes if self.quota_gigabytes is not None else -1,
+                sum(sn.size for sn in self._snapshots.values()),
+            )
+
+    def add_volume_snapshot(
+        self,
+        volume_id: str,
+        name: str,
+        *,
+        status: str = "available",
+        metadata: dict[str, str] | None = None,
+    ) -> str:
+        """Test helper: a snapshot someone else made (e.g. a name squatter)."""
+        v = self._volume_raw(volume_id)
+        sn = _Snapshot(
+            self._new_id(), name, volume_id, v.size, dict(metadata or {}), self.now, status
+        )
+        self._snapshots[sn.id] = sn
+        return sn.id
 
     def _fip_raw(self, floating_ip_id: str) -> FloatingIpInfo:
         fip = self._fips.get(floating_ip_id)

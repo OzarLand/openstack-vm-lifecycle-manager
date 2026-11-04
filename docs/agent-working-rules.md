@@ -27,7 +27,7 @@ Every implementation agent follows these rules. The brief of each task says whic
 
 ## Quality bar (before every push)
 
-- `make lint` and `make test` pass. Integration tests need PostgreSQL: Docker, or `OVLM_TEST_DATABASE_URL`.
+- `make lint` and `make test` pass. **If your sandbox runs as root, also run the unit tests as a non-root user**: root hid a real production bug once (Ansible needs a writable `HOME`; fixed in PR #7). Integration tests need PostgreSQL: Docker, or `OVLM_TEST_DATABASE_URL`.
 - New behaviour comes with tests at the level `testing-strategy.md` names.
 - Report honestly: say exactly which tests ran and passed, and what was not run. Never claim a status (unit tested,
   integration tested, lab validated) that was not reached.

@@ -16,6 +16,7 @@ import sys
 import threading
 import uuid
 from types import FrameType
+from typing import Any
 
 from sqlalchemy import Engine, text
 
@@ -44,13 +45,25 @@ log = logging.getLogger("ovlm.worker")
 METRICS_EVERY = 6
 
 
-def build_registry(settings: Settings, engine: Engine | None = None) -> Registry:
-    """Workflow definitions of this release. Strategies register here (E5-4 adds ``bluegreen_fip_v1``).
+def build_registry(
+    settings: Settings, engine: Engine | None = None, *, renewal_deps: Any = None
+) -> Registry:
+    """Workflow definitions of this release.
 
-    ``readiness`` (E4-1) reads the database only and needs the engine to store its assessment."""
+    ``readiness`` (E4-1) reads the database only. ``bluegreen_fip_v1`` (E5-4) gets its production ports from
+    :func:`ovlm.renewal.production.production_deps` (guarded SDK write client per project credential, the automation
+    runner from ``Settings.automation``, OpenSSH and HTTP probes); tests pass ``renewal_deps`` (doubles). Its
+    ``api_unreachable`` re-probe runs every ``poll.max_interval`` (renewal-workflow.md 5)."""
     registry = Registry()
     if engine is not None:
+        from ovlm.renewal import reprobe
+        from ovlm.renewal.definition import BlueGreenFipV1
+        from ovlm.renewal.production import production_deps
+
         registry.register(ReadinessDefinition(engine))
+        registry.register(BlueGreenFipV1(renewal_deps or production_deps(settings, engine)))
+        registry.register(reprobe.RenewalReprobe(engine))
+        registry.periodic.append(reprobe.periodic_job(settings.poll.max_interval))
     return registry
 
 
@@ -89,10 +102,27 @@ class Worker:
         """Once per process: register, then run startup sweepers *before* the first claim (SRE-R-5)."""
         if self.workflow is None:
             return
+        self._sweep_automation_orphans()
         self.workflow.register_worker(__version__)
         for sweeper in self.workflow.registry.sweepers:
             sweeper()
         self._started = True
+
+    def _sweep_automation_orphans(self) -> None:
+        """Wipe run directories (secrets) a killed worker left behind and stop their processes, before any claim
+        (automation-contract.md sections 5 and 8). A failure is logged, not fatal: it must not take the worker down."""
+        from ovlm.automation.config import orphan_max_age, runner_config
+        from ovlm.automation.rundir import sweep_orphans
+
+        try:
+            removed = sweep_orphans(
+                self.settings.automation.run_root, orphan_max_age(runner_config(self.settings))
+            )
+        except Exception:
+            log.exception("automation orphan sweep failed")
+            return
+        if removed:
+            log.warning("removed orphan automation run directories", extra={"count": len(removed)})
 
     def _workflow_tick(self) -> None:
         wf = self.workflow
