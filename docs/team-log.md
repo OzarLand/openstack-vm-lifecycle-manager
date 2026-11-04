@@ -697,3 +697,14 @@ reported by the platform. Long-lived review sessions re-read a growing context, 
 component (the renewal strategy next).
 
 The working branch goes to `main` once both fix rounds are merged and CI is green.
+
+## ⏸️ PAUSED — 2026-11-04 ~17:20 UTC
+
+The maintainer asked for a README and a pause of all work until "reprends", saving progress first. Actions taken:
+- The three active agents (engine fixes, security fixes, renewal strategy) were told to push their work in progress
+  and stop.
+- The branch watcher is stopped.
+- `README.md` was written.
+- The resume plan is in [HANDOFF.md](HANDOFF.md).
+
+No other work runs until the maintainer resumes.
