@@ -1,0 +1,91 @@
+# Development/CI Compose file. Secrets are files under ./secrets (see `make secrets`); never env values.
+name: ovlm
+
+x-ovlm: &ovlm
+  image: ovlm:dev
+  build: .
+  environment: &ovlm-env
+    OVLM_CONFIG_FILE: /nonexistent   # no TOML file in the dev stack; settings below come from env
+    OVLM_DB__HOST: postgres
+    OVLM_DB__NAME: ovlm
+    OVLM_DB__SSLMODE: disable        # private Compose network; enable TLS if the DB is remote
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  postgres:
+    image: postgres:16-bookworm@sha256:e8a07d2c7579b038938cdba6c539e580e5001caf9ea203d397b5cc83e76bd938
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_superuser_password
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    secrets: [db_superuser_password, db_owner_password, db_api_password, db_worker_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/10-ovlm-roles.sh:/docker-entrypoint-initdb.d/10-ovlm-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ovlm"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    # not published outside the Compose network
+
+  migrate:
+    <<: *ovlm
+    command: ["migrate"]
+    environment:
+      <<: *ovlm-env
+      OVLM_DB__PASSWORD_FILE: /run/secrets/db_owner_password
+    secrets: [db_owner_password]   # only the migrate service sees the owner secret (SEC-R-18)
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+
+  api:
+    <<: *ovlm
+    command: ["api"]
+    environment:
+      <<: *ovlm-env
+      OVLM_DB__PASSWORD_FILE: /run/secrets/db_api_password
+      OVLM_HTTP__HOST: 0.0.0.0        # container-internal; published on loopback only below
+      OVLM_HTTP__METRICS_HOST: 0.0.0.0 # reachable on the Compose network only, never published
+    secrets: [db_api_password]
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2).status == 200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  worker:
+    <<: *ovlm
+    command: ["worker"]
+    init: true                          # minimal init: signal forwarding and reaping
+    environment:
+      <<: *ovlm-env
+      OVLM_DB__PASSWORD_FILE: /run/secrets/db_worker_password
+      OVLM_HTTP__METRICS_HOST: 0.0.0.0
+    secrets: [db_worker_password]
+    tmpfs:
+      - /run/ovlm:mode=0700,uid=10001,gid=10001   # automation.run_root (later epics)
+    stop_grace_period: 40s
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/healthz', timeout=2).status == 200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+secrets:
+  db_superuser_password: {file: ./secrets/db_superuser_password}
+  db_owner_password: {file: ./secrets/db_owner_password}
+  db_api_password: {file: ./secrets/db_api_password}
+  db_worker_password: {file: ./secrets/db_worker_password}
+
+volumes:
+  pgdata:

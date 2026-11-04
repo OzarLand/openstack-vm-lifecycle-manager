@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Home{% endblock %}
+{% block content %}
+<h1>OVLM</h1>
+<p>Foundation skeleton: no inventory, policies or renewals yet.</p>
+<div id="status" hx-get="/ui/fragments/status" hx-trigger="load, every 30s" hx-swap="innerHTML">loading...</div>
+{% endblock %}
