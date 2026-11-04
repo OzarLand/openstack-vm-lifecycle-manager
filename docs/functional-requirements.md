@@ -93,7 +93,7 @@ The first instance is created from a profile with no previous VM. Planned after 
 | ID | Requirement | Priority |
 |---|---|---|
 | FR-PLN-1 | List upcoming renewals by deadline, with readiness level and blockers. | MVP |
-| FR-PLN-2 | Capacity pre-check against project quotas and absolute limits for the temporary extra VM (and volume, if any). | MVP |
+| FR-PLN-2 | Capacity pre-check against project quotas and absolute limits for the temporary extra VM. The check is **advisory**: real free capacity (hypervisors, Placement) is visible only to admins, and Neutron quota needs the `manager` role, which OVLM does not request ([openstack-integration.md](openstack-integration.md)). | MVP |
 | FR-PLN-3 | Detect conflicts: another renewal of the same service in progress, renewals that overlap in the same window in the same project and exceed quota, and declared dependencies renewed at the same time. | V1 (MVP: same-service lock and quota only) |
 | FR-PLN-4 | Schedule a renewal in a policy window; request approval. | MVP (manual start after approval), V1 (scheduled start) |
 
@@ -106,15 +106,15 @@ The first instance is created from a profile with no previous VM. Planned after 
 | FR-REN-3 | Every step is idempotent and resumable after a worker or database restart. Before acting, it checks the real OpenStack state. | MVP |
 | FR-REN-4 | Approval gates: before start (plan), before cutover, before retirement, as the policy requires. | MVP |
 | FR-REN-5 | Rollback is available from every step up to and including cutover. After cutover, until retirement, a "revert" action moves the service back to the retained VM. | MVP |
-| FR-REN-6 | Destructive steps (detach of the production data volume, cutover, deletion of the old VM) are clearly labelled. Each requires an explicitly authorized actor and the write credential. | MVP |
-| FR-REN-7 | The old VM is retained (stopped and locked) for the policy's retention period and deleted only after approval. | MVP |
+| FR-REN-6 | Destructive steps (detach of the production data volume, cutover, deletion of the old VM) are clearly labelled. Each requires an explicitly authorized actor and the write credential. **Ownership guard:** before every mutating call, the target must be registered in the OVLM database **and** carry the OVLM tag. Each approval is bound to a hash of plan, profile version, automation commit SHA and target IDs, so a changed plan voids it. | MVP |
+| FR-REN-7 | The old VM is retained (stopped) for the policy's retention period and deleted only after approval. It is locked **only after** the data volume has left it, and OVLM unlocks it before any revert: a locked server rejects attach, detach and start from a non-admin. | MVP |
 | FR-REN-8 | An operator can pause a run, resume it, or abort it into rollback. | MVP (abort and resume), V1 (pause) |
 
 ### FR-AUD — Audit
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-AUD-1 | Append-only audit log: actor, action, target, before/after (secrets redacted), result, correlation ID (workflow run). | MVP |
+| FR-AUD-1 | Append-only audit log: actor, action, target, before/after, result, correlation ID (workflow run). Before/after values come from an **allowlist of fields**; secrets are never written, rather than redacted afterwards. | MVP |
 | FR-AUD-2 | Covers: registration, profile and policy changes, assessments, plans, approvals, every workflow step attempt, failures, manual recovery actions and credential changes (metadata only). | MVP |
 | FR-AUD-3 | Exportable (JSON lines) for an external SIEM. | V1 |
 
@@ -123,8 +123,8 @@ The first instance is created from a profile with no previous VM. Planned after 
 | ID | Requirement | Priority |
 |---|---|---|
 | FR-UI-1 | Pages: dashboard (counts, upcoming renewals, runs needing attention), inventory list and VM details (observed vs desired), profiles, policies, readiness results, renewal plan, run timeline with step evidence, audit. | MVP (inventory, VM details, readiness, run timeline), V1 (the rest) |
-| FR-UI-2 | Every destructive action needs a typed confirmation (the VM name) and shows its blast radius. | MVP |
-| FR-UI-3 | A REST API with the same capabilities; the UI uses no private API. | MVP |
+| FR-UI-2 | Every destructive action shows its blast radius and needs a typed confirmation: the VM name **plus the last 6 characters of its server ID**, because Nova names are not unique. The check is done on the server side, and the API requires the same field. | MVP |
+| FR-UI-3 | A REST API with the same capabilities; the UI uses no private API. **Exception:** approvals and destructive confirmations are accepted only from an interactive human session that re-authenticated recently, never from an API token or an automated agent ([security-model.md](security-model.md)). | MVP |
 
 ## Non-functional requirements
 
@@ -133,7 +133,7 @@ The first instance is created from a profile with no previous VM. Planned after 
 | NFR-1 | Simplicity | Modular monolith: one codebase, one container image, two process roles (api, worker), PostgreSQL. No message broker, no Redis, no Kubernetes. |
 | NFR-2 | Reliability | Workflow state is in PostgreSQL. A worker crash at any point leaves a resumable run. No step runs twice concurrently (lease + row lock). |
 | NFR-3 | Idempotency | Every OpenStack-mutating step is "observe, then act if needed, then verify". Resources created by OVLM carry ownership metadata (run ID) so retries find instead of re-create. |
-| NFR-4 | Security | Separate read-only and write credentials; secrets encrypted at rest and never logged; RBAC roles `viewer`, `operator`, `approver`, `admin`; separation of duties (a requester cannot be the only approver), configurable. |
+| NFR-4 | Security | Separate read-only and write credentials; secrets encrypted at rest and never logged; RBAC roles `viewer`, `operator`, `approver`, `admin`, scoped per project; separation of duties (a requester cannot be the only approver), configurable for plan and cutover gates only; **retirement can never be self-approved**. The `api` process never calls OpenStack and cannot decrypt secrets. |
 | NFR-5 | Auditability | All state changes are audited (FR-AUD). Audit rows are append-only at the database permission level. |
 | NFR-6 | Observability | Structured JSON logs with run and step correlation IDs, Prometheus metrics endpoint, health and readiness endpoints. |
 | NFR-7 | Recoverability | Backup and restore of the PostgreSQL database documented and tested. An OVLM outage never affects running workloads. |

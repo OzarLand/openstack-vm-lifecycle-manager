@@ -14,7 +14,7 @@ what needs the maintainer. Agent 1 (PM/EM) updates it after every handoff. Agent
 | 5 | Frontend Engineer / UX | — | Not activated | — |
 | 6 | Automation Engineer | Sonnet 5.5 | **Done** (Wave 1) | `automation-contract.md`, `test-environment.md` |
 | 7 | SRE / Reliability | Fable 5.1 | Queued: independent review of the architecture | review record |
-| 8 | Security Engineer | Opus 5.5 (author) → Fable 5.1 (review) | **Running** (Wave 2): authoring `security-model.md` | `security-model.md` |
+| 8 | Security Engineer | Opus 5.5 (author) → Fable 5.1 (review) | Authoring **done**: 115,807 tokens, 11 tool calls, 4 min 34 s. Fable review queued (dedicated session) | `security-model.md` |
 | 9 | QA / Test Automation | Sonnet 5.5 | Queued: after the architecture | `testing-strategy.md` |
 | 10 | Documentation Engineer | — | Not activated (Agent 1 writes the README) | — |
 | — | **Dev VM session** (maintainer's machine, Remote Control) | maintainer's local Claude Code | Asked for a **read-only** capability probe (KVM, tools, which OpenStack clouds exist, quick-lab state) to plan where the lab runs | reply pending |
@@ -198,7 +198,7 @@ it lists requested changes instead.
 
 **Report:** pending.
 
-### Agent 8 — Security Engineer, authoring (Opus 5.5) — running
+### Agent 8 — Security Engineer, authoring (Opus 5.5) — done, 115,807 tokens, 11 tool calls, 4 min 34 s
 
 **Brief (summary):** write `security-model.md`, covering:
 - a STRIDE threat model that treats a compromised guest VM and malicious automation content as threats;
@@ -215,4 +215,76 @@ it lists requested changes instead.
 
 Approvals come only from humans, never from AI agents. Its independent review (Fable 5.1) follows.
 
-**Report:** pending.
+**Report (verbatim):**
+
+> I wrote docs/security-model.md (349 lines, Status Designed, dated 2026-11-04). Nothing is committed and no other
+> file was touched. Every OpenStack permission claim cites Agent 3's tag (written "OSI §n"), and my own unverified
+> claims are tagged ASSUMPTION.
+>
+> **Top decisions**
+> - **Credentials:** read credential is `reader` only; I do not add `manager` for Neutron quota, so FR-PLN-2
+>   port/FIP headroom stays advisory. Write credential is `member` in one project, worker only. Both are restricted
+>   Keystone application credentials, owned by a dedicated Keystone service user, with mandatory expiry of 180 days or
+>   less. Access rules: GET-only on the read credential (it fails closed); none on the write credential in MVP,
+>   because they are fragile and cannot restrict by resource. Revisit in V1 after a lab test.
+> - **Ownership guard:** before every mutating call, the target must be in the OVLM DB *and* carry the `ovlm:*` tag.
+>   Tags alone are never trusted, because any project member can edit them (SV).
+> - **Secrets:** envelope encryption (AES-GCM per secret). Data keys are wrapped to the worker's key pair, and the
+>   private key file is mounted into the worker only. The api can encrypt but never decrypt. Vault/Barbican are a
+>   later option.
+> - **Authentication:** argon2id passwords, server-side sessions, CSRF token plus Origin check, scoped API tokens
+>   stored as hashes with 90-day expiry. TOTP is mandatory for approver/admin in V1.
+> - **Authorization:** RBAC matrix with project scoping enforced from MVP. The admin role does not inherit approver.
+>   Separation of duties may be relaxed for plan and cutover gates only; retirement never allows self-approval, and
+>   the two-person rule is on by default.
+> - **Approvals:** only an interactive human session with re-authentication in the last 5 minutes can approve or
+>   confirm a destructive action. API tokens and AI agents cannot.
+> - **Host keys:** fingerprints are read from the console log by default; trust-on-first-use is a per-profile,
+>   audited opt-in.
+> - **Ansible:** runs as a separate OS user with a scrubbed environment and no access to the key file. Allowlisted
+>   repos, full commit SHA, no runtime Galaxy downloads.
+> - **Audit:** append-only through DB grants plus a trigger. Hash chaining is deferred to V1 with an external signed
+>   checkpoint, because a chain without an outside anchor adds little.
+>
+> **Requirement changes**
+> - **FR-UI-3:** add an exception — approval and destructive-confirm endpoints are human-session only. Without it, a
+>   token or AI agent could approve runs.
+> - **FR-UI-2:** typing the VM name is not enough, because Nova server names are not unique (SV) and green and blue
+>   can share one. Require the name plus the last 6 characters of the ID, checked server-side, and make the API
+>   require the same field.
+> - **NFR-4:** "configurable separation of duties" must never allow self-approval of retirement.
+> - **FR-AUD-1:** secrets must be excluded from before/after diffs by an allowlist of fields, not redacted afterwards.
+> - **FR-REN-6:** add the rule "the target must be in the OVLM DB and carry the tag, and the approval is bound to a
+>   hash of plan, profile version, automation SHA and target IDs".
+>
+> **Conflicts with your assumptions**
+> - You assumed the read credential is used by both api and worker. I recommend the api never calls OpenStack and
+>   cannot decrypt anything; on-demand sync and "test credential" become worker jobs. Agent 2 should align
+>   `architecture.md`.
+> - The Ansible user separation means one image with two OS users. That is compatible with NFR-1 but Agent 2 should
+>   know.
+>
+> **Residual risks the maintainer must accept**
+> - **Reader may be able to write:** if the cloud has `enforce_new_defaults=False`, the legacy fallback rules may let
+>   a reader write. Agent 3 verified the rule but not whether it is active. Mitigations: an OVLM-side GET/HEAD-only
+>   guard and the cloud admin's statement of the setting.
+> - **Write credential reaches the whole project:** a `member` credential can delete any server in its project, not
+>   only OVLM's. The ownership guard is application-level only.
+> - **Approved code still runs:** a malicious commit that someone approved still runs on the worker host and on
+>   guests.
+> - **Console-log fingerprints may be missing:** they depend on the image logging to the console, and on
+>   console-output access for `member`, which I could not verify (ASSUMPTION). Clouds without it fall back to
+>   trust-on-first-use.
+> - **Stuck volumes, admin-set locks and down compute hosts:** OVLM can only stop and escalate these to a human
+>   OpenStack admin.
+> - **Stolen key file plus DB backup exposes all secrets.**
+> - **Guest health output is unverifiable:** a lying guest can delay a cutover but cannot cause one alone, because an
+>   external probe is also required.
+
+**Agent 1 disposition:** accepted.
+- All five requirement changes are applied to `functional-requirements.md`, together with Agent 3's effects on
+  FR-PLN-2 and FR-REN-7.
+- The architecture conflicts (the api never calls OpenStack; two OS users) were sent to Agent 2 while it was still
+  running.
+- The residual risks go to the maintainer at the Phase 1 milestone. The most important is that the write credential
+  can reach the whole project, which is why ADR-0001 requires a dedicated OpenStack project.
