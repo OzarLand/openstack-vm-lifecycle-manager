@@ -15,6 +15,10 @@ The engine (not the step) drives every attempt through :meth:`Step.run_contract`
 5. ``verify(ctx, intent)`` returns :class:`Done`, :class:`Wait` (verify on the next claim, after ``probe``) or
    :class:`Fail`.
 
+An attempt past the step's ``deadline_at`` (at claim, or since on the local clock) never acts: an :class:`Act`
+decision becomes ``Fail(NEEDS_HUMAN, needs_human_reason="deadline_exceeded")`` before the intent is persisted
+(ADR-0003 "deadline reached -> needs_human"; SRE-C-3). ``Done`` stays allowed.
+
 Every attempt, including a re-claim after ``Wait`` and a takeover after a crash, starts again at ``probe``. A
 step therefore never relies on in-memory state from a previous attempt; ``ctx.previous_intent`` and
 ``ctx.previous_evidence`` are what the DB holds.
@@ -242,6 +246,10 @@ class StepContext(Protocol):
     def abort_requested(self) -> bool: ...
     @property
     def stopping(self) -> bool: ...
+    @property
+    def deadline_passed(self) -> bool:
+        """The step's ``deadline_at`` has passed: the attempt may probe and report Done, never act."""
+        ...
 
     def gate(self, action: str) -> None:
         """Fence gate: call immediately before any mutating call / subprocess spawn."""
@@ -255,7 +263,8 @@ class StepContext(Protocol):
         """Interruptible sleep; raises ``FenceLost`` if the fence stops meanwhile."""
 
     def read(self) -> AbstractContextManager[Connection]:
-        """A short read-only connection (ledger lookups during probe)."""
+        """A short read-only connection (ledger lookups during probe). Release it before any network I/O:
+        it comes from the worker's pool, which heartbeats share (SRE-C-4)."""
 
     def crashpoint(self, phase: str) -> None: ...
 
@@ -306,6 +315,13 @@ class Step(ABC):
         decision = self.decide(ctx, observed)
         if not isinstance(decision, Act):
             return decision
+        if ctx.deadline_passed:
+            return Fail(
+                ErrorClass.NEEDS_HUMAN,
+                "step deadline passed before acting; nothing was sent",
+                {"intent_not_sent": dict(decision.intent)},
+                needs_human_reason="deadline_exceeded",
+            )
         persist_intent(decision.intent)
         ctx.crashpoint("after_intent")
         ctx.gate(f"act:{self.key}")

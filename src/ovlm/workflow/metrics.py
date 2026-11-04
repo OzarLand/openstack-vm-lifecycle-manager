@@ -77,3 +77,8 @@ SIGNALS_PENDING_OVERDUE = Gauge(
     "Unconsumed run signals older than signal.alert_after (SRE-R-24)",
     registry=REGISTRY,
 )
+LIVE_WORKERS = Gauge(
+    "ovlm_workflow_live_workers",
+    "Non-draining workers whose worker_heartbeat row is recent (SRE-C-10)",
+    registry=REGISTRY,
+)

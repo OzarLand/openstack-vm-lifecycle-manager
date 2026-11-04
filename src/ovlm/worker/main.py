@@ -36,6 +36,7 @@ from ovlm.readiness.job import ReadinessDefinition
 from ovlm.workflow.crashpoint import ENV_VAR as CRASHPOINT_ENV
 from ovlm.workflow.engine import Claim, EngineConfig, WorkflowEngine
 from ovlm.workflow.registry import Registry
+from ovlm.workflow.workers import SWEEP_AFTER_BEATS
 
 log = logging.getLogger("ovlm.worker")
 
@@ -104,6 +105,7 @@ class Worker:
         wf.admit_pending()
         wf.run_scheduler()
         if self._iterations % METRICS_EVERY == 0:
+            wf.sweep_worker_rows(SWEEP_AFTER_BEATS * self.settings.worker.heartbeat_interval)
             wf.refresh_metrics()
         free = self.settings.worker.slots - self.active_steps()
         if self.stop_event.is_set() or free <= 0:
