@@ -63,7 +63,7 @@ cleanup of OVLM-created resources (test-environment.md §7.3).
    `resource_filters.json`, §1 SOURCE-VERIFIED for volumes; snapshot filters ASSUMPTION — lab to confirm, else name +
    ledger id only).
 7. **Cleanup ownership:** OVLM deletes only resources that are in its ledger, belong to one of its runs, and whose
-   deletion is a defined step of that run (green on operator rollback, snapshot at retirement). The
+   deletion is a defined step of that run (green on operator rollback; never a snapshot: those are kept and only reported as orphan candidates, renewal-workflow.md §4). The
    inventory sync flags `ovlm:*`-marked resources that are not in the ledger, or belong to terminal runs, as **orphans**,
    **excluding** anything a current `service`, `managed_vm` or `profile_version` references (the data volume, the
    service FIP and the current VM keep their marks forever and are never orphans). **MVP orphan handling is report-only**

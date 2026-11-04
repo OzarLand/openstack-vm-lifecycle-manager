@@ -9,6 +9,12 @@ file and its SHA-256.
   POST /marker  write DATA_DIR/<marker> with a random token; returns its SHA-256
   GET  /health  JSON; HTTP 503 if the data volume is absent/wrong (never writes)
 
+Identity (docs/automation-contract.md section 3.6.1): every response carries the header X-OVLM-Server-Id and /health
+carries `server_id` in the JSON: the cloud-init instance-id (the Nova server id on OpenStack), read at request time
+from OVLM_COUNTER_SERVER_ID_FILES (default: /run/cloud-init/instance-data.json v1.instance_id, then
+/var/lib/cloud/data/instance-id). When unknown the header is omitted and `server_id` is null; the external probe then
+fails, by design.
+
 Configuration (environment, set by the systemd unit or the test-mode launcher):
   OVLM_COUNTER_DATA_DIR       mount point of the data volume      (default /srv/data)
   OVLM_COUNTER_MARKER         marker file name in DATA_DIR        (default .ovlm-marker)
@@ -17,6 +23,7 @@ Configuration (environment, set by the systemd unit or the test-mode launcher):
   OVLM_COUNTER_VOLUME_ID      Cinder volume id; the mount must be backed by
                               /dev/disk/by-id/virtio-<first 20 chars of the id>
   OVLM_COUNTER_FS_TYPE        expected filesystem type, if set
+  OVLM_COUNTER_SERVER_ID_FILES colon-separated files to read the instance-id from (tests)
   OVLM_COUNTER_TEST_MODE      "1" = CI only: no real mount is required, the
                               filesystem UUID is read from OVLM_COUNTER_TEST_FS_UUID
                               and /health says "simulated": true. Never set on a real VM.
@@ -38,6 +45,10 @@ VOLUME_ID = os.environ.get("OVLM_COUNTER_VOLUME_ID", "")
 FS_TYPE = os.environ.get("OVLM_COUNTER_FS_TYPE", "")
 TEST_MODE = os.environ.get("OVLM_COUNTER_TEST_MODE", "") == "1"
 TEST_FS_UUID = os.environ.get("OVLM_COUNTER_TEST_FS_UUID", "")
+
+SERVER_ID_FILES = os.environ.get(
+    "OVLM_COUNTER_SERVER_ID_FILES", "/run/cloud-init/instance-data.json:/var/lib/cloud/data/instance-id"
+).split(":")
 
 DB_PATH = os.path.join(DATA_DIR, "counter.db")
 MARKER_PATH = os.path.join(DATA_DIR, MARKER)
@@ -81,6 +92,25 @@ def volume_device():
         return None
     link = "/dev/disk/by-id/virtio-" + VOLUME_ID[:20]
     return os.path.realpath(link) if os.path.exists(link) else None
+
+
+def server_id():
+    """The cloud-init instance-id of this VM, or None. Read per request: a VM never changes it, but a file that
+    appears late (cloud-init still running) must not be cached as 'unknown'."""
+    for path in SERVER_ID_FILES:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read(65536)
+            if path.endswith(".json"):
+                doc = json.loads(text)
+                value = (doc.get("v1") or {}).get("instance_id") or doc.get("instance_id")
+            else:
+                value = text.strip()
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(value, str) and 0 < len(value) <= 128 and value.isprintable() and " " not in value:
+            return value
+    return None
 
 
 def marker_sha256():
@@ -152,6 +182,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
+        sid = server_id()
+        if sid:
+            self.send_header("X-OVLM-Server-Id", sid)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -189,7 +222,8 @@ class Handler(BaseHTTPRequestHandler):
                 value = con.execute("SELECT value FROM counter WHERE id = 1").fetchone()[0]
         finally:
             con.close()
-        self._send(200, {"counter": value, "generation": GENERATION, "hostname": socket.gethostname()})
+        self._send(200, {"counter": value, "generation": GENERATION, "hostname": socket.gethostname(),
+                         "server_id": server_id()})
 
     def _health(self):
         state = data_mount_state()
@@ -200,7 +234,8 @@ class Handler(BaseHTTPRequestHandler):
                 "mount_point": state["mount_point"], "device": state["device"],
                 "fs_type": state["fs_type"], "fs_uuid": state["fs_uuid"], "reason": state["reason"],
                 "marker": MARKER, "marker_sha256": sha, "counter": value,
-                "generation": GENERATION, "hostname": socket.gethostname()}
+                "generation": GENERATION, "hostname": socket.gethostname(),
+                "server_id": server_id()}
         self._send(200 if ok else 503, body)
 
 

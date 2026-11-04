@@ -18,6 +18,9 @@ SOURCE-VERIFIED, DU = DOCUMENTED-UNVERIFIED, AS = ASSUMPTION are kept), [automat
 > **Revision 2026-11-04 (round 2)**: synced to architecture round 2 (M9, ADR-0006). TOTP mandatory for approver/admin, single-use
 > action-bound step-up, enrolment links (§2); self-approval setting and solo installations (§3.2); out-of-band credential rotation
 > (§4.4); bootstrap host key exception (§5.2) and host-key default `injected` (§6.2); tests added (§10 items 24-27).
+>
+> **Revision 2026-11-04 (image/docs alignment)**: §6.1 records an open item for the security review (cloud-init user
+> `sudo NOPASSWD` for the B5 host-key rotation).
 
 ## 1. Threat model
 
@@ -289,6 +292,11 @@ changed/unchanged.
   user_data is fine for non-secrets). Preferred over a Nova keypair because keypairs are user-owned and must exist at
   create (OSI §9, SV for name resolution; ownership ASSUMPTION). A Nova keypair is an accepted fallback per profile.
 - **Existing (blue) VMs**: the workload owner installs the public key; FR-RDY check "OVLM can SSH" is a blocker.
+- **Open item for the security review (not decided here):** the B5 host-key rotation (§6.2, ADR-0006) replaces the
+  guest's SSH host keys, which needs root. The cloud-init `ovlm` user on a new VM therefore gets `sudo NOPASSWD`
+  (the reference CI target does the same). That makes a compromise of the `ovlm` key a root compromise of the guest.
+  The review must decide whether to accept it, to limit it (a sudoers rule for the rotation command only), or to
+  rotate the keys another way. Until then, treat the grant as accepted-pending-review.
 
 ### 6.2 Host-key verification for freshly built VMs
 | Option | Risk | Verdict |
