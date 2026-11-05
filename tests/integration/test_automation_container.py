@@ -191,7 +191,7 @@ def repo(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
     preflight = root / "roles" / "preflight" / "tasks" / "main.yml"
     preflight.write_text(
         preflight.read_text()
-        + "\n- name: \"Kernel release (read-only; not on the lint allowlist, so it needs the waiver)\"\n"
+        + '\n- name: "Kernel release (read-only; not on the lint allowlist, so it needs the waiver)"\n'
         "  ansible.builtin.command: uname -r\n  changed_when: false\n  check_mode: false\n"
     )
     env = {
