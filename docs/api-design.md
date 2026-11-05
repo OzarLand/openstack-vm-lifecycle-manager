@@ -4,7 +4,7 @@
 |---|---|
 | Owner | Agent 2 — Chief Architect |
 | Status | **Designed** (Phase 1 proposal; nothing implemented) |
-| Last updated | 2026-11-04 |
+| Last updated | 2026-11-05 |
 
 > **Revision 2026-11-04**: runs start in `requested` and actions are signals the worker validates (SEC-R-1); approval
 > responses show hash inputs, requester set and automation diff, SoD errors (SEC-R-2); automation logs restricted,
@@ -12,6 +12,10 @@
 > carries worst-case window, snapshot statement and automatic-restore statement (SRE-R-6, SEC-R-30) and X1 evidence
 > (SRE-R-10); current truth, read-only probe, available actions, lease fields (SRE-R-9); metrics port (SEC-R-17);
 > credential test specified (SEC-R-32).
+>
+> **Revision 2026-11-05**: inventory sync route as built (409 on a duplicate, periodic sync, `runs` in the listing);
+> blue's host key: registration answers 201 and queues a scan, re-scan and confirm routes, plans refused until
+> confirmed; profile versions start no lint run yet; credential routes as built (§3.1).
 >
 > **Revision 2026-11-04 (round 2)**: TOTP step-up bound to action and target (SEC-R-10, M9); self-approval setting and
 > flag, account provenance, enrolment links (M9, SEC-R-2, SEC-R-11); credential rotation without Keystone writes
@@ -52,16 +56,16 @@ approver). "op" below = operator. SoD (requester ≠ approver; retirement two-pe
 | `GET /clouds`, `GET /clouds/{id}` | viewer | |
 | `POST /clouds`, `PATCH /clouds/{id}` | admin | |
 | `GET/POST /projects`, `GET/PATCH /projects/{id}` | viewer / admin | project connection incl. `guest_access` |
-| `PUT /projects/{id}/credentials/{kind}` `{secret, expires_at}` | admin + TC on replace | write-only secret; api seals it (security-model.md §5.1); response shows metadata only. **Rotation** (SEC-R-13): the cloud admin creates the new application credential out of band; the OVLM admin uploads it with its `expires_at`; a `credential_test` run validates it (project id, role list); on success the worker switches atomically and marks the old one `superseded` with `cloud_deletion_pending` and a reminder. OVLM never creates or deletes application credentials (a restricted one cannot, OSI §8 SV) |
-| `POST /projects/{id}/credentials/{kind}/test` | admin | **202** run (`credential_test`, worker): token issuance plus GET-only probes through the `ReadClient` hook for **both** credential kinds; records in `validation_result` whether the token's project id equals the project record and the role list is the expected one; no token or catalog stored (SEC-R-32) |
-| `DELETE /projects/{id}/credentials/{kind}` | admin + TC | refused `409` while a run uses it |
+| `POST /project-connections/{id}/credentials` `{kind, secret, app_credential_id?, expires_at?, stepup_id, typed_confirmation}` (as built; designed as `PUT /projects/{id}/credentials/{kind}`) | admin, human session + TOTP step-up + TC (connection name) | write-only secret; api seals it (security-model.md §5.1); response shows metadata only. **Rotation** (SEC-R-13): the cloud admin creates the new application credential out of band; the OVLM admin uploads it with its `expires_at`; a `credential_test` run validates it (project id, role list); on success the worker switches atomically and marks the old one `superseded` with `cloud_deletion_pending` and a reminder. OVLM never creates or deletes application credentials (a restricted one cannot, OSI §8 SV) |
+| `POST /credentials/{id}/validate` (as built; designed as `POST /projects/{id}/credentials/{kind}/test`) | admin | **202** run (`credential_test`, worker): token issuance plus GET-only probes through the `ReadClient` hook for **both** credential kinds; records in `validation_result` whether the token's project id equals the project record and the role list is the expected one; no token or catalog stored (SEC-R-32) |
+| `DELETE /credentials/{id}` (as built) | admin + step-up + TC | refused `409` while a run uses it |
 
 ### 3.2 Inventory (observed)
 
 | Method + path | Role | Notes |
 |---|---|---|
-| `POST /projects/{id}/syncs` | op (token scope `inventory:sync`) | **202** run (`inventory_sync`) |
-| `GET /projects/{id}/syncs`, `GET /syncs/{id}` | viewer | |
+| `POST /projects/{id}/syncs` | op or admin (token scope `inventory:sync` or `operate`) | `{id}` is the project connection id. **202** run (`inventory_sync`); **409** `sync-already-pending` while a sync of that project is queued or running (the run id is in `detail`); 404 when the project is not visible; 409 `project-disabled`. The worker uses the connection's validated read credential and refuses a token scoped to another OpenStack project. The worker also queues one per eligible connection every `inventory.sync_interval` (0: off) |
+| `GET /projects/{id}/syncs`, `GET /syncs/{id}` | viewer | `items`: sync records (status, kind, counts, error, `workflow_run_id`); `runs`: the recent sync runs (state, origin `api`/`periodic`, why one ended) |
 | `GET /servers?project=&status=&tag=&registered=` | viewer | observed servers |
 | `GET /servers/{id}` | viewer | observed fields + attachments + ports + FIPs + revisions link |
 | `GET /servers/{id}/revisions` | viewer | snapshot history |
@@ -73,12 +77,13 @@ approver). "op" below = operator. SoD (requester ≠ approver; retirement two-pe
 | Method + path | Role | Notes |
 |---|---|---|
 | `GET/POST /services`, `GET/PATCH/DELETE /services/{id}` | viewer / op | DELETE only if no managed VM is `current` |
-| `POST /services/{id}/managed-vms` `{observed_server_id}` | op | registration; starts a host-key scan run (**202**) |
-| `POST /managed-vms/{id}/host-key/confirm` `{fingerprint}` | op | audited (ADR-0006) |
+| `POST /services/{id}/managed-vms` `{observed_server_id}` | op | registration: **201** with the managed VM (created synchronously) and `host_key_scan_run`, the `host_key_scan` run it queued (worker: `ssh-keyscan` of the VM's fixed address from the inventory; the preferred key's fingerprint goes to `ssh_host_key_fingerprint`) |
+| `POST /managed-vms/{id}/host-key-scans` | op | **202** run (`host_key_scan`); a queued scan is returned (`already_pending`). A scan never replaces a **confirmed** fingerprint: a different key fails the run ("host key changed") |
+| `POST /managed-vms/{id}/host-key/confirm` `{fingerprint}` | op, human session (matrix `host_key.confirm`) | the operator confirms the scanned fingerprint after comparing it out of band (the VM's console or `ssh-keygen -lf` on the VM). The body must equal the scanned value: 409 `host-key-not-scanned`, 409 `host-key-mismatch`, 422 malformed; idempotent; audited (ADR-0006). `POST /plans` is refused (409 `host-key-unconfirmed`) until the current VM's key is confirmed: the renewal reaches blue only with this fingerprint |
 | `GET /managed-vms`, `GET /managed-vms/{id}` | viewer | response has `desired` (profile version) and `observed` blocks separately (FR-REG-4), plus `drift` (V1) |
 | `DELETE /managed-vms/{id}` | op | unregister; refused while a run holds the service lock |
 | `GET/POST /services/{id}/profiles`, `GET /profiles/{id}` | viewer / op | |
-| `POST /profiles/{id}/versions` (`If-Match`) | op | creates an immutable version and a worker `automation_lint` run; validation errors as problem+json `errors[]` (unpinned SHA, branch ref, non-allowlisted repo, >1 data volume, `secret_ref` of another service (SEC-R-27) …). A plan on a version whose lint failed is refused unless a waiver exists |
+| `POST /profiles/{id}/versions` (`If-Match`) | op | creates an immutable version. **Not in this release:** it starts no worker `automation_lint` run (no such job exists yet), so a version shows `lint_status: pending` and `lint_result: null`. Validation errors as problem+json `errors[]` (unpinned SHA, branch ref, non-allowlisted repo, >1 data volume, `secret_ref` of another service (SEC-R-27) …). A plan on a version whose lint failed is refused unless a waiver exists |
 | `POST /profiles/{id}/versions/{n}/lint-waiver` `{rule_keys, reason}` | approver, human session + TOTP step-up | audited `lint_waiver` row; refused if the caller is the version author or in the requester set of any plan on that version; the waiver is listed in every later approval's `hash_inputs` (SEC-R-36) |
 | `GET /profiles/{id}/versions`, `/versions/{n}` | viewer | |
 
