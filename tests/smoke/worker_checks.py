@@ -9,6 +9,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import tempfile
 
 CAP_SETGID, CAP_SETUID, CAP_KILL = 6, 7, 5
 WANTED = (1 << CAP_SETGID) | (1 << CAP_SETUID) | (1 << CAP_KILL)
@@ -71,8 +72,8 @@ for binary, probe in (
 
 # The root filesystem is read-only: like the runner, use a directory under the tmpfs run root, shared with the
 # runner user through its group (the worker is a member of ovlm-ansible; it owns the directory).
-scratch = pathlib.Path("/run/ovlm/smoke")
-scratch.mkdir(mode=0o770)
+# A fresh name per run: files that ansible creates in it belong to ovlm-ansible, so a rerun must not trip on them.
+scratch = pathlib.Path(tempfile.mkdtemp(prefix="smoke-", dir="/run/ovlm"))
 os.chown(scratch, -1, 10002)
 os.chmod(scratch, 0o770)  # noqa: S103 - group-shared scratch dir under the 0710 tmpfs run root
 try:
@@ -83,7 +84,13 @@ try:
         capture_output=True, text=True, timeout=60, check=False,
     )  # fmt: skip
 finally:
+    # ovlm-ansible removes what it created (ovlm cannot enter its 0700 directories), then ovlm removes the rest.
+    subprocess.run(  # noqa: S603
+        ["/bin/sh", "-c", 'rm -rf -- "$0"/* "$0"/.[!.]*', str(scratch)],
+        user="ovlm-ansible", group="ovlm-ansible", extra_groups=[], check=False, timeout=60,
+    )  # fmt: skip
     shutil.rmtree(scratch, ignore_errors=True)
+assert not scratch.exists(), "smoke scratch directory left behind"
 assert proc.returncode == 0 and "ansible [core" in proc.stdout, proc.stderr
 who = subprocess.run(  # noqa: S603
     ["/usr/bin/id", "-u"], user="ovlm-ansible", capture_output=True, text=True, check=True

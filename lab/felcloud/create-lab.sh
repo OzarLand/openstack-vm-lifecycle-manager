@@ -156,6 +156,8 @@ stage_base() {
     ensure_rule "$g" tcp 8080 "group:$N_SG_HOST"
     ensure_rule "$g" tcp 22 "cidr:$OVLM_LAB_ADMIN_CIDR"
     ensure_rule "$g" tcp 8080 "cidr:$OVLM_LAB_ADMIN_CIDR"
+    # A probe through a floating IP on the same router arrives with the prober's own floating IP as its source
+    if [[ -n "${OVLM_LAB_PROBE_CIDR:-}" ]]; then ensure_rule "$g" tcp 8080 "cidr:$OVLM_LAB_PROBE_CIDR"; fi
   done
 }
 
