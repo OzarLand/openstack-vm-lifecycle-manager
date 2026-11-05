@@ -556,6 +556,10 @@ class AutomationRunner:
         result: ValidatedResult | None = None
         result_error: str | None = None
         raw = _read_bounded(result_path, self.cfg.result_max_bytes)
+        if raw is None and self._run_user is not None:
+            # Automation content may write result.json readable by the run user only (the reference role did,
+            # lab bug K): read it as that user, with the same cap and no symlink following.
+            raw = _read_as_run_user(result_path, self.cfg.result_max_bytes, self._run_user)
         if raw is None:
             result_error = "result.json missing"
         else:
@@ -633,6 +637,22 @@ def _ensure_nl(data: bytes) -> bytes:
     return (
         data if data.endswith(b"\n") else data + b"\n"
     )  # OpenSSH rejects a key file without a final newline
+
+
+def _read_as_run_user(path: Path, cap: int, user: RunUser) -> bytes | None:
+    """Read a regular file as the run user (``head -c`` behind a ``test -f && ! test -h`` guard). ``None`` on any
+    failure. Only used for the run's own result file, inside the run directory."""
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv; the path is the run's own result file
+            ["/bin/sh", "-c", 'test -f "$1" && ! test -h "$1" && exec head -c "$2" -- "$1"', "ovlm-read",
+             str(path), str(cap + 1)],
+            user=user.uid, group=user.gid, extra_groups=[],
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            capture_output=True, timeout=30, check=False,
+        )  # fmt: skip
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
 
 
 def _read_bounded(path: Path, cap: int) -> bytes | None:

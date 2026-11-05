@@ -174,3 +174,27 @@ def test_owned_mode_needs_no_user_switch_for_the_wipe(
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: called.append(a))
     rd._remove_as_run_user()  # noqa: SLF001
     assert not called
+
+
+def test_result_unreadable_by_the_worker_is_read_as_the_run_user(
+    run_user: RunUser, tmp_path: Path
+) -> None:
+    """Lab bug K, worker side: automation content may write result.json 0600 in a 0700 directory of the run user.
+    The worker then reads it as that user (real user switch; needs root). Symlinks are refused, the cap holds."""
+    from ovlm.automation.runner import _read_as_run_user
+
+    os.chmod(tmp_path, 0o755)  # noqa: S103
+    art = tmp_path / "artifacts"
+    art.mkdir()
+    res = art / "result.json"
+    res.write_bytes(b'{"schema": "ovlm.result/1"}')
+    link = art / "link.json"
+    link.symlink_to(res)
+    for p in (art, res):
+        os.chown(p, run_user.uid, run_user.gid, follow_symlinks=False)
+    os.chmod(art, 0o700)
+    os.chmod(res, 0o600)
+    assert _read_as_run_user(res, 1024, run_user) == b'{"schema": "ovlm.result/1"}'
+    assert _read_as_run_user(res, 4, run_user) == b'{"sch'  # cap + 1 bytes: oversize stays visible
+    assert _read_as_run_user(link, 1024, run_user) is None
+    assert _read_as_run_user(art / "missing.json", 1024, run_user) is None
