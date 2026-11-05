@@ -37,7 +37,7 @@ run, steps and audit, worker and api logs, commit), the probe CSV and its summar
 report, the downtime figure OVLM recorded next to the probe's.
 
 **OVLM profile for the lab** (set once, API `POST /services/{id}/profiles` then `/profiles/{id}/versions`):
-automation repo = the OVLM repository at the pinned SHA, `ansible/` as the playbook directory; image `Ubuntu 24.04 LTS`;
+automation repo = the OVLM repository at the pinned SHA, `ansible/` as the playbook directory; image `Ubuntu 24.04 LTS - Noble Numbat`;
 flavor `G0.basic.1c1g`; the lab network; green's security group **`ovlm-acc-sg-green`**; the data volume `ovlm-acc-data`;
 volume type `NVMe` (always explicit); health check `GET /health` on 8080 with `fs_uuid` and `marker_sha256`; the
 service floating IP is the set-aside one. **Green must be named `ovlm-*`** (for example `ovlm-acc-green`). If the
