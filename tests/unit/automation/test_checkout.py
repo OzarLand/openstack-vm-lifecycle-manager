@@ -209,3 +209,28 @@ def test_ssh_deploy_key_needs_pinned_known_hosts(tmp_path: Path) -> None:
         "StrictHostKeyChecking=yes" in env["GIT_SSH_COMMAND"]
         and "IdentitiesOnly=yes" in env["GIT_SSH_COMMAND"]
     )
+
+
+def test_only_the_egress_proxy_variables_cross_the_scrub(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (
+        "HTTPS_PROXY",
+        "https_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "GIT_DIR",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert not {"HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy"} & set(
+        co._git_env(CloneOptions())
+    )
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    monkeypatch.setenv("NO_PROXY", "localhost,.internal.example")
+    monkeypatch.setenv("HTTP_PROXY", "http://plain.example:3128")
+    monkeypatch.setenv("ALL_PROXY", "socks5://other.example:1080")
+    monkeypatch.setenv("GIT_DIR", "/nonexistent/elsewhere")
+    env = co._git_env(CloneOptions())
+    assert env["HTTPS_PROXY"] == "http://proxy.example:3128"
+    assert env["NO_PROXY"] == "localhost,.internal.example"
+    assert not {"HTTP_PROXY", "ALL_PROXY", "GIT_DIR", "https_proxy", "no_proxy"} & set(env)

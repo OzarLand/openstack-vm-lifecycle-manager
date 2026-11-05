@@ -73,11 +73,12 @@ implemented → unit tested → integration tested → lab validated → product
 |---|---|
 | Product and architecture design, independent SRE and security reviews | ✅ Designed and reviewed |
 | Foundation: api, worker, PostgreSQL, Compose, CI | ✅ Integration tested, in `main` |
-| Workflow engine (durable, crash-safe, fenced) | ✅ Integration tested, in `main`; review fixes in progress |
+| Workflow engine (durable, crash-safe, fenced) | ✅ Integration tested, reviewed, in `main` |
 | Authentication, TOTP, audit; inventory; profiles, policies, deadlines; operator UI (first pages) | ✅ Integration tested, in `main` |
-| OpenStack write client, RBAC, Ansible runner, readiness | 🟡 Integration tested on the working branch; security fixes in progress |
-| Renewal strategy (blue/green steps, gates, restore) | 🟡 In progress |
-| End-to-end renewal on Felcloud (a real OpenStack cloud), acceptance and failure scenarios | ⬜ Not started |
+| OpenStack write client, RBAC, Ansible runner, readiness | ✅ Integration tested, reviewed, in `main` |
+| Renewal strategy (blue/green steps, gates, restore) and operator UI pages | ✅ Integration tested, reviewed, in `main` |
+| Encrypted credential store and project connections | ✅ Integration tested, reviewed, fixes verified (one Low item open) |
+| End-to-end renewal on Felcloud (a real OpenStack cloud), acceptance and failure scenarios | 🟡 Lab being prepared: OVLM runs on Felcloud (`make smoke` passed); no renewal run yet |
 | Production validated | ⬜ No |
 
 The detailed backlog is in [docs/roadmap.md](docs/roadmap.md), and the day-by-day record of the team's work is in
@@ -96,8 +97,7 @@ make down      # stop and delete the local stack
 ```
 
 Create the first admin with `ovlm admin create --enrol-link` inside the api container, then open the enrolment link.
-An [install guide for evaluation](docs/install-guide.md) exists. It says plainly what is missing, including the
-encrypted credential store. There is no guide for real clouds yet, on purpose: it comes after lab validation.
+An [install guide for evaluation](docs/install-guide.md) exists. It says plainly what is missing. There is no guide for real clouds yet, on purpose: it comes after lab validation.
 
 ## 🧪 Where OVLM is tested
 

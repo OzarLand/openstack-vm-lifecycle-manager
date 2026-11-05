@@ -43,7 +43,7 @@ flowchart LR
 | `ovlm-lab-key` (keypair) | `base` | operator's public key, for the lab host |
 | `ovlm-lab-sg` | `base` | SSH from the operator's CIDR only. OVLM's API is reached through an SSH tunnel, never published |
 | `ovlm-acc-sg`, `ovlm-acc-sg-green` | `base` | SSH and 8080 from the lab host and the operator's CIDR. Blue and the renewal profile's green use **separate** groups so a fault can hit green only |
-| `ovlm-lab-host` | `host` | Ubuntu 24.04, cloud-init installs Docker and Compose from the Ubuntu archive; same network as the targets |
+| `ovlm-lab-host` | `host` | Ubuntu 24.04 (`OVLM_LAB_IMAGE`, default `Ubuntu 24.04 LTS - Noble Numbat`), cloud-init installs Docker and Compose from the Ubuntu archive (over HTTPS, through the proxy if one is set); same network as the targets |
 | `ovlm-lab-target-key` | `workload` | public half of a key generated **on the lab host**; its private half never leaves the host |
 | `ovlm-acc-data` | `workload` | volume with an **explicit** type (`NVMe`): the cloud has no working default type |
 | `ovlm-acc-blue` | `workload` | `G0.basic.1c1g`, tagged `ovlm-lab`; the data volume is attached after boot |
@@ -76,12 +76,33 @@ secrets: never commit or paste them.
 | 2 | One free floating IP address, set aside for the lab, **not** the one `ozar-dev` uses | maintainer | the pool can be empty (EXP-01); the cutover reuses this address |
 | 3 | A flavor for the lab host with at least 2 vCPU and 4 GB | `openstack flavor list` | `G0.basic.1c1g` is too small for Docker builds plus PostgreSQL |
 | 4 | **Human approvers with a TOTP authenticator** | maintainer (+ a second human) | gates G1, G2 and G3 cannot be approved by a token or an agent. Approver ≠ requester, and the G3 approver ≠ the plan approver. With one human, the policy `self-approval` setting is needed; its approvals are flagged `self_approved`, and the evidence must say so |
-| 5 | The `openstack` CLI authenticated on `ozar-dev` (`OS_CLOUD=ozar-lab`), `jq`, `ssh`, `perl`, `curl`, `sha256sum` | `ozar-dev` | the scripts check and stop if one is missing |
+| 5 | The `openstack` CLI authenticated on `ozar-dev` (`OS_CLOUD=ozar-lab`), **`jq`** (needed by every script, also in `--dry-run`), `ssh`, `perl`, `curl`, `sha256sum`, `base64` | `ozar-dev` | the scripts check and stop if one is missing |
+| 5a | **If the project network has no direct Internet:** the URL of an operator-provided **HTTPS-only** proxy (`CONNECT` 443 only), and the hosts it allows (see §4a) | maintainer / network operator | the lab host and the worker cannot work without it |
 | 6 | The repository URL and the ref (commit SHA) of OVLM under test | maintainer | `host-setup` clones it **detached** at that ref |
 | 7 | Permission to push a throw-away branch (LAB-04 only) | maintainer | an outward-facing action: not done without a yes |
 
 The kit **does not** use `sudo` on `ozar-dev`, install anything on `ozar-dev`, or run Ansible there (Python 3.10 is too
 old for the pinned ansible-core). Ansible runs on the lab host (Python 3.12).
+
+### 4a. Behind an HTTPS-only egress proxy
+
+Set `OVLM_LAB_HTTPS_PROXY=http://host:port` (no user name or password in it: the scripts refuse that) in `lab.env`, and
+add other guest networks to `OVLM_LAB_NO_PROXY` if needed. When it is set, the kit does the following and nothing
+else (read it with `--dry-run`, and the generated first-boot script is `$OVLM_LAB_WORKDIR/lab-host.user-data`):
+
+| Where | What |
+|---|---|
+| Lab host (cloud-init) | apt sources rewritten to `https://` mirrors (`OVLM_LAB_APT_MIRROR`, `OVLM_LAB_APT_SECURITY_MIRROR`), `Acquire::https::Proxy`, `/etc/environment` proxy variables, a systemd drop-in so the **Docker daemon** pulls through the proxy, and `~/.docker/config.json` so **Docker builds** get it (HTTPS only) |
+| Blue (`workload`) | apt over HTTPS through the proxy (user-data is added only when a proxy is set) |
+| `host-setup` | git, pip and the Docker CLI get the proxy; writes `~/ovlm/.env` with `HTTPS_PROXY` and `NO_PROXY` for Compose |
+| OVLM worker | gets `HTTPS_PROXY`/`NO_PROXY` from that `.env` (`compose.yaml`): the **OpenStack APIs go through the proxy; the guests do not**. `NO_PROXY` = loopback, the Compose services, the subnet CIDRs of `OVLM_LAB_NETWORK` (read from the cloud) and `OVLM_LAB_NO_PROXY`. SSH never uses a proxy, and OVLM's own health probe ignores proxy variables. See `docs/install-guide.md` §5a |
+| `Dockerfile` | apt uses `https://` by default, so `docker compose up --build` works without a hand-built base image |
+
+The proxy must allow at least: the Ubuntu archive and security mirrors, the Debian archive (`deb.debian.org`,
+`security.debian.org`), `pypi.org`, `files.pythonhosted.org`, `github.com`, Docker Hub (`registry-1.docker.io`,
+`auth.docker.io`, `production.cloudflare.docker.com`) and the OpenStack API endpoints. The worker's git clone of the
+*automation repository* runs with a scrubbed environment, but `HTTPS_PROXY`/`NO_PROXY` (and their lowercase forms)
+are passed through to it, so an `https://` repository host works through the proxy; an `ssh://` one does not. Not verified against a real proxy until the first run reports back.
 
 ## 5. Rules that never bend
 
@@ -105,9 +126,12 @@ any command first and read what it prints.
 
 ```bash
 cp lab.env.example lab.env && chmod 600 lab.env       # fill it in; never commit it
-./create-lab.sh preflight                              # settings, flavors (vCPU/RAM/disk), image, network, volume type, limits, floating IP free?
+./create-lab.sh preflight                              # settings, flavors (vcpus / ram_MiB / disk_GB), image, network, volume type, limits, floating IP free?
+./create-lab.sh preflight --dry-run                    # prints every command, runs none
 ./snapshot.sh before-<date>                            # the ADR-0007 baseline; keep this file
 ```
+If the image is not found, preflight lists the images whose name contains the first word of `OVLM_LAB_IMAGE`: copy the
+exact name (for example `Ubuntu 24.04 LTS - Noble Numbat`) into `lab.env`.
 **Stop if:** preflight fails; the set-aside floating IP is already associated (it may be `ozar-dev`'s); the limits
 leave room for fewer than 3 instances or 3 volumes; the snapshot lists a required type as unavailable.
 
@@ -170,12 +194,35 @@ Tries `openstack application credential create --role reader ovlm-inventory` and
 ```bash
 ./create-lab.sh configure --confirm FORMAT-<volume id printed above>
 ```
-It runs on the lab host: `configure.yml`, then `lab/bootstrap_data.yml` (the only playbook that formats; it refuses any
-volume that has a signature and finds the device by `virtio-<first 20 characters of the id>`), then `start_service.yml`
-and `healthcheck.yml`, then five increments and `POST /marker`. **Record** the printed marker SHA-256, `fs_uuid` and
-counter in your notes (not in the repository): scenarios compare against them.
-Untested order: `configure` before the volume is formatted. If `configure` makes `/srv/data` immutable and the mount
-fails, **stop** and report; do not edit playbooks on the lab host.
+It runs on the lab host, in this order: `lab/bootstrap_data.yml` (the only playbook that formats; it refuses any volume
+that has a signature and finds the device by `virtio-<first 20 characters of the id>`; it creates the mount point,
+mounts by UUID and hands the volume to the service uid), **then** `configure.yml` (which, finding `/srv/data` already
+mounted, leaves it alone), `start_service.yml` and `healthcheck.yml`, then five increments and `POST /marker`.
+The order matters: `configure` on an unmounted `/srv/data` makes it immutable, and the bootstrap's mount point step
+then fails with `Operation not permitted`. Results go to `~/lab-work/results/` on the host (never `/tmp`: the result
+role sets mode 0700 on the directory that holds the file). `ANSIBLE_ROLES_PATH` is set by the kit.
+
+**Repeating the stage.** Before it changes anything, `configure` looks at blue:
+
+| State of `/srv/data` on blue | What `configure --confirm` does |
+|---|---|
+| mounted (an earlier run got that far) | does **not** format again; runs `configure`, `start_service`, `healthcheck`; writes the marker **only if there is none** (the recorded value is never replaced) |
+| blank (never touched) | the full sequence above |
+| immutable and not mounted (the **old order** failed here: the volume already has ext4) | stops, changes nothing, prints the reset below |
+
+**Record** the printed marker SHA-256, `fs_uuid` and counter in your notes (not in the repository): scenarios compare
+against them. If a step fails, **stop** and report; do not edit playbooks on the lab host.
+
+**Recovering from the old-order failure** (`Create the empty mount point: Operation not permitted`). The volume has a
+filesystem, so the bootstrap rightly refuses a rerun. Delete the workload and make a new one (the host, OVLM and its
+database stay; the lab data volume is empty, nothing is lost):
+
+```bash
+./destroy-lab.sh --keep-host --keep-credentials      # 🛑 types DESTROY-OVLM-LAB; deletes ovlm-acc-blue and ovlm-acc-data
+./create-lab.sh base && ./create-lab.sh workload     # a new blue and a new, blank volume (a recreated blue's SSH host key is forgotten)
+./create-lab.sh configure                            # prints the NEW volume id
+./create-lab.sh configure --confirm FORMAT-<new id>
+```
 
 ### Step 6 — the floating IP ⚠️
 
@@ -251,7 +298,8 @@ vocabulary in [agent-team.md](../../docs/agent-team.md).
 
 ## 11. Known gaps and assumptions
 
-- **Not run anywhere.** The `openstack` output formats (`-f json` column names, `Port Range` strings, `versions show`)
+- **First real run: steps 0–3 passed on Felcloud; step 5 failed in the old order and was fixed here (not yet re-run).**
+  The `openstack` output formats (`-f json` column names, `Port Range` strings, `versions show`)
   follow CLI 5.x as I know it; `snapshot.sh` and `create-lab.sh` fail loudly rather than guess, and the first real run
   is expected to need small fixes.
 - `server create --tag` needs compute microversion ≥ 2.52, and the scripts export `OS_COMPUTE_API_VERSION=2.85`

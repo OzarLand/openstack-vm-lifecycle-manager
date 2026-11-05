@@ -28,7 +28,8 @@ for a in "${REST[@]:-}"; do
     *) usage 2 ;;
   esac
 done
-((DRY_RUN)) || need_cmd openstack jq
+need_jq
+((DRY_RUN)) || need_cmd openstack
 export OS_COMPUTE_API_VERSION="${OS_COMPUTE_API_VERSION:-2.85}"
 
 # list_ovlm TYPE: prints "<id>\t<name>" for every ovlm-* object of that type (keypairs: name\tname).

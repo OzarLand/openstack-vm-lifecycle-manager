@@ -87,11 +87,39 @@ class Env:
 
     # --- user lifecycle through the real flows ---------------------------------------------------------
 
+    def ensure_project(self, project_connection_id: str | UUID) -> None:
+        """A project connection with this id (and a test cloud): role bindings may only name existing projects
+        (SEC-C-8). Idempotent."""
+        pc = str(UUID(str(project_connection_id)))
+        self.sql(
+            "INSERT INTO cloud (id, name, auth_url, region) VALUES (:c, 'test-cloud', 'https://keystone.test/v3', "
+            "'R1') ON CONFLICT (name) DO NOTHING",
+            c=str(UUID(int=1)),
+        )
+        self.sql(
+            "INSERT INTO project_connection (id, cloud_id, openstack_project_id, openstack_project_name, name) "
+            "SELECT CAST(:p AS uuid), id, :h, 'test', :n FROM cloud WHERE name = 'test-cloud' ON CONFLICT DO NOTHING",
+            p=pc,
+            h=UUID(pc).hex,
+            n=f"p-{UUID(pc).hex}",
+        )
+
+    def ensure_projects_of(self, roles: list[tuple[str, str]]) -> None:
+        for _, scope in roles:
+            if scope.startswith("project:"):
+                try:
+                    self.ensure_project(scope.removeprefix("project:"))
+                except ValueError:
+                    continue  # not a UUID: the code under test refuses it
+
     def create_user(
         self, username: str, roles: list[tuple[str, str]], *, by: UUID | None = None
     ) -> str:
-        """Create a pending user with an enrolment link (service level, as the CLI/admin API do)."""
+        """Create a pending user with an enrolment link (service level, as the CLI/admin API do). Project scopes
+        get a project connection first (SEC-C-8)."""
         from ovlm.auth import users
+
+        self.ensure_projects_of(roles)
 
         with self.session() as db:
             uid = users.create_user(

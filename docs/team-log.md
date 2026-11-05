@@ -826,3 +826,82 @@ the REN-1 paths passing ([verification-renewal-fixes.md](reviews/verification-re
 
 **Remaining before the Felcloud acceptance campaign:** the encrypted credential store. Its agent has been blocked since
 22:21 UTC on a permission prompt that only the maintainer can approve.
+
+## PR #9 merged; good first issues opened — 2026-11-04 23:55 UTC
+
+[OzarLand/openstack-vm-lifecycle-manager#9](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/9) is
+merged, with CI green: `CONTRIBUTING.md`, `docs/install-guide.md`, the GitHub issue and PR templates, and
+`docs/good-first-issues.md`.
+
+The eight beginner issues are open on GitHub with the label `good first contribution`:
+[#10](https://github.com/OzarLand/openstack-vm-lifecycle-manager/issues/10) to
+[#17](https://github.com/OzarLand/openstack-vm-lifecycle-manager/issues/17).
+
+**Still blocked:** the encrypted credential store agent, on a permission prompt since 22:21 UTC. It needs the
+maintainer's approval in https://claude.ai/code/session_016ti9vzvtr3eKwtKW8Zsf9r. It is the last blocker before the
+Felcloud acceptance campaign.
+
+## 2026-11-05 05:45 UTC — unblocked; lab preparation started
+
+- The maintainer approved the credential-store prompt. The agent is running again (tests for the KEK, the Keystone
+  check and the upload).
+- To save time, `ozar-dev` was asked to prepare the Felcloud lab now, steps 0–3 and 5 of `lab/felcloud/README.md`:
+  - a baseline snapshot;
+  - `ovlm-lab-host` with OVLM from `main` (`make up`, `make smoke`);
+  - the initial workload `ovlm-acc-blue` and the data volume `ovlm-acc-data`.
+
+  No credentials, no floating IP and no renewal yet: those wait for the credential store.
+
+## Credential store integrated — 2026-11-05 06:30 UTC
+
+The encrypted credential store and project connections (Opus, $6.30) are merged into the working branch.
+
+**Verified by Agent 1:**
+- lint clean, with a new import contract: the api cannot import the unsealing code;
+- 1179 unit tests pass (also as non-root);
+- 439 integration tests pass.
+
+An independent security review (Fable, focused) has started:
+https://claude.ai/code/session_016ti9w1bamZWQzvNipNj5Ag (`claude/ovlm-review-credential-store`).
+
+`ozar-dev` is preparing the Felcloud lab: building the OVLM images on `ovlm-lab-host`.
+
+## Security review and first lab run — 2026-11-05 07:00 UTC
+
+**Credential store review** (Fable, focused): two High and three Medium findings.
+- CS-1 (High): changing a connection's `auth_url` without step-up could redirect a stored secret to another endpoint.
+- CS-2 (High): the AES-GCM associated data does not bind the connection, so the api role could rebind credential rows.
+- CS-3: the Keystone expiry is not read from Keystone. CS-4: no periodic re-validation or metric. CS-5: an unknown KEK
+  should be a transient error.
+
+A fix round has started (Opus): https://claude.ai/code/session_016ti9w37cpmnkxrzhX6CZn8
+(`claude/ovlm-fix-credential-store`). A short fresh verification follows before the PR.
+
+**First Felcloud run by `ozar-dev`** (steps 0–3 and 5):
+- baseline snapshot taken; `ovlm-lab-host` built; **`make smoke` passed on Felcloud**; guard diff: 0 violations;
+- step 5 stopped: the `configure` phase made `/srv/data` immutable before the bootstrap step, on an already formatted
+  volume. Nine kit bugs were found, and one environment fact: the project network has no direct Internet access, so
+  the worker must reach OpenStack through an HTTPS proxy while reaching guests directly.
+
+A kit fix round has started (Sonnet): https://claude.ai/code/session_016ti9w2cf2jBz2TrGgmbZeS
+(`claude/ovlm-lab-kit-fixes`), including `HTTPS_PROXY`/`NO_PROXY` support in the worker.
+
+Still running on Felcloud: `ovlm-lab-host`, `ovlm-acc-blue`, `ovlm-acc-data`. No floating IP touched.
+
+## Credential store fixed and verified; lab restarted — 2026-11-05 08:10 UTC
+
+- **Fix round (Opus, $6.50):** CS-1..CS-10 fixed except CS-6. Each secret is bound (AEAD associated data) to its
+  credential row, connection, kind, cloud and an endpoint digest; the KEK id is in the wrap AAD. The worker checks the
+  binding against the live rows before it decrypts. An endpoint change needs step-up and invalidates the credentials.
+  The six CS-1/CS-2 regression tests failed before the fix (two delivered the secret to a fake attacker endpoint).
+- **Lab kit fixes (Sonnet, $1.85):** the nine bugs from the first run, plus worker proxy support. Agent 1 added the
+  proxy pass-through to the automation git clone, which the lab needs (the network has no direct Internet).
+- **Independent verification (Opus, fresh session):**
+  [verification-credential-store-fixes.md](reviews/verification-credential-store-fixes.md). CS-1 and CS-2 closed,
+  backed by 17 adversarial probes as the database roles, all refused. Fit to merge. Three new Low items and one Info
+  (N-1..N-4) are in the roadmap as SF-1..SF-6, with CS-6.
+- **Agent 1 checks on the merged branch:** lint clean; unit 1205 passed (root) and 1204 (non-root); integration 453
+  passed. One integration test failed once in the first run and passed on the rerun: flaky, not identified yet.
+- **`ozar-dev`** was asked to reset the workload, redeploy OVLM at `49621cc` behind the proxy, redo step 5, create
+  the application credentials (and check that a restricted one can read its own Keystone record, needed by CS-3), then
+  run the guard diff and stop before any renewal.

@@ -12,12 +12,10 @@
 > **OVLM is pre-alpha and not lab validated.** The renewal workflow has not run end to end on a real cloud.
 > Do not point it at a production cloud or a project with workloads you cannot lose.
 >
-> 🛑 **The encrypted credential store is still being finished.** The design
-> ([security-model.md §5](security-model.md)) seals OpenStack credentials in the database. That code is not
-> written yet (`src/ovlm/secrets` is a stub). Today:
-> - the web UI and the API **cannot store an OpenStack credential**;
-> - a renewal is **rejected at admission** ("no credential store"), by design, so no run starts without one;
-> - the only way to use a read credential is the `ovlm inventory sync` command with a `clouds.yaml` file (§7).
+> 🟡 **The encrypted credential store is implemented and reviewed, not lab validated.** OpenStack application
+> credentials are sealed by the api and can only be unsealed by the worker
+> ([credential-store.md](credential-store.md)). Each secret is bound to the cloud endpoint it was uploaded for; changing
+> that endpoint needs a step-up and invalidates the credentials. It has not yet been used against a real cloud.
 >
 > This guide shows what works today and where the gaps are. It does not describe a finished product.
 
@@ -141,6 +139,44 @@ trust a wider range than your proxy.
 With `OVLM_DEVELOPMENT_MODE` off, the api **refuses to start without** `OVLM_EXTERNAL_URL`, and the worker refuses
 to start without its separate Ansible user (`compose.yaml` sets it). Treat a start-up error as the check working.
 
+## 5a. Reaching OpenStack through an egress proxy (optional)
+
+Some projects have **no direct Internet**: the OpenStack APIs, the package archives and the registries are reached
+through an operator-provided proxy. OVLM supports one that allows `CONNECT` to port 443 only (plain HTTP refused).
+The rule is: **the worker reaches the OpenStack APIs through the proxy, and reaches guests directly.**
+
+Put the settings in a `.env` file next to `compose.yaml` (Compose reads it; it is git-ignored):
+
+```bash
+HTTPS_PROXY=http://proxy.example:3128
+# Hosts and networks that must NOT use the proxy: loopback, the Compose service names, and the project subnet(s)
+# and any guest addresses. Keep the loopback entries.
+NO_PROXY=localhost,127.0.0.1,::1,postgres,api,10.20.0.0/24
+```
+
+| What | Behaviour |
+|---|---|
+| `compose.yaml` | Passes `HTTPS_PROXY`, `https_proxy`, `NO_PROXY`, `no_proxy` to the **worker** only (the api never calls OpenStack), and the same values as **build arguments** of the worker image. Both unset: no proxy |
+| OpenStack API calls (openstacksdk, keystoneauth, `requests`) | Use the proxy, except for hosts matched by `NO_PROXY` (host names, domain suffixes, IP addresses and CIDR blocks). Unit tested: `tests/unit/test_egress_proxy.py` |
+| SSH to guests (host-key scan, Ansible) | Never uses the proxy: OpenSSH does not read these variables |
+| The external health probe (OVLM's own HTTP check of a guest) | **Never** uses a proxy, whatever the variables say (`UrllibGetter` builds its opener with an empty proxy map). It must see the guest, not a proxy's answer. Unit tested |
+| Git clone of the automation repository | Runs with a scrubbed environment; only `HTTPS_PROXY`, `NO_PROXY` and their lowercase forms are passed through, so an `https://` repository goes through the proxy. An `ssh://` repository must be reachable directly |
+
+⚠️ `NO_PROXY` must contain the project subnet(s): if an OpenStack endpoint or a guest sits on the project network,
+the proxy must not be used for it. CIDR blocks are honoured by `requests` (the SDK) for IP-address URLs only.
+**Status:** unit tested; not yet verified against a real proxy (the Felcloud lab run is the first test).
+
+**Building the images behind such a proxy.** `docker compose build` uses the same `HTTPS_PROXY`/`NO_PROXY` from `.env`
+as build arguments. The Dockerfile's apt sources use **`https://`** by default (`APT_URI_SCHEME`, set it to `http`
+with `--build-arg` to restore the base image's own sources), so no hand-built base image is needed. pip and the git
+fetch of the pinned collection honour the proxy variables too. A TLS-intercepting proxy needs its CA as the optional
+`pip_ca` build secret (pip, git and apt use it). The Docker **daemon** needs the proxy for image pulls: a systemd
+drop-in `Environment="HTTPS_PROXY=..."` for `docker.service` (the lab kit writes it).
+
+Hosts the proxy must allow for a build and a first start: the Debian archive (`deb.debian.org`,
+`security.debian.org`), `pypi.org` and `files.pythonhosted.org`, `github.com`, and the registry of the base images
+(Docker Hub: `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com`).
+
 ## 6. Create the two Keystone application credentials
 
 OVLM uses two credentials, one per purpose, in **one dedicated project**:
@@ -220,8 +256,8 @@ that mode as developer-only for now.
 
 | Gap | Status |
 |---|---|
-| Encrypted credential store (seal in the api, unseal in the worker) | 🛑 Being finished. Renewals are rejected without it |
-| Registering a cloud project from the UI or API | ⬜ Depends on the credential store |
+| Encrypted credential store (seal in the api, unseal in the worker) | 🟡 Implemented, reviewed, fixes verified; not lab validated. Worker container hardening (CS-6) still open |
+| Registering a cloud project from the UI or API | 🟡 Implemented with the credential store; not lab validated |
 | Scheduled inventory sync by the worker | ⬜ Depends on project connections |
 | End-to-end renewal on a real cloud | ⬜ Not started. Not lab validated |
 | TLS proxy example configuration | ⬜ Not provided. Bring your own |

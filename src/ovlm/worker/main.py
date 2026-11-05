@@ -58,13 +58,28 @@ def build_registry(
     if engine is not None:
         from ovlm.renewal import reprobe
         from ovlm.renewal.definition import BlueGreenFipV1
-        from ovlm.renewal.production import production_deps
+        from ovlm.renewal.production import credential_store, production_deps
 
+        store = credential_store(settings, engine)
         registry.register(ReadinessDefinition(engine))
-        registry.register(BlueGreenFipV1(renewal_deps or production_deps(settings, engine)))
+        registry.register(BlueGreenFipV1(renewal_deps or production_deps(settings, engine, store)))
         registry.register(reprobe.RenewalReprobe(engine))
         registry.periodic.append(reprobe.periodic_job(settings.poll.max_interval))
+        if store is not None:
+            _register_credential_jobs(registry, settings, store)
     return registry
+
+
+def _register_credential_jobs(registry: Registry, settings: Settings, store: Any) -> None:
+    """Credential validation (out of band, read-only Keystone check) and, during a KEK rotation, the re-wrap job
+    (security-model.md 4.4, 5.1)."""
+    from ovlm.connections import validation
+
+    registry.register(validation.validation_definition(validation.CredentialValidator(store)))
+    registry.periodic.append(validation.validation_job(settings.kek.validation_interval))
+    if settings.kek.previous_private_key_files:
+        registry.register(validation.rewrap_definition(store))
+        registry.periodic.append(validation.rewrap_job(settings.kek.validation_interval))
 
 
 class Worker:

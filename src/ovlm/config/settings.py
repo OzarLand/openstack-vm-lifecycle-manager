@@ -172,10 +172,11 @@ class RenewalSettings(_Section):
     external_verify: RenewalExternalVerify = RenewalExternalVerify()
     retire: RenewalRetire = RenewalRetire()
     approval_validity: RenewalApprovalValidity = RenewalApprovalValidity()
-    #: **Interim, lab only** (until the encrypted credential store of security-model.md 5.1 exists): a worker-only
-    #: directory holding ``<project_connection_id>.json`` (write application credential) and ``<id>.guest_key``
-    #: (OpenSSH private key of the guest ``ovlm`` user), owned by the worker user, mode 0700/0600. Unset (the
-    #: default): no renewal is admitted, because no credential is available.
+    #: **Development only, off by default**: a worker-only directory holding ``<project_connection_id>.json``
+    #: (write application credential) and ``<id>.guest_key`` (OpenSSH private key of the guest ``ovlm`` user),
+    #: owned by the worker user, mode 0700/0600. It replaces the encrypted credential store (security-model.md 5.1)
+    #: for a developer's lab and is refused unless ``development_mode`` is on. Production reads credentials from
+    #: the store only (``docs/credential-store.md``).
     credentials_dir: Path | None = None
 
     @field_validator("credentials_dir")
@@ -184,6 +185,43 @@ class RenewalSettings(_Section):
         if value is not None and not value.is_absolute():
             raise ValueError("renewal.credentials_dir must be an absolute path")
         return value
+
+
+class KekSettings(_Section):
+    """The worker key pair of the credential store (security-model.md 5.1, ``docs/credential-store.md``).
+
+    The private key files are **worker only** (refused in any other process role); the api holds only the public
+    key. All are files (Docker secrets), never values."""
+
+    #: Worker: the current KEK private key (PEM PKCS#8 X25519, mode 0400/0600, owned by the worker user).
+    private_key_file: Path | None = None
+    #: Worker, during a KEK rotation only: the previous private key(s), used to unwrap and re-wrap, never to seal.
+    previous_private_key_files: Annotated[tuple[Path, ...], NoDecode] = ()
+    #: Api: the worker's public key (PEM). The api seals with it and can never decrypt.
+    public_key_file: Path | None = None
+    #: Worker: seconds between runs of the credential validation job (and of the re-wrap job during a rotation).
+    validation_interval: float = Field(default=60.0, ge=5)
+    #: Worker: seconds after which an active credential is validated again against Keystone (default daily; review
+    #: CS-4: a credential revoked or re-roled in Keystone is noticed without waiting for a run to fail).
+    revalidation_interval: float = Field(default=86400.0, ge=300)
+
+    @field_validator("previous_private_key_files", mode="before")
+    @classmethod
+    def _split(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(Path(v) for v in (p.strip() for p in value.split(",")) if v)
+        return value
+
+    @model_validator(mode="after")
+    def _check(self) -> KekSettings:
+        paths = [self.private_key_file, self.public_key_file, *self.previous_private_key_files]
+        if any(p is not None and not p.is_absolute() for p in paths):
+            raise ValueError("kek.* key files must be absolute paths")
+        if self.previous_private_key_files and self.private_key_file is None:
+            raise ValueError(
+                "kek.previous_private_key_files needs kek.private_key_file (the current key)"
+            )
+        return self
 
 
 class AuthSettings(_Section):
@@ -327,9 +365,17 @@ class Settings(BaseSettings):
     renewal: RenewalSettings = RenewalSettings()
     auth: AuthSettings = AuthSettings()
     automation: AutomationSettings = AutomationSettings()
+    kek: KekSettings = KekSettings()
 
     @model_validator(mode="after")
     def _check(self) -> Settings:
+        if self.process_role != "worker" and (
+            self.kek.private_key_file is not None or self.kek.previous_private_key_files
+        ):
+            raise ValueError(
+                "kek.private_key_file is the worker's decryption key: only the worker may be given it "
+                "(security-model.md 5.1); the api is given kek.public_key_file"
+            )
         if self.http.port == self.http.metrics_port and self.http.host == self.http.metrics_host:
             raise ValueError(
                 "http.port and http.metrics_port must differ (metrics use a separate port)"
@@ -344,6 +390,11 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "automation.run_user must name the separate OS user (security-model.md 6.5); "
                     "null (ansible as the worker user) is for development_mode only"
+                )
+            if self.renewal.credentials_dir is not None:
+                raise ValueError(
+                    "renewal.credentials_dir reads credentials from plain files and is for development_mode only; "
+                    "production uses the encrypted credential store (kek.private_key_file)"
                 )
             if self.log.openstack_http_debug:
                 raise ValueError(
