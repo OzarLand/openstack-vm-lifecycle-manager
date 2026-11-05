@@ -28,6 +28,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from ovlm.secrets.envelope import (
     ALG,
     DEK_BYTES,
+    LEGACY_ALGS,
     NONCE_BYTES,
     PUB_BYTES,
     WRAPPED_DEK_BYTES,
@@ -48,7 +49,8 @@ class KeyringError(RuntimeError):
 
 
 class UnknownKekError(KeyringError):
-    """The value was wrapped to a key this worker does not hold."""
+    """The value was wrapped to a key this worker does not hold. **Not a verdict** on the secret (review CS-5): the
+    api may have switched to a new public key before the worker (wrong rotation order); callers retry later."""
 
 
 def wipe(buf: bytearray | None) -> None:
@@ -91,6 +93,10 @@ class Keyring:
         return PublicKek(self._keys[self.current_kek_id].public)
 
     def _unwrap(self, sealed: Sealed, context: SealContext) -> bytearray:
+        if sealed.alg in LEGACY_ALGS:
+            raise KeyringError(
+                f"secret sealed with the retired format {sealed.alg!r} (not bound to its endpoint): upload it again"
+            )
         if sealed.alg != ALG:
             raise KeyringError(f"unsupported sealed-secret format {sealed.alg!r}")
         key = self._keys.get(sealed.kek_id)

@@ -27,7 +27,7 @@ from ovlm.connections.validation import CredentialValidator, TokenFacts, rewrap_
 from ovlm.openstack.sdk_write import WriteCredential
 from ovlm.renewal.production import SdkCloudPort, StoreCredentialSource
 from ovlm.secrets.keyring import Keyring, generate_private_pem, public_pem_of
-from ovlm.secrets.store import kek_usage
+from ovlm.secrets.store import announce_keys, kek_usage
 from tests.integration.auth_support import PASSWORD, Env, env, log_lines  # noqa: F401
 from tests.integration.conftest import API_PW, WORKER_PW
 
@@ -65,6 +65,8 @@ class Store:
         self.worker_engine: Engine = env.role_engine("ovlm_worker", WORKER_PW)
         self.keyring = Keyring(self.key)  # type: ignore[arg-type]
         self.store = CredentialStore(self.worker_engine, self.keyring, tmp / "ca")
+        with self.worker_engine.begin() as c:  # the worker announces the key it holds (CS-5)
+            announce_keys(c, self.keyring.current_kek_id, self.keyring.kek_ids)
         self.facts: dict[str, TokenFacts] = {}
         self.validator = CredentialValidator(self.store, self.checker)
 
@@ -118,7 +120,8 @@ class Store:
         )
 
     def facts_for(self, app: str, *roles: str, project: str = PROJECT) -> None:
-        self.facts[app] = TokenFacts(project, tuple(roles), "svc-user", app, True, None)
+        self.facts[app] = TokenFacts(project, tuple(roles), "svc-user", app, True, None, record_status=200,
+                                     record_expires_at=datetime.now(UTC) + timedelta(days=30))  # fmt: skip
 
 
 def _write(st: Store, pc: str) -> WriteCredential:
@@ -397,8 +400,8 @@ def test_expired_or_invalidated_credential_is_refused(st: Store) -> None:
     pc = st.connection()
     _ready(st, pc)
     port = SdkCloudPort(StoreCredentialSource(st.store))
-    st.env.sql(
-        "UPDATE credential_ref SET expires_at = now() - interval '1 minute' WHERE kind = 'os_write'"
+    st.env.sql(  # the expiry Keystone reported (the uploaded one is immutable)
+        "UPDATE credential_ref SET verified_expires_at = now() - interval '1 minute' WHERE kind = 'os_write'"
     )
     assert "expired" in (port.unavailable_reason(pc) or "")
     with pytest.raises(CredentialUnavailableError, match="expired"):
@@ -408,7 +411,7 @@ def test_expired_or_invalidated_credential_is_refused(st: Store) -> None:
     assert st.admin.post(f"/api/v1/credentials/{cred}/validate", headers=st.h()).status_code == 202
     assert st.validator.run_once() == {"active": 1}
     st.env.sql(
-        "UPDATE credential_ref SET expires_at = now() + interval '1 day' WHERE kind = 'os_write'"
+        "UPDATE credential_ref SET verified_expires_at = now() + interval '1 day' WHERE kind = 'os_write'"
     )
     assert "failed its last validation" in (port.unavailable_reason(pc) or "")
     st.env.sql("UPDATE project_connection SET enabled = false")
