@@ -64,14 +64,10 @@ def check_scope(scope: str) -> str:
 
 
 def check_project_exists(db: Session, scope: str) -> None:
-    """A project scope must name an existing project connection (:class:`ScopeNotFoundError` otherwise).
+    """A project scope must name an existing project connection (:class:`ScopeNotFoundError` otherwise, SEC-C-8).
 
-    The ``project_connection`` table belongs to the cloud-connection module; until its migration exists the check
-    cannot run and only the UUID form is enforced (:func:`check_scope`)."""
+    ``scope`` is the canonical form from :func:`check_scope` (lower-case UUID), so the comparison is exact."""
     if not scope.startswith(PROJECT_PREFIX):
-        return
-    table = db.execute(text("SELECT to_regclass('project_connection') IS NOT NULL")).scalar_one()
-    if not table:
         return
     found = db.execute(
         text("SELECT 1 FROM project_connection WHERE id = CAST(:id AS uuid)"),

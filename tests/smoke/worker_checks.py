@@ -89,5 +89,16 @@ who = subprocess.run(  # noqa: S603
     ["/usr/bin/id", "-u"], user="ovlm-ansible", capture_output=True, text=True, check=True
 ).stdout.strip()
 assert who == "10002", who
+# Credential store KEK: the worker (uid ovlm) reads its 0600 copy; ovlm-ansible reads neither copy nor original.
+kek_copy = pathlib.Path("/run/ovlm-kek/worker_kek")
+assert kek_copy.stat().st_uid == 10001 and (kek_copy.stat().st_mode & 0o077) == 0, (
+    "KEK copy is not 0600 ovlm"
+)
+for path in ("/run/ovlm-kek/worker_kek", "/run/secrets/worker_kek"):
+    denied = subprocess.run(  # noqa: S603
+        ["/usr/bin/cat", path], user="ovlm-ansible", group="ovlm-ansible", extra_groups=[],
+        capture_output=True, check=False,
+    )  # fmt: skip
+    assert denied.returncode != 0, f"ovlm-ansible can read {path}"
 sys.stdout.write(f"worker image OK: {proc.stdout.splitlines()[0]}\n")
 sys.exit(0)

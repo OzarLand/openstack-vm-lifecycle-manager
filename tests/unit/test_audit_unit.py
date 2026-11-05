@@ -55,16 +55,16 @@ def test_snapshot_keeps_only_allowlisted_fields() -> None:
 
 
 def test_secret_fields_only_leave_a_changed_marker() -> None:
-    audit.register_entity("credential_ref", ["name", "key_id"], secret_fields=["secret_value"])
+    audit.register_entity("test_secret_entity", ["name", "key_id"], secret_fields=["secret_value"])
     before, after = audit.snapshot_pair(
-        "credential_ref",
+        "test_secret_entity",
         {"name": "n", "key_id": "k1", "secret_value": "OLD-CANARY"},
         {"name": "n", "key_id": "k2", "secret_value": "NEW-CANARY"},
     )
     assert before == {"name": "n", "key_id": "k1"}
     assert after == {"name": "n", "key_id": "k2", "changed_fields": ["secret_value"]}
     _, unchanged = audit.snapshot_pair(
-        "credential_ref", {"secret_value": "same"}, {"secret_value": "same"}
+        "test_secret_entity", {"secret_value": "same"}, {"secret_value": "same"}
     )
     assert unchanged == {}
     for blob in (str(before), str(after)):

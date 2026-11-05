@@ -82,6 +82,7 @@ def set_allow(env: Env, c: TestClient, secret: str, value: bool) -> Any:
 
 
 def test_operator_and_approver_in_one_scope_is_refused_by_default(env: Env) -> None:
+    env.ensure_projects_of([("approver", SCOPE)])
     c, secret = admin(env)
     h = env.headers(c)
     env.create_user("dual", [("operator", "global")])
@@ -106,6 +107,7 @@ def test_operator_and_approver_in_one_scope_is_refused_by_default(env: Env) -> N
     env.create_user("split", [("operator", SCOPE)])
     split = str(uid(env, "split"))
     other = f"project:{uuid4()}"
+    env.ensure_projects_of([("approver", other)])
     r = c.post(
         "/api/v1/role-bindings",
         json={"user_id": split, "role": "approver", "scope": other},
