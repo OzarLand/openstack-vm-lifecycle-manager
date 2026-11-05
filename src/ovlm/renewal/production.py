@@ -9,11 +9,14 @@ Safety argument (for the SRE and security reviews)
   ``WriteCredential``, never a ``clouds.yaml``) and to the runner as :class:`SecretBytes`; the only files are the
   runner's own 0600 run-dir files and this module's short-lived 0600 SSH key file in a 0700 directory under
   ``automation.run_root`` (tmpfs in the worker container), removed in ``finally``.
-* **No credential store yet.** security-model.md 5.1 (sealed secrets in the database, unsealed by the worker's KEK) is
-  not implemented in this release. :class:`NoCredentialStore` (the default) makes admission **reject** every renewal
-  with that reason, so no run takes a lock it cannot use. :class:`FileCredentialSource` is an explicit, opt-in
-  interim (``renewal.credentials_dir``) for the lab: worker-only secret files, refused unless owned by the worker
-  user and not group/world readable. It is a reported deviation, not the design.
+* **Credentials come from the encrypted store** (security-model.md 5.1, ``docs/credential-store.md``):
+  :class:`StoreCredentialSource` reads the project's active, validated, unexpired ``os_write`` application
+  credential and ``ssh_key`` from the database and unseals them with the worker's KEK, in memory, at each call (no
+  cache: a rotation or a failed re-validation takes effect at the next call). Any refusal (no credential, expired,
+  failed validation, connection disabled, key missing) makes admission **reject** the renewal with that reason, so no
+  run takes a lock it cannot use. Without a KEK the worker uses :class:`NoCredentialStore` (every renewal rejected).
+  :class:`FileCredentialSource` (``renewal.credentials_dir``) remains as a **development-only** option: settings
+  refuse it unless ``development_mode`` is on.
 * **Every OpenStack write** goes through ``GuardedWriteClient`` (ownership guard) over a session carrying the write
   allowlist and the step attempt's fence gate (``sdk_write.connect_write``). The token pre-warm of the W1 claim
   uses a session carrying the read-only guard: it can send only the token request.
@@ -111,13 +114,13 @@ class CredentialSource(Protocol):
 
 
 NO_STORE_REASON = (
-    "no write credential and guest SSH key are available for this project: the encrypted credential store "
-    "(security-model.md 5.1) is not implemented in this release"
+    "no write credential and guest SSH key are available for this project: this worker has no credential store "
+    "key (kek.private_key_file), so it cannot read the encrypted credential store (security-model.md 5.1)"
 )
 
 
 class NoCredentialStore:
-    """The default: nothing is available, so admission rejects every renewal with :data:`NO_STORE_REASON`."""
+    """No KEK configured: nothing is available, so admission rejects every renewal with :data:`NO_STORE_REASON`."""
 
     def for_project(self, project_connection_id: str) -> ProjectCredentials | None:
         return None
@@ -127,7 +130,7 @@ _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 
 
 class FileCredentialSource:
-    """**Interim, opt-in** (``renewal.credentials_dir``): ``<dir>/<project_connection_id>.json`` (write application
+    """**Development only** (``renewal.credentials_dir``, refused unless ``development_mode``): ``<dir>/<project_connection_id>.json`` (write application
     credential: ``auth_url``, ``application_credential_id``, ``application_credential_secret``, ``region_name``,
     optional ``interface``, ``cacert``, ``expires_at``, ``user_id``) and ``<dir>/<id>.guest_key`` (OpenSSH ed25519
     private key). The directory and files must belong to the worker user and grant nothing to group or others."""
@@ -168,6 +171,43 @@ class FileCredentialSource:
         )  # fmt: skip
 
 
+class StoreCredentialSource:
+    """The encrypted credential store (security-model.md 5.1). ``for_project`` unseals the write application credential
+    and the guest SSH key now, in memory; it raises
+    :class:`~ovlm.connections.credentials.CredentialUnavailableError` (a safe reason) when they are not usable."""
+
+    def __init__(self, store: Any) -> None:
+        self.store = store
+
+    def for_project(self, project_connection_id: str) -> ProjectCredentials | None:
+        cred = self.store.app_credential(project_connection_id, "os_write")
+        key, public_line = self.store.guest_key(project_connection_id)
+        return ProjectCredentials(
+            write=WriteCredential(
+                auth_url=cred.connection.auth_url, application_credential_id=cred.app_credential_id,
+                application_credential_secret=cred.secret, region_name=cred.connection.region,
+                interface=cred.connection.interface, cacert=self.store.ca_path(cred.connection),
+            ),
+            guest_key=SecretBytes(key),
+            guest_public_key=public_line,
+            expires_at=cred.expires_at,
+            write_user_id=cred.user_id,
+        )  # fmt: skip
+
+    def write_metadata(self, project_connection_id: str) -> tuple[datetime | None, str | None]:
+        """Expiry and Keystone user of the write credential, without decrypting anything."""
+        result: tuple[datetime | None, str | None] = self.store.write_metadata(
+            project_connection_id
+        )
+        return result
+
+
+def _unavailable(exc: Exception) -> str | None:
+    from ovlm.connections.credentials import CredentialUnavailableError
+
+    return str(exc)[:300] if isinstance(exc, CredentialUnavailableError) else None
+
+
 def public_key_of(private_openssh: bytes) -> str:
     """The OpenSSH public line of an OpenSSH private key (no passphrase)."""
     from cryptography.hazmat.primitives import serialization
@@ -178,6 +218,20 @@ def public_key_of(private_openssh: bytes) -> str:
         .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
         .decode()
     )
+
+
+def _project_credentials(source: CredentialSource, project: str) -> ProjectCredentials:
+    """The project's credentials for a step, or a ``needs_human`` stop with the store's reason."""
+    try:
+        creds = source.for_project(project)
+    except ValueError as exc:
+        reason = _unavailable(exc)
+        if reason is None:
+            raise
+        raise AutomationError(reason, Classification.NEEDS_HUMAN) from None
+    if creds is None:
+        raise AutomationError(NO_STORE_REASON, Classification.NEEDS_HUMAN)
+    return creds
 
 
 # --- cloud --------------------------------------------------------------------------------------------------------
@@ -191,18 +245,20 @@ class SdkCloudPort:
         self.process_role = process_role
 
     def _creds(self, project: str) -> ProjectCredentials:
-        creds = self.credentials.for_project(project)
-        if creds is None:
-            raise AutomationError(NO_STORE_REASON, Classification.NEEDS_HUMAN)
-        return creds
+        return _project_credentials(self.credentials, project)
 
     def unavailable_reason(self, project: str) -> str | None:
         try:
             return None if self.credentials.for_project(project) is not None else NO_STORE_REASON
         except (OSError, ValueError, KeyError) as exc:
-            return f"the credentials of this project are unreadable: {type(exc).__name__}: {exc}"[
-                :300
-            ]
+            return (
+                _unavailable(exc)
+                or (
+                    f"the credentials of this project are unreadable: {type(exc).__name__}: {exc}"[
+                        :300
+                    ]
+                )
+            )
 
     def write_client(
         self, registry: OwnershipRegistry, gate: Gate, *, project: str
@@ -213,11 +269,25 @@ class SdkCloudPort:
             self._creds(project).write, registry=registry, gate=gate, process_role=self.process_role
         )
 
+    def _metadata(self, project: str) -> tuple[datetime | None, str | None]:
+        meta = getattr(self.credentials, "write_metadata", None)
+        if meta is None:
+            creds = self._creds(project)
+            return creds.expires_at, creds.write_user_id
+        try:
+            result: tuple[datetime | None, str | None] = meta(project)
+        except ValueError as exc:
+            reason = _unavailable(exc)
+            if reason is None:
+                raise
+            raise AutomationError(reason, Classification.NEEDS_HUMAN) from None
+        return result
+
     def write_credential_expires_at(self, project: str) -> datetime | None:
-        return self._creds(project).expires_at
+        return self._metadata(project)[0]
 
     def write_user_id(self, project: str) -> str | None:
-        return self._creds(project).write_user_id
+        return self._metadata(project)[1]
 
     def token_expires_at(self, project: str) -> datetime | None:
         """A fresh Keystone token's expiry, from a session that can send only the token request. Raises when
@@ -481,10 +551,9 @@ class RunnerGuestPort:
             return plan_resolved(c, run_id)
 
     def _creds(self, resolved: Mapping[str, Any]) -> ProjectCredentials:
-        creds = self.credentials.for_project(str(resolved["service"]["project_connection_id"]))
-        if creds is None:
-            raise AutomationError(NO_STORE_REASON, Classification.NEEDS_HUMAN)
-        return creds
+        return _project_credentials(
+            self.credentials, str(resolved["service"]["project_connection_id"])
+        )
 
     def _spec(self, run_id: str, resolved: Mapping[str, Any]) -> AutomationSpec:
         """The profile version's automation block (bound by the plan hash through ``spec_hash``)."""
@@ -804,12 +873,43 @@ def _console_fingerprints(console: str) -> set[str]:
 # --- wiring -------------------------------------------------------------------------------------------------------
 
 
-def credential_source(settings: Any) -> CredentialSource:
+def credential_store(settings: Any, engine: Engine) -> Any:
+    """The worker's :class:`~ovlm.connections.credentials.CredentialStore`, or ``None`` without a KEK. Loading the
+    key ring is refused outside the worker process and for a key file readable by group or others."""
+    if settings.kek.private_key_file is None:
+        return None
+    from ovlm.connections.credentials import CredentialStore
+    from ovlm.secrets.keyring import load_keyring
+
+    keyring = load_keyring(
+        settings.kek.private_key_file,
+        settings.kek.previous_private_key_files,
+        process_role=settings.process_role,
+    )
+    log.info("credential store key ring loaded", extra={"kek_id": keyring.current_kek_id,
+                                                        "kek_ids": sorted(keyring.kek_ids)})  # fmt: skip
+    return CredentialStore(engine, keyring, settings.automation.run_root / ".ca")
+
+
+def credential_source(
+    settings: Any, engine: Engine | None = None, store: Any = None
+) -> CredentialSource:
+    """The store when the worker has a KEK; the development-only file source when ``renewal.credentials_dir`` is set
+    (settings refuse it outside ``development_mode``); otherwise nothing (every renewal rejected)."""
     directory = settings.renewal.credentials_dir
-    return FileCredentialSource(directory) if directory is not None else NoCredentialStore()
+    if directory is not None:
+        if not settings.development_mode:
+            raise ValueError("renewal.credentials_dir is for development_mode only")
+        log.warning(
+            "credentials are read from plain files (renewal.credentials_dir): development only"
+        )
+        return FileCredentialSource(directory)
+    if store is None and engine is not None:
+        store = credential_store(settings, engine)
+    return StoreCredentialSource(store) if store is not None else NoCredentialStore()
 
 
-def production_deps(settings: Any, engine: Engine) -> Any:
+def production_deps(settings: Any, engine: Engine, store: Any = None) -> Any:
     """``Deps`` of ``bluegreen_fip_v1`` for this worker: the guarded SDK cloud port, the automation runner from
     ``Settings.automation`` (its run user, timeouts, repo allowlist), OpenSSH and HTTP probes. Nothing connects
     here: the runner, the cloud and the guests are reached only inside step attempts."""
@@ -819,7 +919,7 @@ def production_deps(settings: Any, engine: Engine) -> Any:
     from ovlm.renewal.base import Deps
     from ovlm.renewal.config import RenewalConfig
 
-    creds = credential_source(settings)
+    creds = credential_source(settings, engine, store)
     rc = runner_config(settings)
     runner = _LazyRunner(lambda: AutomationRunner(rc))
     guest = RunnerGuestPort(
