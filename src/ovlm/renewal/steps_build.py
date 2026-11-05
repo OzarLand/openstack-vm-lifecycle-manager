@@ -16,7 +16,7 @@ from ovlm.openstack.types import CreateServerSpec, ServerInfo
 from ovlm.openstack.write import AdoptionExpectation, adopt_checks
 from ovlm.policies.windows import next_window, rule_from_dict
 from ovlm.renewal import metrics
-from ovlm.renewal.base import RStep, StepRefusal
+from ovlm.renewal.base import BLUE_HOST_KEY_UNTRUSTED, RStep, StepRefusal, blue_host_key_problems
 from ovlm.renewal.evidence import check_gate
 from ovlm.renewal.ledger import ledger_detail, ledger_intend, ledger_present
 from ovlm.renewal.plans import green_name, load_facts, now_db
@@ -109,7 +109,15 @@ class Preflight(RStep):
 
     def probe(self, ctx: StepContext) -> Any:
         r = self.resolved(ctx)
+        # IS-11: before any OpenStack call, the plan's blue must be the plan's own confirmed managed VM (the api
+        # writes ``resolved``), and the port the plan uses as blue's SSH address must be attached to blue.
+        with ctx.read() as c:
+            untrusted = blue_host_key_problems(c, r, run_id=ctx.run.id, check_confirmer=True)
+        if untrusted:
+            return {"untrusted": untrusted}
         wc = self.wc(ctx)
+        if wc.get_port(r["blue"]["port_id"]).device_id != r["blue"]["server_id"]:
+            return {"untrusted": ["the plan's blue port is not attached to blue's server"]}
         problems = live_preconditions(self, ctx)
         images = {i.openstack_id: i for i in wc.list_images()}
         img = images.get(r["image"]["id"])
@@ -154,6 +162,12 @@ class Preflight(RStep):
         }
 
     def decide(self, ctx: StepContext, observed: Any) -> Decision:
+        if (
+            "untrusted" in observed
+        ):  # stop for a human: nothing has been written, nothing runs on blue
+            return self.fail(
+                ctx, E.NEEDS_HUMAN, BLUE_HOST_KEY_UNTRUSTED, problems=observed["untrusted"]
+            )
         if not observed["g1"]["ok"]:
             reason = observed["g1"]["reason"]
             return self.fail(
