@@ -350,8 +350,10 @@ def _seed(
                   {"i": svc, "pc": pc})  # fmt: skip
         vm = new_id()
         c.execute(text("INSERT INTO managed_vm (id, service_id, observed_server_id, openstack_server_id, role, "
-                       "registered_at, ssh_host_key_fingerprint) VALUES (:i, :s, :o, :b, 'current', now(), :fp)"),
-                  {"i": vm, "s": svc, "o": obs["server"], "b": blue, "fp": blue_fingerprint})  # fmt: skip
+                       "registered_at, ssh_host_key_fingerprint, host_key_confirmed_by, host_key_confirmed_at) "
+                       "VALUES (:i, :s, :o, :b, 'current', now(), :fp, :u, now())"),
+                  {"i": vm, "s": svc, "o": obs["server"], "b": blue, "fp": blue_fingerprint,
+                   "u": users["op"]})  # fmt: skip
         prof = new_id()
         c.execute(text("INSERT INTO profile (id, service_id, name, latest_version) VALUES (:i, :s, 'p', 1)"),
                   {"i": prof, "s": svc})  # fmt: skip

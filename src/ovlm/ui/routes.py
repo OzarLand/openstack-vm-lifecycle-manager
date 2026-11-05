@@ -19,6 +19,7 @@ from ovlm import audit
 from ovlm.auth.deps import get_db, require_role
 from ovlm.auth.principal import Principal
 from ovlm.inventory import service as inventory
+from ovlm.registry import host_keys
 from ovlm.registry import service as registry
 from ovlm.registry.errors import DomainError
 from ovlm.ui.readiness_view import readiness_context
@@ -252,6 +253,9 @@ def register_server(
         svc = registry.get_service(db, service)
         _audit(db, who, "managed_vm.register", "managed_vm", vm["id"],
                scope=f"project:{svc['project_connection_id']}" if svc else None, after=vm)  # fmt: skip
+        host_keys.request_scan(
+            db, vm, requested_by=who.user_id
+        )  # ADR-0006: an operator confirms it after
         db.commit()
     except DomainError as exc:
         db.rollback()

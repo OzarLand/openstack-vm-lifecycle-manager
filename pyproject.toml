@@ -82,7 +82,7 @@ include_external_packages = true
 name = "api and ui never import outbound adapters (architecture.md section 3)"
 type = "forbidden"
 source_modules = ["ovlm.api", "ovlm.ui"]
-forbidden_modules = ["ovlm.openstack", "ovlm.automation", "ovlm.worker", "openstack", "ansible_runner"]
+forbidden_modules = ["ovlm.openstack", "ovlm.automation", "ovlm.worker", "openstack", "ansible_runner", "ovlm.inventory.sync", "ovlm.inventory.job", "ovlm.registry.host_key_scan"]
 allow_indirect_imports = false
 
 [[tool.importlinter.contracts]]

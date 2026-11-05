@@ -6,7 +6,7 @@
 | Status | **Designed, not run.** Nothing below has been executed. Expected outcomes come from the design documents and are what the run must confirm or contradict |
 | Environment | Felcloud, project `ozar-lab`, `ovlm-*` resources only ([ADR-0007](../../docs/decisions/ADR-0007-lab-on-felcloud.md)); runbook in [README.md](README.md) |
 | Expected behaviour from | [renewal-workflow.md](../../docs/renewal-workflow.md) §4.1, §5, §7 and D-1 (maintainer option B), [automation-contract.md](../../docs/automation-contract.md), [ADR-0003](../../docs/decisions/ADR-0003-workflow-engine.md) |
-| Last updated | 2026-11-04 |
+| Last updated | 2026-11-05 |
 
 Words used: **API** means the call in [api-design.md](../../docs/api-design.md) (the UI offers the same action);
 **TC** is the typed confirmation; **human + TOTP** means a person at the UI, never a token or an agent.
@@ -40,31 +40,43 @@ report, the downtime figure OVLM recorded next to the probe's.
 automation repo = the OVLM repository at the pinned SHA, `ansible/` as the playbook directory; image `Ubuntu 24.04 LTS - Noble Numbat`;
 flavor `G0.basic.1c1g`; the lab network; green's security group **`ovlm-acc-sg-green`**; the data volume `ovlm-acc-data`;
 volume type `NVMe` (always explicit); health check `GET /health` on 8080 with `fs_uuid` and `marker_sha256`; the
-service floating IP is the set-aside one. **Green must be named `ovlm-*`** (for example `ovlm-acc-green`). If the
-profile cannot set that, stop: `destroy-lab.sh` and the diff guard both depend on it.
+service floating IP is the set-aside one. **Green must be named `ovlm-*`**: `destroy-lab.sh` and the diff guard both
+depend on it. The profile does not set green's name: OVLM derives it from the **service slug**
+(`<slug>-ovlm-<last 12 characters of the run id>`, `renewal/plans.py` `green_name`). So the lab service's slug must
+start with `ovlm-` (use `ovlm-acc`; green is then `ovlm-acc-ovlm-<12>`).
+
+**OVLM policy for the lab** (admin, `POST /policies`, then `POST /policy-bindings` with `scope_type: service` and the
+lab service's id: policies bind to a service or a service group, never to a VM): a window covering the session, and
+**a window cannot cross midnight** (`end` later than `start` on the same local day; split a night window in two);
+`require_distinct_approvers: false`, so **approver-a** decides G1 (plan) and G2 (cutover) and **approver-b** decides
+G3 (retirement). The installation's self-approval setting stays **off**: the requester (the operator) never approves,
+and G3's approver differs from the requester and from the plan approver whatever the policy says.
 
 ---
 
 ## 1. Primary acceptance scenario (ACC-01)
 
-Source: testing-strategy §7.1, 12 steps. Preconditions: Steps 0 to 7 of the README done; two human accounts with TOTP
-(or the solo setting, flagged); the profile above approved; a short retention period in the policy.
+Source: testing-strategy §7.1, 12 steps. Preconditions: Steps 0 to 7 of the README done; an operator account and two
+human approver accounts with TOTP (approver-a, approver-b; self-approval off); the lab policy above with a short
+retention period.
+
+`{pc}` below is the OVLM project connection id (`GET /api/v1/project-connections`), not the OpenStack project id.
 
 | Step | OVLM action (API; UI equivalent exists) | What to observe on Felcloud | Pass criterion |
 |---|---|---|---|
-| A1 | Upload both credentials (`PUT /projects/{id}/credentials/read`, `/write`, admin + TOTP), `POST .../test`, then `POST /projects/{id}/syncs` | `./collect-evidence.sh ACC-01 before` | Blue, volume, floating IP, image, flavor appear in the inventory; **no write call** from the read credential (OVLM request log / audit) |
-| A2 | `POST /services`, `POST /services/{id}/managed-vms {observed_server_id}`, confirm the host key if asked (`POST /managed-vms/{id}/host-key/confirm`), create the profile | — | Profile version 1 stored; observed and desired state shown separately |
-| A3 | `POST /managed-vms/{id}/assessments` | **Negative control first:** a profile version with an *unpinned* ref must assess `not-ready`. Then the pinned one | `ready`, every check has evidence |
-| A4 | Create the policy and bind it; `GET /managed-vms/{id}/deadline` | — | Deadline = launch + max age, adjusted to the window |
-| A5 | `POST /plans`; `POST /plans/{id}/approval-requests`; approver A decides (`POST /approvals/{id}/decision`, **human + TOTP**); `POST /plans/{id}/start` (**202**) | `openstack server list --tags ovlm:managed` shows blue only; the run holds the locks | Approval bound to the plan hash; **self-approval refused** (try it once); steps `B1 preflight`, `B2 claim_resources` done |
+| A1 | Upload the credentials (admin + TOTP step-up + TC = connection name): `POST /project-connections/{pc}/credentials` with `kind` `os_read`, then `os_write`, then `ssh_key`; the worker validates each (`GET /credentials/{id}`: `state: active`; re-check with `POST /credentials/{id}/validate`). Then `POST /projects/{pc}/syncs` (**202**, operator) and follow `GET /projects/{pc}/syncs` | `./collect-evidence.sh ACC-01 before` | The sync record is `succeeded` (`kind: full`); blue, volume, floating IP, image, flavor appear in the inventory under `{pc}`; **no write call** from the read credential (OVLM request log / audit). A second `POST` while one is queued answers 409. The periodic sync (`inventory.sync_interval`, 15 min) also runs |
+| A2 | `POST /services` with slug `ovlm-acc`, `POST /services/{id}/managed-vms {observed_server_id}` (201; it queues a host-key scan, `host_key_scan_run`). When `GET /managed-vms/{id}` shows `ssh_host_key_fingerprint`, **compare it with blue's own** (on blue: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`, through the lab host; or the console's fingerprint block if it is not empty) and confirm it: `POST /managed-vms/{id}/host-key/confirm {"fingerprint": "SHA256:..."}` (operator, human session). Then create the profile | — | Fingerprint confirmed (audit `managed_vm.host_key_confirm`); profile version 1 stored; observed and desired state shown separately. A plan before the confirmation is refused (409 `host-key-unconfirmed`) |
+| A3 | `POST /managed-vms/{id}/assessments` | **Negative control first:** a profile version with an *unpinned* ref (branch, tag or short SHA) is **refused at creation (422)**. Then the pinned one | `ready`, every check has evidence |
+| A4 | Create the lab policy and bind it to the service (above); `GET /managed-vms/{id}/deadline` | — | Deadline = launch + max age, adjusted to the window |
+| A5 | `POST /plans`; `POST /plans/{id}/approval-requests`; approver-a decides (`POST /approvals/{id}/decision`, **human + TOTP**); `POST /plans/{id}/start` (**202**) | `openstack server list --tags ovlm:managed` shows blue only; the run holds the locks | Approval bound to the plan hash; **self-approval refused** (try it once); steps `B1 preflight`, `B2 claim_resources` done |
 | A6 | Watch `GET /runs/$RUN` and `/steps` through `B3`, `B4`, `B5` | One new server named `ovlm-*`, tagged `ovlm:managed` and `ovlm:run:<id>`, in the volume's availability zone. ACTIVE comes ~15 s after create, SSH only ~85 s later (EXP-01b) | Ledger row `present`; blue untouched; exactly one green |
 | A7 | `B6` to `B8`; run `configure` a second time (retry-step) | — | `ovlm.result/1` ok; second `configure` reports `changed=0` |
-| A8 | `POST /runs/$RUN/cutover-request`; approver decides **with the TC** (server name + last 6 of the volume id) inside a policy window | `B9 verify_green_ready` runs **before** T0. Optional negative control N1 below | B9 proves green is reachable on the pinned key and `cloud-init` finished, before anything is stopped |
+| A8 | `POST /runs/$RUN/cutover-request`; approver-a decides **with the TC** (server name + last 6 of the volume id) inside a policy window | `B9 verify_green_ready` runs **before** T0. Optional negative control N1 below | B9 proves green is reachable on the pinned key and `cloud-init` finished, before anything is stopped |
 | A8-W | `W1 quiesce_old`, `W2 stop_old`, `W3 detach_volume`, (`W4` snapshot optional), `W5 attach_volume_green`, `W6 data_attach_green`, `W7 start_service_green` | The probe starts failing at `W1`/`W2`. `openstack volume show ovlm-acc-data` shows `in-use` → `detaching` → `available` → `reserved`/`attaching` → `in-use` (EXP-01 Q3) | Volume on exactly one server at every sample; **no `mkfs`**; marker SHA equal |
 | A9 | `W8 healthcheck_green` | — | `/health` ok; `fs_uuid` and `marker_sha256` equal the recorded values; counter ≥ recorded; the answering VM id differs from blue's |
 | A10 | `W9 move_fip`, `W10 verify_external` | Floating IP now on green's port; the probe recovers within about a second of the move (EXP-01b: 1.1–1.3 s) | OVLM's downtime figure and the probe's outage agree within a few seconds. For reference only: the best case measured on this cloud was about 40 s |
 | A11 | `R1 retain_old`, `R2 await_retention` | Blue `SHUTOFF` and **locked** (`locked_reason=ovlm:retained:<run>`), only after `W3` | Audit lists every step attempt |
-| A12 | `POST /runs/$RUN/retirement-request`; approver B (≠ requester ≠ plan approver, with the TC) decides; `X1 retire_old` | Blue deleted; the volume **not** deleted (`delete_on_termination=false`, re-checked) | Data volume survives on green; blue gone; final health ok; `./snapshot.sh` + diff pass |
+| A12 | `POST /runs/$RUN/retirement-request`; approver-b (≠ requester ≠ plan approver, with the TC) decides; `X1 retire_old` | Blue deleted; the volume **not** deleted (`delete_on_termination=false`, re-checked) | Data volume survives on green; blue gone; final health ok; `./snapshot.sh` + diff pass |
 
 **N1 (optional negative control, ◻︎ + ⚠️ on `ovlm-*` only).** Between A7 and A8, remove the SSH rule from the host group
 on green's group, approve the cutover, and watch B9 hold the run before T0:
