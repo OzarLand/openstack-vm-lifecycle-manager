@@ -217,6 +217,7 @@ def test_denials_of_mutating_endpoints_are_audited_reads_are_not(env: Env) -> No
 
 
 def test_role_binding_changes_end_sessions_and_are_audited(env: Env) -> None:
+    env.ensure_project(PA)
     admin, _ = env.user_client("root", [("admin", "global")])
     user, _ = env.user_client("xena", [("viewer", "global")])
     [xena] = env.sql("SELECT id FROM app_user WHERE username='xena'")
@@ -471,6 +472,7 @@ def _binding(env: Env, admin: TestClient, user_id: Any, role: str, scope: str) -
 
 
 def test_duplicate_binding_returns_the_existing_id_without_a_false_audit_row(env: Env) -> None:
+    env.ensure_project(PA)
     admin, _ = env.user_client("root", [("admin", "global")])
     env.user_client("dup", [("viewer", "global")])
     [dup] = env.sql("SELECT id FROM app_user WHERE username='dup'")
@@ -495,6 +497,7 @@ def test_duplicate_binding_returns_the_existing_id_without_a_false_audit_row(env
 
 
 def test_project_scopes_are_uuids_stored_lower_case(env: Env) -> None:
+    env.ensure_project(PB)
     admin, _ = env.user_client("root", [("admin", "global")])
     env.user_client("sco", [("viewer", "global")])
     [sco] = env.sql("SELECT id FROM app_user WHERE username='sco'")
@@ -516,10 +519,16 @@ def test_project_scopes_are_uuids_stored_lower_case(env: Env) -> None:
 
 
 def test_project_scope_must_name_an_existing_project_connection(env: Env) -> None:
-    """Once the project_connection table exists, a binding to an unknown project is 404."""
-    env.sql("CREATE TABLE project_connection (id uuid PRIMARY KEY)")
-    env.sql("GRANT SELECT ON project_connection TO ovlm_api")
-    env.sql("INSERT INTO project_connection (id) VALUES (:p)", p=PA)
+    """A binding to an unknown project is 404 (SEC-C-8); the project_connection table always exists."""
+    env.sql(
+        "INSERT INTO cloud (id, name, auth_url, region) VALUES (:c, 'c1', 'https://keystone.test/v3', 'R1')",
+        c=str(uuid4()),
+    )
+    env.sql(
+        "INSERT INTO project_connection (id, cloud_id, openstack_project_id, openstack_project_name, name) "
+        "SELECT :p, id, '0123456789abcdef0123456789abcdef', 'p', 'pa' FROM cloud WHERE name = 'c1'",
+        p=PA,
+    )
     admin, _ = env.user_client("root", [("admin", "global")])
     env.user_client("pcx", [("viewer", "global")])
     [pcx] = env.sql("SELECT id FROM app_user WHERE username='pcx'")
