@@ -840,3 +840,14 @@ The eight beginner issues are open on GitHub with the label `good first contribu
 **Still blocked:** the encrypted credential store agent, on a permission prompt since 22:21 UTC. It needs the
 maintainer's approval in https://claude.ai/code/session_016ti9vzvtr3eKwtKW8Zsf9r. It is the last blocker before the
 Felcloud acceptance campaign.
+
+## 2026-11-05 05:45 UTC — unblocked; lab preparation started
+
+- The maintainer approved the credential-store prompt. The agent is running again (tests for the KEK, the Keystone
+  check and the upload).
+- To save time, `ozar-dev` was asked to prepare the Felcloud lab now, steps 0–3 and 5 of `lab/felcloud/README.md`:
+  - a baseline snapshot;
+  - `ovlm-lab-host` with OVLM from `main` (`make up`, `make smoke`);
+  - the initial workload `ovlm-acc-blue` and the data volume `ovlm-acc-data`.
+
+  No credentials, no floating IP and no renewal yet: those wait for the credential store.
