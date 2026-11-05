@@ -137,7 +137,12 @@ class AutomationRunner:
             try:
                 # ansible creates ~/.ansible/tmp even for --version: a throw-away, writable HOME is required for
                 # a non-root worker (an unwritable HOME made it crash; root could create it, so tests hid it).
-                with tempfile.TemporaryDirectory(prefix="ovlm-ansible-version-") as home:
+                # Under the run root (a writable tmpfs in the container), not $TMPDIR: the root filesystem is
+                # read-only there, so /tmp is not writable (lab bug J).
+                tmp_base = self.cfg.run_root if self.cfg.run_root.is_dir() else None
+                with tempfile.TemporaryDirectory(
+                    prefix="ovlm-ansible-version-", dir=tmp_base
+                ) as home:
                     out = subprocess.run(  # noqa: S603
                         [self._bin("ansible"), "--version"],
                         capture_output=True, text=True, timeout=60, check=True,

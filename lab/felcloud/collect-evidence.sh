@@ -92,7 +92,9 @@ elif [[ -n "$run_id" ]]; then incomplete=1; note "no OVLM_URL set: run, steps an
 # ---- lab host logs (the ssh destination comes from the environment, never from this repository)
 if [[ -n "${OVLM_LAB_HOST_SSH:-}" ]]; then
   # shellcheck disable=SC2086  # OVLM_LAB_SSH_OPTS is a list of options by design
-  rssh() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$OVLM_LAB_WORKDIR/known_hosts" ${OVLM_LAB_SSH_OPTS:-} "$OVLM_LAB_HOST_SSH" "$@"; }
+  ssh_key=()
+  [[ -n "${OVLM_LAB_SSH_KEY_FILE:-}" ]] && ssh_key=(-i "$OVLM_LAB_SSH_KEY_FILE" -o IdentitiesOnly=yes)
+  rssh() { ssh -n -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$OVLM_LAB_WORKDIR/known_hosts" "${ssh_key[@]}" ${OVLM_LAB_SSH_OPTS:-} "$OVLM_LAB_HOST_SSH" "$@"; }
   rssh 'cd ovlm && docker compose ps' 2>>"$dir/collection.log" | save lab-host/compose-ps.txt || { incomplete=1; note "compose ps FAILED"; }
   rssh 'cd ovlm && docker compose logs --no-color --since 3h worker' 2>>"$dir/collection.log" | save lab-host/worker.log || { incomplete=1; note "worker log FAILED"; }
   rssh 'cd ovlm && docker compose logs --no-color --since 3h api' 2>>"$dir/collection.log" | save lab-host/api.log || { incomplete=1; note "api log FAILED"; }
