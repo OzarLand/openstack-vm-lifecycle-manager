@@ -697,3 +697,18 @@ def test_reverify_checkout_rejects_an_unsafe_workflow_id(env: Any) -> None:
     runner, prepared, _ = env
     with pytest.raises(AutomationError):
         runner.reverify_checkout(prepared.spec, "../etc")
+
+
+def test_roles_search_path_includes_the_sibling_roles_dir(tmp_path: Path) -> None:
+    from ovlm.automation.runner import roles_search_path
+
+    assert roles_search_path(tmp_path, "ansible/playbooks/").split(":") == [
+        str(tmp_path / "ansible/playbooks/roles"),
+        str(tmp_path / "ansible/roles"),
+        str(tmp_path / "roles"),
+    ]
+    # a top-level playbook dir: no duplicate root entry, nothing above the checkout
+    assert roles_search_path(tmp_path, "playbooks").split(":") == [
+        str(tmp_path / "playbooks/roles"),
+        str(tmp_path / "roles"),
+    ]

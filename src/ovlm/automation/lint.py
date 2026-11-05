@@ -29,6 +29,7 @@ import fnmatch
 import hashlib
 import json
 import re
+import shlex
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -235,6 +236,70 @@ def _walk_tasks(items: Any, path: str, inherited_no_log: bool) -> Iterator[_Task
         yield _Task(path, getattr(item, "line", 0), item, no_log, _module_of(item))
 
 
+# ``check_mode: false`` is accepted only on a task that is read-only by construction (automation-contract.md s.9):
+# a read-only module, or ``command`` (never ``shell``) whose program is on this list, with ``changed_when: false``.
+# Everything else that forces itself to run in check mode stays an error.
+_READ_ONLY_MODULES = frozenset({"stat", "find", "slurp", "setup", "wait_for", "getent"})
+_READ_ONLY_PROGRAMS = frozenset(
+    {"mountpoint", "findmnt", "blkid", "readlink", "id", "df", "fuser", "which", "lsblk"}
+)
+_URI_WRITE_ARGS = frozenset({"body", "src", "dest", "creates", "removes", "unix_socket"})
+
+
+def _short_module(module: str | None) -> str | None:
+    if module is None:
+        return None
+    for prefix in ("ansible.builtin.", "ansible.legacy."):
+        if module.startswith(prefix):
+            return module[len(prefix) :]
+    return None if "." in module else module
+
+
+def _command_argv(args: Any) -> list[str] | None:
+    if isinstance(args, str):
+        raw = args
+    elif isinstance(args, dict):
+        if isinstance(args.get("argv"), list):
+            return [str(a) for a in args["argv"]]
+        raw = args.get("cmd")
+        if not isinstance(raw, str):
+            return None
+    else:
+        return None
+    try:
+        return shlex.split(raw)
+    except ValueError:
+        return None
+
+
+def _read_only_probe(t: _Task) -> bool:
+    data, module = t.data, _short_module(t.module)
+    if module is None or "always_run" in data:
+        return False
+    args = data.get(t.module) if t.module else None
+    if module in _READ_ONLY_MODULES:
+        return True
+    if module == "uri":
+        if not isinstance(args, dict) or _URI_WRITE_ARGS & set(args):
+            return False
+        method = str(args.get("method", "GET")).upper()
+        return method in {"GET", "HEAD"}
+    if module != "command" or not _is_false(data.get("changed_when")):
+        return False
+    argv = _command_argv(args)
+    if not argv or "{{" in argv[0] or "{%" in argv[0]:
+        return False
+    prog = argv[0].rsplit("/", 1)[-1]
+    rest = argv[1:]
+    if prog in _READ_ONLY_PROGRAMS:
+        return True
+    if prog == "e2fsck":  # -n opens read-only and answers "no"; refuse any repair flag
+        return "-n" in rest and not {"-p", "-a", "-y", "-D", "-E"} & set(rest)
+    if prog == "start-stop-daemon":
+        return "--status" in rest and not {"--start", "--stop", "-S", "-K"} & set(rest)
+    return False
+
+
 def _strings(value: Any, seen: set[int] | None = None) -> Iterator[str]:
     seen = set() if seen is None else seen
     if isinstance(value, str):
@@ -372,7 +437,18 @@ class _Linter:
     def role_dirs(self, name: str) -> list[Path]:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
             return []
-        return [d for d in (self.pb_dir / "roles" / name, self.root / "roles" / name) if d.is_dir()]
+        # Same search order as the runner's roles path: <playbook_dir>/roles, the sibling <parent>/roles (only when
+        # the parent is still inside the repository), then roles/ at the root.
+        bases = [self.pb_dir / "roles"]
+        if self.pb_dir != self.root and self.pb_dir.parent.is_relative_to(self.root):
+            bases.append(self.pb_dir.parent / "roles")
+        bases.append(self.root / "roles")
+        out: list[Path] = []
+        for base in bases:
+            d = base / name
+            if d.is_dir() and d not in out:
+                out.append(d)
+        return out
 
     def role_files(self, role: Path) -> list[Path]:
         files: list[Path] = []
@@ -494,7 +570,7 @@ class _Linter:
 
         # check_mode / always_run
         forced = ("check_mode" in data and _is_false(data["check_mode"])) or "always_run" in data
-        if forced and not result_writer:
+        if forced and not result_writer and not _read_only_probe(t):
             self.add(
                 "check_mode_forced",
                 "error",
