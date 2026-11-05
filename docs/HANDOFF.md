@@ -1,32 +1,32 @@
-# Handoff — paused 2026-11-04 ~17:20 UTC
+# Handoff — paused 2026-11-05 ~20:30 UTC (maintainer: resume tomorrow)
 
 | Field | Value |
 |---|---|
 | Owner | Agent 1 — PM / Engineering Manager |
-| State | Active. Credential store fixed and verified; Felcloud lab being prepared by `ozar-dev`. |
+| State | Paused for the night. Code complete in `main` (aba9ec2); Felcloud run parked safely at B9; lab up overnight (approved). |
 
 This page is everything needed to resume, by this session or a new one. The story so far is in
 [team-log.md](team-log.md), and the backlog in [roadmap.md](roadmap.md).
 
-## Where the code is (updated 2026-11-05 08:10 UTC)
+## Where things are (2026-11-05 20:30 UTC)
 
 | Place | State |
 |---|---|
-| `main` | PRs #1–#9 merged: everything up to the renewal strategy, UI, lab kit and contributor docs. |
-| Working branch `claude/openstack-vm-lifecycle-manager-9nf9cc` | Encrypted credential store + review fixes (verified, fit to merge), lab kit fixes, worker egress proxy. A PR to `main` is open or about to be. |
-| `ozar-dev` (session_016ti9w2xkWinTeHFRq3zgS3) | Resetting the workload and redeploying OVLM at `49621cc` behind the proxy; stops before any renewal and reports. |
+| `main` | `aba9ec2`, CI green: PRs #1–#25. Credential store, inventory sync, host-key confirmation, six lab bug fixes (roles path, lint probes, K, J, I, M), IS-1..IS-12 closed. |
+| Felcloud lab | `ovlm-lab-host` (OVLM at `86e7463`, needs redeploy at `aba9ec2`), blue `ovlm-acc-blue` serving, green from run `01a1ac5d` idle, data volume on blue, set-aside floating IP on blue, one new floating IP on the lab host (hairpin, bug L), one spare. Run `01a1ac5d` parked in `needs_human` at B9, before T0. |
+| `ozar-dev` | session_016ti9w2xkWinTeHFRq3zgS3; plan for tomorrow recorded in its notes. Its login expired once today: if it fails, the maintainer runs `/login` there. |
 
-## Next steps, in order
+## Next steps, in order (tomorrow)
 
-1. Merge the working-branch PR when CI is green.
-2. Read `ozar-dev`'s report. If the restricted application credential cannot read its own Keystone record, the CS-3
-   check needs a policy-aware fallback before credentials can validate on Felcloud.
-3. **Felcloud acceptance campaign (E5-6)** through `ozar-dev`, with `lab/felcloud/scenarios.md` and the decisions in
-   team-log.md (cost approved, two test approvers with TOTP, the set-aside floating IP, the throw-away branch
-   `claude/ovlm-lab-broken-config`). Primary scenario, then the failure scenarios. Store the evidence, run the
-   before/after guard, then `destroy-lab.sh`.
-4. MVP report: what is lab validated on Felcloud and what is not; update README statuses.
-5. Security follow-ups SF-1..SF-6 (roadmap) before any production use.
+1. **Maintainer:** reset `approver-a` and `approver-b` himself (`~/.ovlm-lab/reset-approver.sh` on ozar-dev, own passwords, new TOTP). After that no agent holds approver secrets.
+2. `ozar-dev` redeploys OVLM at `aba9ec2` (keep DB and TOTP key), `make smoke`.
+3. **Maintainer:** rollback of run `01a1ac5d` in the UI with his own typed confirmation (deletes green, blue untouched).
+4. `ozar-dev`: profile v3 pinned to `aba9ec2` (`playbook_dir: ansible/playbooks`), readiness, new plan.
+5. **Maintainer in the UI:** G1, G2 (cutover; probe through the floating IP; about 40 s expected), G3 (approver-b).
+6. Evidence bundle, guard diff; then the failure scenarios (incl. throw-away branch `claude/ovlm-lab-broken-config`); then `destroy-lab.sh` (floating IPs stay allocated, unassociated).
+7. MVP report; README statuses ("lab validated on Felcloud" only where evidence exists).
+
+**Deviation to keep in the report:** G1 and G2 of run `01a1ac5d` were submitted by `ozar-dev` with approver secrets, not by the human in OVLM. Not valid evidence for the approval control.
 
 ## Rules in force (from the maintainer)
 
