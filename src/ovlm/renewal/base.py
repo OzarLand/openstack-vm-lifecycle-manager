@@ -15,6 +15,7 @@ import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar
+from uuid import UUID
 
 from sqlalchemy import Engine, text
 
@@ -124,10 +125,16 @@ class RStep(Step):
         confirmed fingerprint the plan pinned (IS-1): no SSH to blue ever uses a key whose confirmation is gone."""
         r = self.resolved(ctx)
         with ctx.read() as c:
-            problems = blue_host_key_problems(c, r, check_confirmer=False)
+            problems = blue_host_key_problems(c, r, run_id=ctx.run.id, check_confirmer=False)
         if problems:
             raise StepRefusal(ErrorClass.NEEDS_HUMAN, BLUE_HOST_KEY_UNTRUSTED, problems=problems)
         port = self.wc(ctx).get_port(r["blue"]["port_id"])
+        if port.device_id != r["blue"]["server_id"]:  # IS-11: the SSH address must be blue's own
+            raise StepRefusal(
+                ErrorClass.NEEDS_HUMAN,
+                BLUE_HOST_KEY_UNTRUSTED,
+                problems=["the plan's blue port is not attached to blue's server"],
+            )
         address = first_fixed_address(port.fixed_ips) or ""  # the scan's rule too (IS-3)
         return GuestRef(
             r["blue"]["server_id"],
@@ -200,7 +207,7 @@ BLUE_HOST_KEY_UNTRUSTED = "blue_host_key_untrusted"
 
 
 def blue_host_key_problems(
-    conn: Any, resolved: Mapping[str, Any], *, check_confirmer: bool = True
+    conn: Any, resolved: Mapping[str, Any], *, run_id: str, check_confirmer: bool = True
 ) -> list[str]:
     """Why blue's host key may not be trusted now, from the **live** ``managed_vm`` row (empty: trusted).
 
@@ -209,22 +216,52 @@ def blue_host_key_problems(
     a confirmation, the plan's fingerprint, and a confirmer who is an active human user (``app_user``: API tokens
     and agents are never confirmers). ``check_confirmer=False`` (every later SSH to blue, restore included) checks
     only that the confirmed key is still the plan's: disabling the confirmer mid-outage must not block a restore.
+
+    Review IS-11: ``resolved`` is written by the api, so the row it names is not trusted to be blue's. The row read
+    must be the run's plan's ``renewal_plan.managed_vm_id`` (read from the plan row, through the run, never from
+    ``resolved``), and its server, service and project connection must be the ones ``resolved`` acts on. Otherwise
+    the plan could pair the victim's server and port with another confirmed VM whose key the attacker controls.
     """
     blue = resolved.get("blue") or {}
     pinned = blue.get("host_key_fingerprint")
     if not pinned:
         return ["the plan pins no host-key fingerprint for blue"]
+    try:
+        vm_id = str(UUID(str(blue.get("managed_vm_id"))))
+    except ValueError:
+        return ["the plan names no valid managed VM for blue"]
     row = conn.execute(
         text(
-            "SELECT m.ssh_host_key_fingerprint AS fp, m.host_key_confirmed_at AS confirmed_at, "
+            "SELECT p.managed_vm_id AS plan_vm, p.service_id AS plan_service, m.id AS vm, "
+            "m.openstack_server_id AS server_id, m.service_id AS service_id, "
+            "o.project_connection_id AS observed_pc, s.project_connection_id AS service_pc, "
+            "m.ssh_host_key_fingerprint AS fp, m.host_key_confirmed_at AS confirmed_at, "
             "m.host_key_confirmed_by AS confirmed_by, u.state AS confirmer_state "
-            "FROM managed_vm m LEFT JOIN app_user u ON u.id = m.host_key_confirmed_by WHERE m.id = :v"
+            "FROM workflow_run r JOIN renewal_plan p ON p.id = r.renewal_plan_id "
+            "LEFT JOIN managed_vm m ON m.id = CAST(:v AS uuid) "
+            "LEFT JOIN observed_server o ON o.id = m.observed_server_id "
+            "LEFT JOIN service s ON s.id = m.service_id "
+            "LEFT JOIN app_user u ON u.id = m.host_key_confirmed_by WHERE r.id = :r"
         ),
-        {"v": blue.get("managed_vm_id")},
+        {"v": vm_id, "r": run_id},
     ).first()
     if row is None:
+        return ["the run has no renewal plan"]
+    if row.vm is None:
         return ["blue's managed VM record no longer exists"]
     problems: list[str] = []
+    service = resolved.get("service") or {}
+    if str(row.vm) != str(row.plan_vm):
+        problems.append("the managed VM the plan resolves for blue is not the plan's managed VM")
+    if row.server_id != blue.get("server_id"):
+        problems.append("the managed VM the plan resolves for blue is not blue's server")
+    if not (str(row.service_id) == str(row.plan_service) == str(service.get("id"))):
+        problems.append("the managed VM the plan resolves for blue belongs to another service")
+    pc = str(service.get("project_connection_id"))
+    if str(row.observed_pc) != pc or str(row.service_pc) != pc:
+        problems.append(
+            "the managed VM the plan resolves for blue is in another project connection"
+        )
     if row.confirmed_at is None:
         problems.append("blue's host key is not confirmed")
     if row.fp != pinned:
