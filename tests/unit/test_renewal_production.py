@@ -489,6 +489,12 @@ def test_bootstrap_user_data_holds_the_guest_key_and_a_fresh_host_key() -> None:
     assert user["name"] == "ovlm" and user["ssh_authorized_keys"] == [creds.guest_public_key]
     assert user["sudo"] == "ALL=(ALL) NOPASSWD:ALL" and user["lock_passwd"] is True
     assert doc["ssh_keys"]["ed25519_public"] == boot.public_key and doc["ssh_deletekeys"] is True
+    # lab bug M: cloud-init's schema rejects an empty ssh_genkeytypes ("[] is too short" -> "degraded done").
+    # Only the injected type may be listed, so nothing else is generated.
+    assert doc["ssh_genkeytypes"] == ["ed25519"]
+    assert not [k for k, v in doc.items() if isinstance(v, list) and not v], (
+        "no empty list in user-data"
+    )
     assert boot.key_id == parse_public_key(boot.public_key or "").fingerprint
     assert "PRIVATE" not in repr(boot)
     other = g.bootstrap("run", "injected")

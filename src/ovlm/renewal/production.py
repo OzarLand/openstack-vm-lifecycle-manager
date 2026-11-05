@@ -705,7 +705,10 @@ class RunnerGuestPort:
                 .decode()
             )
             key_id = parse_public_key(public).fingerprint
-            doc |= {"ssh_deletekeys": True, "ssh_genkeytypes": [],
+            # ssh_genkeytypes must not be empty: cloud-init's schema rejects [] and then reports "degraded done",
+            # which B9 refuses (lab bug M). cloud-init writes ssh_keys first and only generates a type whose key
+            # file is missing, so [ed25519] keeps exactly one host key: the injected one.
+            doc |= {"ssh_deletekeys": True, "ssh_genkeytypes": ["ed25519"],
                     "ssh_keys": {"ed25519_private": private, "ed25519_public": public}}  # fmt: skip
         user_data = "#cloud-config\n" + yaml.safe_dump(doc, sort_keys=False)
         return Bootstrap(user_data, public, key_id)
