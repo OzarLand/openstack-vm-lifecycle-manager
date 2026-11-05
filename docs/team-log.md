@@ -958,3 +958,18 @@ Still running on Felcloud: `ovlm-lab-host`, `ovlm-acc-blue`, `ovlm-acc-data`. No
   IS-3, IS-4 and the IS-8 note.
 - `ozar-dev` is redeploying OVLM at `0625d567`, keeping the database and the TOTP key, then reruns A1–A4. The
   maintainer confirms blue's fingerprint after comparing it out of band.
+
+## Lab blockers fixed; host-key work closed — 2026-11-05 15:00 UTC
+
+- **Lab A2–A4 passed on Felcloud:** profile `ovlm-acc` v1 pinned; negative control (unpinned ref refused, 422);
+  readiness **ready** (every blocker passes; drift, quota and attestations unknown); policy `ovlm-acc-lab` created by the
+  maintainer and bound to the service; deadline moved to the next window as designed.
+- **Two more MVP gaps found before the first plan, both fixed in
+  [#21](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/21):** the runner did not find roles in the
+  `ansible/playbooks` + `ansible/roles` layout, and the blocking lint refused the reference roles' 22 read-only probes
+  (the waiver API is not built). The lint now accepts `check_mode: false` only on tasks that are read-only by
+  construction; the reference workload passes with no waiver. One CI failure on the way: the container tests depended
+  on the reference roles needing a waiver. Fixed with a dedicated fixture task, not by weakening the test.
+- **Host-key trust:** IS-1, IS-3, IS-4, IS-8 (#21) and IS-11, IS-12 (#22) fixed, verified independently, merged.
+- `ozar-dev` redeploys OVLM at `d133b3e`, creates profile v2 (`playbook_dir: ansible/playbooks`), creates the plan and
+  asks the maintainer for G1.
