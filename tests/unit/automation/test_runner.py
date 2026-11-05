@@ -712,3 +712,17 @@ def test_roles_search_path_includes_the_sibling_roles_dir(tmp_path: Path) -> Non
         str(tmp_path / "playbooks/roles"),
         str(tmp_path / "roles"),
     ]
+
+
+def test_the_reference_result_writer_is_group_readable() -> None:
+    """Lab bug K: the worker reads result.json as another member of the run's group."""
+    import yaml
+
+    tasks = yaml.safe_load(
+        (Path(__file__).parents[3] / "ansible/roles/ovlm_result/tasks/write.yml").read_text()
+    )
+    modes = {
+        t["name"]: (t.get("ansible.builtin.file") or t.get("ansible.builtin.copy"))["mode"]
+        for t in tasks
+    }
+    assert set(modes.values()) == {"0770", "0640"}, modes

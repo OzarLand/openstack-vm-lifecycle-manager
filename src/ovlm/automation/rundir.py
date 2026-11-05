@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -249,12 +250,28 @@ class RunDir:
                 p.unlink()
         self._secrets.clear()
 
+    def _remove_as_run_user(self) -> None:
+        """Group-shared mode only: run ``rm -rf`` on the run directory's entries as the run user. Never raises."""
+        if self.run_user is None or self._owned or not self.path.is_dir():
+            return
+        with contextlib.suppress(OSError, ValueError, subprocess.SubprocessError):
+            entries = [str(e) for e in self.path.iterdir()]
+            if entries:
+                subprocess.run(  # noqa: S603 - fixed argv, paths inside the run directory
+                    ["/bin/rm", "-rf", "--", *entries],
+                    user=self.run_user.uid, group=self.run_user.gid, extra_groups=[],
+                    env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                    capture_output=True, timeout=120, check=False,
+                )  # fmt: skip
+
     def wipe(self) -> None:
         """Overwrite and delete secrets, then remove the directory. Idempotent; never raises."""
         if self._wiped:
             return
         self.wipe_secrets()
-        # The run user may have created files the worker cannot delete when modes are strict; try anyway.
+        # The run user (ansible) creates private directories of its own (~/.ansible, its local temp, artefacts):
+        # the worker cannot enter or empty them. Let the run user remove what it can first (lab bug K).
+        self._remove_as_run_user()
         shutil.rmtree(self.path, ignore_errors=True)
         for extra in self._extra_dirs:
             shutil.rmtree(extra, ignore_errors=True)

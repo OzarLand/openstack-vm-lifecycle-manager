@@ -8,7 +8,8 @@
   ansible.builtin.file:
     path: "{{ ovlm_result_path | dirname }}"
     state: directory
-    mode: "0700"
+    # Group-shared: the OVLM worker reads the result as another user of the run's group (lab bug K).
+    mode: "0770"
   delegate_to: localhost
   become: false
   check_mode: false
@@ -17,7 +18,7 @@
 - name: Write ovlm.result/1 (controller artifact)
   ansible.builtin.copy:
     dest: "{{ ovlm_result_path }}"
-    mode: "0600"
+    mode: "0640"
     content: "{{ ovlm_result_doc | to_nice_json }}\n"
   vars:
     _failed: "{{ ovlm_failed | default(false) | bool }}"

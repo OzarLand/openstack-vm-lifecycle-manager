@@ -133,3 +133,44 @@ def test_unknown_user_is_a_configuration_error() -> None:
     with pytest.raises(AutomationError, match="does not exist"):
         RunUser.lookup("no-such-user-ovlm")
     assert pwd.getpwnam("root").pw_uid == 0
+
+
+def test_wipe_lets_the_run_user_remove_its_private_dirs_first(
+    run_user: RunUser, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lab bug K: in group-shared mode ansible leaves 0700 directories the worker cannot empty. The wipe now runs
+    ``rm -rf`` as the run user first (real user switch; needs root)."""
+    os.chmod(tmp_path, 0o755)  # noqa: S103
+    rd = RunDir.create(tmp_path / "r", "wf", "s", 1, run_user=run_user)
+    monkeypatch.setattr(rd, "_owned", False)  # what a non-root worker gets
+    private = rd.path / "home" / ".ansible" / "tmp"
+    private.mkdir(parents=True)
+    (private / "x").write_text("x")
+    for p in (private, private.parent, private.parent.parent):
+        os.chown(p, run_user.uid, run_user.gid)
+        os.chmod(p, 0o700)
+    os.chown(private / "x", run_user.uid, run_user.gid)
+    calls: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spy(argv: list[str], **kw: Any) -> Any:
+        calls.append(argv)
+        assert kw["user"] == run_user.uid and kw["group"] == run_user.gid
+        return real_run(argv, **kw)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    rd._remove_as_run_user()  # noqa: SLF001
+    assert calls and calls[0][:3] == ["/bin/rm", "-rf", "--"]
+    assert not (rd.path / "home").exists()
+    rd.wipe()
+    assert not rd.path.exists()
+
+
+def test_owned_mode_needs_no_user_switch_for_the_wipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rd = RunDir(tmp_path, RunUser("ovlm-ansible", 996, 995), owned=True)
+    called: list[object] = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: called.append(a))
+    rd._remove_as_run_user()  # noqa: SLF001
+    assert not called
