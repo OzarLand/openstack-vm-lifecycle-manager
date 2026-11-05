@@ -925,3 +925,23 @@ Still running on Felcloud: `ovlm-lab-host`, `ovlm-acc-blue`, `ovlm-acc-data`. No
   - the lab may stay up overnight.
 - `ozar-dev` is preparing the tunnel and the maintainer's checklist. After the upload it registers the connection, the
   VM, the profile and the policy, then runs the primary scenario and stops at each gate.
+
+## Lab blocked at A1: no inventory sync through project connections — 2026-11-05 10:30 UTC
+
+- The maintainer created the admin and the two test approvers with TOTP, uploaded the credentials (validated), and
+  `ozar-dev` registered the cloud and the project connection. The set-aside floating IP is on blue.
+- **A1 stopped:** OVLM can store a project's read credential but nothing uses it to sync the inventory. There is no
+  `POST /projects/{id}/syncs` and no worker sync job, and the CLI files data under a made-up connection id. With an
+  empty inventory, services, managed VMs and profiles cannot be created. This is a real MVP gap that the CI suites did
+  not catch: the integration tests filled the inventory directly.
+- Also found: G (the dev Compose stack has no TOTP key, so enrolment returns 503) and H (an enrolment link cannot be
+  reissued). `ozar-dev` worked around both on the lab host. There are also several doc and code mismatches in
+  `scenarios.md` and `api-design.md`.
+- **Fix started (Opus):** https://claude.ai/code/session_016ti9w3Er9Mgf7MQ6jQvjdE
+  (`claude/ovlm-inventory-sync-connections`): a sync workflow using the stored read credential, the API route, a
+  periodic sync, the host-key path at registration, G, H, and the docs.
+- Lab decisions by Agent 1, within the maintainer's earlier choices:
+  - the service slug starts with `ovlm-`, so green stays `ovlm-*`;
+  - the lab policy sets `require_distinct_approvers=false` (approver-a decides G1 and G2, approver-b G3; self-approval
+    stays off);
+  - an unpinned ref refused at creation (422) is the A3 negative-control result.
