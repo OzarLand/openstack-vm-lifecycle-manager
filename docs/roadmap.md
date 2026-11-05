@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Owner | Agent 1 — Product Manager / Engineering Manager (single source of truth for the backlog) |
-| Last updated | 2026-11-04 |
+| Last updated | 2026-11-05 |
 | Authorization | The maintainer said on 2026-11-04: "you must continue until the end of the MVP". Phases 2–6 are authorized. |
 
 Status vocabulary: **Designed → Implemented → Unit tested → Integration tested → Lab validated → Production
@@ -84,6 +84,8 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | E5-3 | Automation runner (ansible-runner subprocess, per-run dir, `ovlm.result/1`, redaction, restricted artefact store, lint) | 6 | Sonnet | E1-7, E5-1 | Integration tested (PR #7) | Integration test against a local container |
 | E5-4 | `bluegreen_fip_v1` steps B1–X1, W1–W10, S1–S10 per renewal-workflow.md | 4 | Opus | E5-1..3 | Integration tested, reviewed, fixes verified (PR #8) | Unit tests with the fake per step and per failure row; reviews by 7 and 8 |
 | E5-5 | Gates G1–G3, approval evidence re-validation, typed confirmation | 4 | Opus | E3-2, E5-4 | Integration tested, reviewed (PR #8) | Security tests |
+| E5-7 | Encrypted credential store and project connections (envelope AES-GCM, worker-only unsealing, Keystone application credentials) | 4 | Opus | E5-2 | Integration tested; reviewed (CS-1..CS-10), fixes verified; CS-6 open | Binding and role tests; review by 8 |
+| E5-8 | Worker egress proxy (`HTTPS_PROXY`/`NO_PROXY` for OpenStack and the automation clone, guests always direct) | 6 | Sonnet | E5-3 | Unit tested; lab check pending | Unit tests; lab run behind the Felcloud proxy |
 | E5-6 | Acceptance scenario + failure scenarios on Felcloud (ADR-0007) | 9 + ozar-dev | Sonnet | E5-4 | To do | Evidence stored; status "lab validated" |
 
 ### E6 — Operator UI (HTMX)
@@ -94,6 +96,17 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | E6-2 | Inventory list + VM details (observed vs desired) | 5 | Sonnet | E2 | Integration tested (PR #4) | |
 | E6-3 | Readiness view; renewal plan; approvals with hash inputs and diff | 5 | Sonnet | E4, E5-5 | Integration tested (PR #8) | |
 | E6-4 | Run timeline with step evidence, available actions, audit view | 5 | Sonnet | E5 | Integration tested (PR #8) | |
+
+### Security follow-ups (before production, not blocking the MVP lab)
+
+| ID | Task | Source | Status |
+|---|---|---|---|
+| SF-1 | Worker container: no root init holding `DAC_READ_SEARCH`; document `docker compose exec -u ovlm` | CS-6 (Low) | To do; verify with `make smoke` |
+| SF-2 | Bind `guest_access` (jump host) into the `ssh_key` binding when the jump host is wired into the runner | N-1 (Low) | To do |
+| SF-3 | Refuse an application credential when Keystone omits the `unrestricted` field | N-2 (Low) | To do |
+| SF-4 | Remove or exclude rejected `ovlm-env-v1` credentials so `ovlm kek status` can reach 0 after rotation | N-3 (Low) | To do |
+| SF-5 | Signal a direct endpoint rewrite immediately (trigger) or document the up-to-24 h delay | N-4 (Info) | To do |
+| SF-6 | `/readyz` reports an api/worker KEK mismatch | CS-10 (Low, control done) | Optional |
 
 ### Later (V1, not in the MVP)
 

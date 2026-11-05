@@ -887,3 +887,21 @@ A kit fix round has started (Sonnet): https://claude.ai/code/session_016ti9w2cf2
 (`claude/ovlm-lab-kit-fixes`), including `HTTPS_PROXY`/`NO_PROXY` support in the worker.
 
 Still running on Felcloud: `ovlm-lab-host`, `ovlm-acc-blue`, `ovlm-acc-data`. No floating IP touched.
+
+## Credential store fixed and verified; lab restarted — 2026-11-05 08:10 UTC
+
+- **Fix round (Opus, $6.50):** CS-1..CS-10 fixed except CS-6. Each secret is bound (AEAD associated data) to its
+  credential row, connection, kind, cloud and an endpoint digest; the KEK id is in the wrap AAD. The worker checks the
+  binding against the live rows before it decrypts. An endpoint change needs step-up and invalidates the credentials.
+  The six CS-1/CS-2 regression tests failed before the fix (two delivered the secret to a fake attacker endpoint).
+- **Lab kit fixes (Sonnet, $1.85):** the nine bugs from the first run, plus worker proxy support. Agent 1 added the
+  proxy pass-through to the automation git clone, which the lab needs (the network has no direct Internet).
+- **Independent verification (Opus, fresh session):**
+  [verification-credential-store-fixes.md](reviews/verification-credential-store-fixes.md). CS-1 and CS-2 closed,
+  backed by 17 adversarial probes as the database roles, all refused. Fit to merge. Three new Low items and one Info
+  (N-1..N-4) are in the roadmap as SF-1..SF-6, with CS-6.
+- **Agent 1 checks on the merged branch:** lint clean; unit 1205 passed (root) and 1204 (non-root); integration 453
+  passed. One integration test failed once in the first run and passed on the rerun: flaky, not identified yet.
+- **`ozar-dev`** was asked to reset the workload, redeploy OVLM at `49621cc` behind the proxy, redo step 5, create
+  the application credentials (and check that a restricted one can read its own Keystone record, needed by CS-3), then
+  run the guard diff and stop before any renewal.

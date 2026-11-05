@@ -3,29 +3,30 @@
 | Field | Value |
 |---|---|
 | Owner | Agent 1 — PM / Engineering Manager |
-| State | Active. Work resumed 2026-11-04; waiting on the maintainer's approval in the credential-store session. |
+| State | Active. Credential store fixed and verified; Felcloud lab being prepared by `ozar-dev`. |
 
 This page is everything needed to resume, by this session or a new one. The story so far is in
 [team-log.md](team-log.md), and the backlog in [roadmap.md](roadmap.md).
 
-## Where the code is (updated 2026-11-05 00:35 UTC)
+## Where the code is (updated 2026-11-05 08:10 UTC)
 
 | Place | State |
 |---|---|
-| `main` | PRs #1–#9 merged, CI green: design and reviews, foundation, engine, auth/TOTP/audit, inventory, profiles/policies, readiness, OpenStack read and write clients, RBAC, Ansible runner, **renewal strategy `bluegreen_fip_v1` (reviewed, fixes verified)**, operator UI incl. renewal pages, worker image, Felcloud lab kit, CONTRIBUTING, install guide, templates. Good first issues #10–#17 are open. |
-| `claude/ovlm-credential-store` | **The only blocker for the MVP.** The encrypted credential store and project connections (Opus). The session is waiting on a **permission prompt** that only the maintainer can approve: https://claude.ai/code/session_016ti9vzvtr3eKwtKW8Zsf9r |
+| `main` | PRs #1–#9 merged: everything up to the renewal strategy, UI, lab kit and contributor docs. |
+| Working branch `claude/openstack-vm-lifecycle-manager-9nf9cc` | Encrypted credential store + review fixes (verified, fit to merge), lab kit fixes, worker egress proxy. A PR to `main` is open or about to be. |
+| `ozar-dev` (session_016ti9w2xkWinTeHFRq3zgS3) | Resetting the workload and redeploying OVLM at `49621cc` behind the proxy; stops before any renewal and reports. |
 
 ## Next steps, in order
 
-1. **The maintainer approves the prompt** in the credential-store session. It finishes and pushes.
-2. Agent 1 integrates it, runs all tests (also as non-root), and gets an independent security review (fresh Fable,
-   focused). Then a fix round if needed, a short Opus verification, a PR, and a merge when CI is green.
-3. **Felcloud acceptance campaign (E5-6), through `ozar-dev`**, with `lab/felcloud/` and the decisions in team-log.md
-   (cost approved, two test approvers with TOTP, the set-aside floating IP, the throw-away branch
-   `claude/ovlm-lab-broken-config`). Run the primary scenario, then the failure scenarios. Store the evidence. Take a
-   before/after snapshot proving no non-`ovlm-*` resource changed. Then `destroy-lab.sh`.
-   - `ozar-dev` runs in acceptEdits mode, so Bash prompts may need the maintainer.
+1. Merge the working-branch PR when CI is green.
+2. Read `ozar-dev`'s report. If the restricted application credential cannot read its own Keystone record, the CS-3
+   check needs a policy-aware fallback before credentials can validate on Felcloud.
+3. **Felcloud acceptance campaign (E5-6)** through `ozar-dev`, with `lab/felcloud/scenarios.md` and the decisions in
+   team-log.md (cost approved, two test approvers with TOTP, the set-aside floating IP, the throw-away branch
+   `claude/ovlm-lab-broken-config`). Primary scenario, then the failure scenarios. Store the evidence, run the
+   before/after guard, then `destroy-lab.sh`.
 4. MVP report: what is lab validated on Felcloud and what is not; update README statuses.
+5. Security follow-ups SF-1..SF-6 (roadmap) before any production use.
 
 ## Rules in force (from the maintainer)
 

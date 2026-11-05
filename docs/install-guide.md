@@ -12,12 +12,10 @@
 > **OVLM is pre-alpha and not lab validated.** The renewal workflow has not run end to end on a real cloud.
 > Do not point it at a production cloud or a project with workloads you cannot lose.
 >
-> 🛑 **The encrypted credential store is still being finished.** The design
-> ([security-model.md §5](security-model.md)) seals OpenStack credentials in the database. That code is not
-> written yet (`src/ovlm/secrets` is a stub). Today:
-> - the web UI and the API **cannot store an OpenStack credential**;
-> - a renewal is **rejected at admission** ("no credential store"), by design, so no run starts without one;
-> - the only way to use a read credential is the `ovlm inventory sync` command with a `clouds.yaml` file (§7).
+> 🟡 **The encrypted credential store is implemented and reviewed, not lab validated.** OpenStack application
+> credentials are sealed by the api and can only be unsealed by the worker
+> ([credential-store.md](credential-store.md)). Each secret is bound to the cloud endpoint it was uploaded for; changing
+> that endpoint needs a step-up and invalidates the credentials. It has not yet been used against a real cloud.
 >
 > This guide shows what works today and where the gaps are. It does not describe a finished product.
 
@@ -258,8 +256,8 @@ that mode as developer-only for now.
 
 | Gap | Status |
 |---|---|
-| Encrypted credential store (seal in the api, unseal in the worker) | 🛑 Being finished. Renewals are rejected without it |
-| Registering a cloud project from the UI or API | ⬜ Depends on the credential store |
+| Encrypted credential store (seal in the api, unseal in the worker) | 🟡 Implemented, reviewed, fixes verified; not lab validated. Worker container hardening (CS-6) still open |
+| Registering a cloud project from the UI or API | 🟡 Implemented with the credential store; not lab validated |
 | Scheduled inventory sync by the worker | ⬜ Depends on project connections |
 | End-to-end renewal on a real cloud | ⬜ Not started. Not lab validated |
 | TLS proxy example configuration | ⬜ Not provided. Bring your own |
