@@ -92,6 +92,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: make up
       - run: make smoke
+      - name: smoke again on the same containers (it must be repeatable)
+        run: make smoke
       - name: Compose logs on failure
         if: failure()
         run: docker compose ps -a && docker compose logs --no-color

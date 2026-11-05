@@ -905,3 +905,23 @@ Still running on Felcloud: `ovlm-lab-host`, `ovlm-acc-blue`, `ovlm-acc-data`. No
 - **`ozar-dev`** was asked to reset the workload, redeploy OVLM at `49621cc` behind the proxy, redo step 5, create
   the application credentials (and check that a restricted one can read its own Keystone record, needed by CS-3), then
   run the guard diff and stop before any renewal.
+
+## PR #18 merged; second Felcloud run; human steps decided — 2026-11-05 08:35 UTC
+
+- [OzarLand/openstack-vm-lifecycle-manager#18](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/18)
+  merged with CI green, including the Compose smoke test: credential store, review fixes, lab kit fixes and the
+  worker egress proxy are in `main`.
+- **Second Felcloud run by `ozar-dev`** at `49621cc` (same code as `main`): the workload reset, the redeploy behind the
+  proxy and `make smoke` passed. Step 5 passed with `failed=0` in every phase (bootstrap, configure, start_service,
+  healthcheck). Two restricted application credentials were created. The guard diff found 0 violations, and the
+  set-aside floating IP is untouched.
+  - **Felcloud fact:** a restricted application credential can `GET` its own Keystone record (HTTP 200), so the CS-3
+    expiry check works there. It can also list the user's other application credentials (metadata only).
+  - Four kit issues were found. Fixed in `c7e2538`: `ssh -n`, no client-side Docker proxy (only the worker gets it),
+    and the guest Python interpreter. The credential upload is documented as a human step.
+- **Maintainer decisions (popup):**
+  - the maintainer does the human steps in `ozar-dev`'s conversation, through an SSH tunnel to the UI: the admin, the
+    two test approvers with TOTP, the credential upload, and the G1–G3 approvals;
+  - the lab may stay up overnight.
+- `ozar-dev` is preparing the tunnel and the maintainer's checklist. After the upload it registers the connection, the
+  VM, the profile and the policy, then runs the primary scenario and stops at each gate.
