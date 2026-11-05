@@ -41,7 +41,7 @@ lock-check:  ## Fail if the lock files are stale
 	$(UV) export --frozen --no-dev --group build --group automation --no-emit-project --format requirements-txt --no-header -o /tmp/requirements-worker.lock.check >/dev/null
 	diff -u requirements-worker.lock /tmp/requirements-worker.lock.check
 
-secrets:  ## Generate random development secrets and the worker key pair (credential store KEK) in ./secrets (git-ignored)
+secrets:  ## Generate random development secrets, the TOTP key (api only) and the worker key pair (KEK) in ./secrets (git-ignored)
 	@umask 077; mkdir -p secrets; \
 	for s in $(SECRETS); do \
 	  [ -f secrets/$$s ] || { head -c 24 /dev/urandom | base64 | tr -d '/+=\n' > secrets/$$s; echo "created secrets/$$s"; }; \
@@ -55,7 +55,12 @@ secrets:  ## Generate random development secrets and the worker key pair (creden
 	if [ ! -f secrets/worker_kek.pub ]; then \
 	  openssl pkey -in secrets/worker_kek -pubout -out secrets/worker_kek.pub && echo "created secrets/worker_kek.pub"; \
 	fi; \
-	chmod 0444 secrets/worker_kek.pub
+	chmod 0444 secrets/worker_kek.pub; \
+	if [ ! -f secrets/totp_key ]; then \
+	  openssl rand -base64 32 | tr '+/' '-_' > secrets/totp_key && \
+	  echo "created secrets/totp_key (Fernet key encrypting TOTP secrets at rest: mounted into the api only)"; \
+	fi; \
+	chmod 0444 secrets/totp_key
 
 build:  ## Build both images: ovlm:dev (api, migrate) and ovlm-worker:dev (worker: ansible + collections)
 	docker build --target runtime -t ovlm:dev .
@@ -90,11 +95,14 @@ smoke:  ## Assertions on a running stack (`make up` first); used by CI
 	echo "== api image: no ansible, ssh or git"; \
 	docker compose exec -T api python - < tests/smoke/api_checks.py; \
 	echo "== secret isolation: api/worker never see the owner secret"; \
-	test "$$(docker compose exec -T api ls /run/secrets | tr '\n' ' ')" = "db_api_password worker_kek_pub "; \
+	test "$$(docker compose exec -T api ls /run/secrets | tr '\n' ' ')" = "db_api_password totp_key worker_kek_pub "; \
 	test "$$(docker compose exec -T worker ls /run/secrets | tr '\n' ' ')" = "db_worker_password worker_kek "; \
 	echo "== the api has no KEK private key and cannot load one"; \
 	! docker compose exec -T api test -e /run/ovlm-kek/worker_kek; \
 	docker compose exec -T api python - < tests/smoke/api_kek_checks.py; \
+	echo "== TOTP enrolment has its key (no 503): the api loads the vault exactly as the enrolment route does"; \
+	docker compose exec -T api python - < tests/smoke/api_totp_checks.py; \
+	! docker compose exec -T worker test -e /run/secrets/totp_key; \
 	echo "== read-only rootfs"; \
 	! docker compose exec -T api touch /app/x 2>/dev/null; \
 	echo "== each service connects as its own DB role"; \
