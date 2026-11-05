@@ -22,6 +22,7 @@ from ovlm.automation.types import AutomationError
 from ovlm.openstack import errors as oe
 from ovlm.openstack.retry import classify as os_classify
 from ovlm.openstack.write import GuardedWriteClient
+from ovlm.registry.ssh_target import first_fixed_address
 from ovlm.renewal.config import RenewalConfig
 from ovlm.renewal.ledger import DbOwnershipRegistry, green_row, plan_resolved
 from ovlm.renewal.ports import CloudPort, GuestPort, GuestRef
@@ -121,7 +122,7 @@ class RStep(Step):
     def blue_ref(self, ctx: StepContext) -> GuestRef:
         r = self.resolved(ctx)
         port = self.wc(ctx).get_port(r["blue"]["port_id"])
-        address = port.fixed_ips[0][0] if port.fixed_ips else ""
+        address = first_fixed_address(port.fixed_ips) or ""  # the scan's rule too (IS-3)
         return GuestRef(
             r["blue"]["server_id"],
             address,

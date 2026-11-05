@@ -208,3 +208,98 @@ def test_a_plan_needs_a_confirmed_host_key(env: Env, confirmed: bool) -> None:
         c.execute(text("SELECT 1"))
     # unconfirmed: refused for the host key; confirmed: it gets past it (and stops at the missing profile)
     assert exc.value.code == ("no-profile" if confirmed else "host-key-unconfirmed")
+
+
+# --- review IS-3: one address rule for the scan and the renewal ---------------------------------------------------
+
+
+def _second_fip_port(env: Env, ip: str = "10.0.0.9") -> tuple[str, str]:
+    """Blue gets a second port with its own floating IP. Returns ``(port, fip)``."""
+    net = env.fake.get_port(env.ids["port"]).network_id
+    ext = env.fake.get_floating_ip(env.ids["fip"]).floating_network_id
+    assert net is not None and ext is not None
+    port = env.fake.add_port(net, device_id=env.ids["blue"], ip=ip)
+    fip = env.fake.add_floating_ip(ext, address="192.0.2.20")
+    env.fake.update_floating_ip(fip, port)
+    env.sync(kind="full")
+    return port, fip
+
+
+def _profile(env: Env, service_id: str, floating_ip_id: str) -> None:
+    import json
+
+    profile, version = str(uuid4()), str(uuid4())
+    env.auth.sql(
+        "INSERT INTO profile (id, service_id, name, latest_version) VALUES (CAST(:i AS uuid), CAST(:s AS uuid), "
+        "'p', 1)", i=profile, s=service_id,
+    )  # fmt: skip
+    env.auth.sql(
+        "INSERT INTO profile_version (id, profile_id, number, spec, spec_hash) VALUES (CAST(:i AS uuid), "
+        "CAST(:p AS uuid), 1, CAST(:s AS jsonb), :h)",
+        i=version, p=profile, s=json.dumps({"cutover": {"floating_ip_id": floating_ip_id}}), h="0" * 64,
+    )  # fmt: skip
+
+
+def _scan_evidence(env: Env, run_id: str) -> Any:
+    [row] = env.auth.sql(
+        "SELECT evidence, error FROM workflow_step WHERE run_id = CAST(:r AS uuid)", r=run_id
+    )
+    return row
+
+
+def test_is3_the_scan_targets_the_service_fip_port_as_the_renewal_does(env: Env) -> None:
+    port2, fip2 = _second_fip_port(env)
+    # the profile's service FIP is on the port that sorts last by id: before IS-3 the scan took the first one
+    service_port, service_fip, address = max(
+        (env.ids["port"], env.ids["fip"], "10.0.0.5"), (port2, fip2, "10.0.0.9")
+    )
+    guest = Guest()
+    key = _key()
+    guest.keys[address] = [key]
+    svc = env.make_service()
+    _profile(env, svc["id"], service_fip)
+    r = env.client.post(
+        f"/api/v1/services/{svc['id']}/managed-vms",
+        json={"observed_server_id": env.observed_id(env.ids["blue"])},
+    )
+    assert r.status_code == 201, r.text
+    vm = r.json()
+    _drive(env, guest)
+    assert guest.scanned == [(address, 22)]
+    ev = _scan_evidence(env, vm["host_key_scan_run"]["id"]).evidence
+    assert (ev["port_id"], ev["floating_ip_id"], ev["address"], ev["target_source"]) == (
+        service_port, service_fip, address, "profile",
+    )  # fmt: skip
+    [audit] = env.auth.sql(
+        "SELECT after FROM audit_event WHERE action = 'managed_vm.host_key_scan' ORDER BY id DESC LIMIT 1"
+    )
+    assert audit.after["port_id"] == service_port and audit.after["address"] == address
+
+
+def test_is3_without_a_profile_several_fip_ports_are_ambiguous(env: Env) -> None:
+    _second_fip_port(env)
+    guest = Guest()
+    guest.keys["10.0.0.5"] = guest.keys["10.0.0.9"] = [_key()]
+    vm = _register(env)
+    _drive(env, guest)
+    assert guest.scanned == []  # nothing was contacted
+    err = _scan_evidence(env, vm["host_key_scan_run"]["id"]).error
+    assert "several ports of this VM carry a floating IP" in err["reason"]
+
+
+def test_is3_the_scan_uses_fixed_ips_0_not_the_first_ipv4(env: Env) -> None:
+    from dataclasses import replace
+
+    pid = env.ids["port"]
+    env.fake._ports[pid] = replace(  # noqa: SLF001 - a dual-stack port, IPv6 listed first
+        env.fake._ports[pid],  # noqa: SLF001
+        fixed_ips=(("2001:db8::5", "sub-6"), ("10.0.0.5", "sub-1")),
+    )
+    env.sync(kind="full")
+    guest = Guest()
+    guest.keys["2001:db8::5"] = [_key()]
+    vm = _register(env)
+    _drive(env, guest)
+    assert guest.scanned == [("2001:db8::5", 22)]  # what the renewal's blue_ref uses: fixed_ips[0]
+    ev = _scan_evidence(env, vm["host_key_scan_run"]["id"]).evidence
+    assert ev["port_id"] == pid and ev["target_source"] == "only_fip_port"
