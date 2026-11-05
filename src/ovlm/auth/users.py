@@ -146,6 +146,42 @@ def issue_link(
     return link_id, f"{link_id.hex}.{secret}"
 
 
+def reissue_enrolment_link(
+    db: Session, settings: Settings, *, username: str, required_role: str = "admin"
+) -> tuple[UUID, UUID, str, int]:
+    """A new enrolment link for a user who **never finished enrolment** (``pending_enrolment``: no password was
+    ever set) and holds ``required_role``. Every earlier unused link of the user is revoked in the same transaction,
+    so only the new one works, once. Returns ``(user id, link id, raw link token, revoked link count)``.
+
+    Refused (:class:`UserError`) for an unknown user, an enrolled or disabled one (a credential reset is the admin
+    flow for those), or one without the role."""
+    row = db.execute(
+        text("SELECT id, state FROM app_user WHERE username = :u FOR UPDATE"),
+        {"u": normalise_username(username)},
+    ).one_or_none()
+    if row is None:
+        raise UserError("no such user")
+    if row.state != "pending_enrolment":
+        raise UserError(
+            "this user already finished enrolment (or is disabled): a new link is only reissued for a user who "
+            "never set a password; an admin resets an enrolled user's credentials instead"
+        )
+    roles = db.execute(
+        text("SELECT 1 FROM role_binding WHERE user_id = :u AND role = :r AND revoked_at IS NULL"),
+        {"u": row.id, "r": required_role},
+    ).first()
+    if roles is None:
+        raise UserError(f"this user holds no {required_role} role binding")
+    revoked = db.execute(
+        text(
+            "SELECT count(*) FROM enrolment_link WHERE user_id = :u AND used_at IS NULL AND revoked_at IS NULL"
+        ),
+        {"u": row.id},
+    ).scalar_one()
+    link_id, raw = issue_link(db, settings, user_id=row.id, purpose="enrol", created_by=None)
+    return row.id, link_id, raw, int(revoked)
+
+
 def _split(raw: str) -> tuple[UUID, str] | None:
     head, sep, secret = raw.partition(".")
     if not sep or len(head) != 32 or not secret:

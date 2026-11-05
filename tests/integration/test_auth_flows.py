@@ -71,6 +71,54 @@ def test_cli_bootstrap_prints_a_one_time_link_and_has_no_password_option(
     assert c.get("/api/v1/users").status_code == 200
 
 
+def test_cli_reissues_a_link_only_for_an_admin_who_never_enrolled(
+    env: Env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Lab blocker H: the first link expired or was lost. ``--reissue`` revokes it and prints a single-use new one;
+    refused for an unknown user, an enrolled one, and a pending user without the admin role. Audited."""
+    s = env.settings
+    for k, v in {
+        "OVLM_CONFIG_FILE": "/nonexistent.toml", "OVLM_DB__HOST": s.db.host, "OVLM_DB__PORT": str(s.db.port),
+        "OVLM_DB__NAME": s.db.name, "OVLM_DB__SSLMODE": "disable",
+        "OVLM_DB__PASSWORD_FILE": str(s.db.password_file), "OVLM_EXTERNAL_URL": ORIGIN,
+    }.items():  # fmt: skip
+        monkeypatch.setenv(k, v)
+    reissue = ["create", "--username", "root", "--enrol-link", "--reissue"]
+    assert admin_main(reissue) == 2  # no such user yet
+    assert "no such user" in capsys.readouterr().err
+    assert admin_main(["create", "--username", "root", "--enrol-link"]) == 0
+    old = capsys.readouterr().out.strip().removeprefix(ORIGIN + "/enrol/")
+
+    assert admin_main(reissue) == 0
+    new = capsys.readouterr().out.strip().removeprefix(ORIGIN + "/enrol/")
+    assert new != old
+    c = env.client()
+    assert c.get(f"/enrol/{old}").status_code != 200  # the old link no longer works
+    [row] = env.sql(
+        "SELECT action, principal_type, auth_method, after FROM audit_event "
+        "WHERE action = 'user.enrolment_link.reissue'"
+    )
+    assert (row.principal_type, row.auth_method) == ("system", "cli") and row.after[
+        "revoked_links"
+    ] == 1
+    assert (
+        env.sql("SELECT count(*) FROM enrolment_link WHERE used_at IS NULL AND revoked_at IS NULL")[
+            0
+        ][0]
+        == 1
+    )
+
+    r = env.enrol(c, new)  # single use: works once
+    assert r.status_code == 303
+    assert env.client().get(f"/enrol/{new}").status_code != 200
+    assert admin_main(reissue) == 2  # enrolled now: an admin resets credentials instead
+    assert "already finished enrolment" in capsys.readouterr().err
+
+    env.create_user("viewer01", [("viewer", "global")])  # pending, but not an admin
+    assert admin_main(["create", "--username", "viewer01", "--enrol-link", "--reissue"]) == 2
+    assert "no admin role" in capsys.readouterr().err
+
+
 # --- enrolment links (admin never sets passwords) ------------------------------------------------------------
 
 
