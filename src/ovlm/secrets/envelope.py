@@ -1,21 +1,28 @@
 """Envelope encryption, sealing side (security-model.md 5.1). Safe to import in the api: it holds **no private key**
 and has no function that decrypts.
 
-Format (``ALG`` = ``ovlm-env-v1``)
+Format (``ALG`` = ``ovlm-env-v2``)
 ---------------------------------
 
 * **Data key (DEK)**: 32 random bytes per secret. The secret is encrypted with AES-256-GCM under the DEK, 12-byte
-  random nonce, AAD = ``data_aad(context)`` = ``b"ovlm-data-v1|" + context.aad()`` where ``context.aad()`` is
-  ``table|row_id|column``. The ciphertext therefore cannot be moved to another row or column.
+  random nonce, AAD = ``data_aad(context)`` = ``b"ovlm-data-v2|" + context.aad()`` where ``context.aad()`` is
+  ``table|row_id|column`` followed by the context's **binding** (``|b1|b2...``). For a credential the binding is the
+  project connection id, the kind, the cloud id and the SHA-256 of the endpoint the secret may be sent to
+  (:mod:`ovlm.secrets.store`), so the ciphertext cannot be moved to another row, column, connection, cloud or
+  endpoint (review CS-1, CS-2).
 * **Key wrapping**: the DEK is sealed to the worker's X25519 public key (the KEK pair): an ephemeral X25519 key pair,
   ECDH with the worker public key, HKDF-SHA256 (salt = ephemeral public || worker public, info = ``wrap_info``) to a
   32-byte wrapping key, then AES-256-GCM of the DEK with AAD = ``wrap_aad(context, kek_id)`` =
-  ``b"ovlm-wrap-v1|" + table|row_id|column|kek_id``. ``wrapped_dek`` = ephemeral public (32) || nonce (12) ||
+  ``b"ovlm-wrap-v2|" + context.aad() + b"|" + kek_id``. ``wrapped_dek`` = ephemeral public (32) || nonce (12) ||
   ciphertext+tag (48).
 
 Why the ``kek_id`` sits in the wrap AAD and not in the data AAD: security-model.md 5.1 lists ``kek_id`` in the AAD and
 also says that KEK rotation re-wraps the DEKs while "secrets themselves [stay] unchanged". Both hold only if the
-``kek_id`` binds the wrapping, so it is there; the data AAD binds table, row and column (reported reading).
+``kek_id`` binds the wrapping, so it is there; the DEK opens only for the full context *and* that key id, and the
+data AAD binds the full context again (reported reading).
+
+``ovlm-env-v1`` (no binding beyond the row) is no longer produced and is refused by the worker: such a secret must be
+uploaded again (migration ``connections_0002`` rejects the credentials that still use it).
 
 ``kek_id`` = first 16 hex characters of SHA-256 over the raw 32-byte public key: it names the key pair and is not
 secret. The api only ever needs the public key (:func:`load_public_key`).
@@ -34,7 +41,9 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-ALG = "ovlm-env-v1"
+ALG = "ovlm-env-v2"
+#: The previous format (AAD bound to the row only, review CS-1/CS-2): refused when unsealing.
+LEGACY_ALGS = frozenset({"ovlm-env-v1"})
 DEK_BYTES = 32
 NONCE_BYTES = 12
 PUB_BYTES = 32
@@ -51,28 +60,32 @@ class EnvelopeError(ValueError):
 
 @dataclass(frozen=True)
 class SealContext:
-    """Where the sealed value belongs: ``table|row_id|column`` (security-model.md 5.1 AAD)."""
+    """Where the sealed value belongs and what it is bound to: ``table|row_id|column|binding...`` (security-model.md
+    5.1 AAD). ``binding`` is a tuple of plain values (ids, kinds, digests) a sealed value only authenticates with."""
 
     table: str
     row_id: str
     column: str
+    binding: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not (_IDENT.match(self.table) and _IDENT.match(self.column)):
             raise EnvelopeError("seal context: table and column must be identifiers")
         if not self.row_id or "|" in self.row_id or len(self.row_id) > 64:
             raise EnvelopeError("seal context: invalid row id")
+        if any(not b or "|" in b or len(b) > 128 for b in self.binding):
+            raise EnvelopeError("seal context: invalid binding value")
 
     def aad(self) -> bytes:
-        return f"{self.table}|{self.row_id}|{self.column}".encode()
+        return "|".join((self.table, self.row_id, self.column, *self.binding)).encode()
 
 
 def data_aad(context: SealContext) -> bytes:
-    return b"ovlm-data-v1|" + context.aad()
+    return b"ovlm-data-v2|" + context.aad()
 
 
 def wrap_aad(context: SealContext, kek_id: str) -> bytes:
-    return b"ovlm-wrap-v1|" + context.aad() + b"|" + kek_id.encode()
+    return b"ovlm-wrap-v2|" + context.aad() + b"|" + kek_id.encode()
 
 
 def wrap_info(kek_id: str) -> bytes:

@@ -19,6 +19,7 @@ from ovlm.connections.service import check_upload, normalise_auth_url, normalise
 from ovlm.connections.validation import (
     KeystoneRefusedError,
     TokenFacts,
+    TransientValidationError,
     evaluate_token,
     keystone_token_check,
 )
@@ -34,7 +35,9 @@ LATER = NOW + timedelta(days=90)
 
 def facts(**kw: Any) -> TokenFacts:
     base: dict[str, Any] = {"project_id": PROJECT, "roles": ("reader",), "user_id": "u1",
-                            "app_credential_id": APP, "restricted": True, "token_expires_at": None}  # fmt: skip
+                            "app_credential_id": APP, "restricted": True, "token_expires_at": None,
+                            "record_status": 200, "record_expires_at": LATER, "record_unrestricted": False,
+                            "record_roles": ()}  # fmt: skip
     return TokenFacts(**{**base, **kw})
 
 
@@ -64,6 +67,35 @@ def test_wrong_scope_roles_id_or_unrestricted_are_refused(
     assert not ok and reason in why
 
 
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"record_expires_at": None}, "never expires"),
+        ({"record_expires_at": NOW + timedelta(days=181)}, "more than 180 days"),
+        ({"record_expires_at": LATER + timedelta(hours=1)}, "later than the uploaded"),
+        ({"record_expires_at": NOW - timedelta(seconds=1)}, "expired (Keystone)"),
+        ({"record_status": 403}, "HTTP 403"),
+        ({"record_status": None}, "cannot be verified"),
+        ({"record_unrestricted": True}, "unrestricted"),
+        ({"record_roles": ("reader", "admin")}, "other roles"),
+    ],
+)
+def test_cs3_keystone_record_decides_the_expiry_not_the_form(
+    change: dict[str, Any], reason: str
+) -> None:
+    """Review CS-3: the uploaded expires_at is checked against Keystone's own record of the application credential;
+    a never-expiring one, or one later than 180 days or than the uploaded date, is refused whatever the form said."""
+    ok, why = evaluate_token("os_read", facts(**change), CONN, APP, LATER, NOW)
+    assert not ok and reason in why
+
+
+def test_cs3_earlier_keystone_expiry_is_accepted_and_reported() -> None:
+    ok, why = evaluate_token(
+        "os_read", facts(record_expires_at=NOW + timedelta(days=10)), CONN, APP, LATER, NOW
+    )
+    assert ok and "(Keystone)" in why
+
+
 def test_expired_credential_is_refused() -> None:
     assert evaluate_token("os_read", facts(), CONN, APP, NOW - timedelta(seconds=1), NOW) == (
         False, "the credential is expired",
@@ -74,10 +106,14 @@ def test_expired_credential_is_refused() -> None:
 
 
 class CannedKeystone(BaseAdapter):
-    def __init__(self, status: int = 201, roles: tuple[str, ...] = ("reader",)) -> None:
+    def __init__(
+        self, status: int = 201, roles: tuple[str, ...] = ("reader",), record_status: int = 200,
+        record_expires: str | None = "2026-12-01T00:00:00.000000",
+    ) -> None:  # fmt: skip
         super().__init__()
         self.sent: list[tuple[str, str, bytes]] = []
         self.status, self.roles = status, roles
+        self.record_status, self.record_expires = record_status, record_expires
 
     def send(self, request: requests.PreparedRequest, *a: Any, **kw: Any) -> requests.Response:
         body = request.body if isinstance(request.body, bytes) else str(request.body or "").encode()
@@ -86,6 +122,13 @@ class CannedKeystone(BaseAdapter):
         resp.status_code = self.status
         resp.headers["Content-Type"] = "application/json"
         resp.url, resp.request = str(request.url), request
+        if request.method == "GET":  # the application credential's own record
+            resp.status_code = self.record_status
+            rec = {"application_credential": {
+                "id": APP, "name": "ovlm", "expires_at": self.record_expires, "unrestricted": False,
+                "project_id": PROJECT, "roles": [{"id": r, "name": r} for r in self.roles]}}  # fmt: skip
+            resp._content = json.dumps(rec if self.record_status == 200 else {"error": {}}).encode()
+            return resp
         if self.status == 201:
             resp.headers["X-Subject-Token"] = "tok"
             payload: Any = {"token": {
@@ -105,14 +148,39 @@ class CannedKeystone(BaseAdapter):
         pass
 
 
-def test_keystone_check_sends_exactly_one_token_request() -> None:
+def test_keystone_check_sends_one_token_request_and_reads_the_record() -> None:
     ks = CannedKeystone()
     got = keystone_token_check("https://keystone.test/v3", APP, "s3cret-canary", True, adapter=ks)
-    assert [(m, urlparse(u).path) for m, u, _ in ks.sent] == [("POST", "/v3/auth/tokens")]
-    assert b"s3cret-canary" in ks.sent[0][2]  # the secret goes to Keystone only
+    assert [(m, urlparse(u).path) for m, u, _ in ks.sent] == [
+        ("POST", "/v3/auth/tokens"), ("GET", f"/v3/users/svc-user/application_credentials/{APP}"),
+    ]  # fmt: skip
+    assert (
+        b"s3cret-canary" in ks.sent[0][2]
+    )  # the secret goes to Keystone only, in the token request only
+    assert b"s3cret-canary" not in ks.sent[1][2]
     assert got.project_id == PROJECT and got.roles == ("reader",) and got.user_id == "svc-user"
     assert got.app_credential_id == APP and got.restricted is True
+    assert got.record_read and got.record_expires_at == datetime(2026, 12, 1, tzinfo=UTC)
+    assert got.record_unrestricted is False and got.record_roles == ("reader",)
     assert evaluate_token("os_read", got, CONN, APP, LATER, NOW)[0]
+
+
+def test_cs3_never_expiring_or_unreadable_record_from_keystone() -> None:
+    never = keystone_token_check(
+        "https://keystone.test/v3", APP, "s", True, adapter=CannedKeystone(record_expires=None)
+    )
+    assert never.record_read and never.record_expires_at is None
+    assert "never expires" in evaluate_token("os_read", never, CONN, APP, LATER, NOW)[1]
+    hidden = keystone_token_check(
+        "https://keystone.test/v3", APP, "s", True, adapter=CannedKeystone(record_status=403)
+    )
+    assert (
+        not hidden.record_read and not evaluate_token("os_read", hidden, CONN, APP, LATER, NOW)[0]
+    )
+    with pytest.raises(TransientValidationError):
+        keystone_token_check(
+            "https://keystone.test/v3", APP, "s", True, adapter=CannedKeystone(record_status=503)
+        )
 
 
 def test_keystone_refusal_is_a_verdict_and_carries_no_secret() -> None:
@@ -192,3 +260,11 @@ def test_admission_gets_the_store_reason_and_steps_stop_for_a_human() -> None:
         port.write_credential_expires_at("pc")
     with pytest.raises(AutomationError, match="expired at X"):
         port._creds("pc")  # noqa: SLF001
+
+
+def test_cs8_typed_confirmation_never_matches_an_empty_expected_name() -> None:
+    from ovlm.connections.api import _confirm
+
+    with pytest.raises(DomainError):
+        _confirm("", "")
+    _confirm(" Lab ", "lab")

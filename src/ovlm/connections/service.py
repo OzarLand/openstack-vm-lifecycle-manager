@@ -21,8 +21,14 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ovlm.registry.errors import DomainError, conflict, not_found
-from ovlm.secrets.envelope import EnvelopeError, PublicKek, SealContext
-from ovlm.secrets.store import CREDENTIAL_CONTEXT_TABLE, insert_sealed
+from ovlm.secrets.envelope import EnvelopeError, PublicKek
+from ovlm.secrets.store import (
+    Destination,
+    announced_keys,
+    credential_context,
+    endpoint_digest,
+    insert_sealed,
+)
 from ovlm.workflow.ids import new_id as _new_id
 
 
@@ -202,6 +208,27 @@ def update_cloud(
     return before, after
 
 
+ENDPOINT_FIELDS = ("auth_url", "region", "interface", "ca_bundle_ref")
+
+
+def endpoint_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    """Whether a cloud change moved where its credentials' secrets would be sent (review CS-1)."""
+    return any(before.get(f) != after.get(f) for f in ENDPOINT_FIELDS)
+
+
+def invalidate_cloud_credentials(db: Session, cloud_id: UUID) -> list[UUID]:
+    """Ask the worker to re-validate every pending or active credential of the cloud's connections (their
+    validation shows ``pending`` again). The worker then finds them bound to the old endpoint and marks them invalid
+    without decrypting anything: a secret is never sent to an endpoint other than the one it was validated for.
+    The api cannot change a credential's state itself (it cannot vouch either way)."""
+    rows = db.execute(
+        text("UPDATE credential_ref SET validation_requested_at = now(), updated_at = now() "
+             "WHERE state IN ('pending', 'active') AND project_connection_id IN "
+             "(SELECT id FROM project_connection WHERE cloud_id = :c) RETURNING id"), {"c": cloud_id},
+    ).scalars().all()  # fmt: skip
+    return sorted(rows, key=str)
+
+
 def delete_cloud(db: Session, cloud_id: UUID) -> dict[str, Any]:
     before = get_cloud(db, cloud_id)
     if before is None:
@@ -253,6 +280,11 @@ def get_connection(db: Session, pc_id: UUID) -> dict[str, Any] | None:
         {"i": pc_id},
     ).one_or_none()
     return _pc_out(row) if row else None
+
+
+def guest_access_of(value: dict[str, Any] | None) -> dict[str, Any]:
+    """The normalised form of a ``guest_access`` value (to tell whether a PATCH changes it)."""
+    return _guest_access(value)
 
 
 def _guest_access(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -377,8 +409,15 @@ def delete_connection(db: Session, pc_id: UUID) -> dict[str, Any]:
 
 _CRED_COLS = (
     "r.id, r.project_connection_id, r.kind, r.service_id, r.app_credential_id, r.ssh_public_key, r.expires_at, "
+    "r.verified_expires_at, r.cloud_id, r.endpoint_sha256, "
     "r.state, r.superseded_by, r.validation_requested_at, r.last_validated_at, r.validation_result, r.rotated_at, "
-    "r.cloud_deletion_pending, r.created_by, r.created_at, s.kek_id, s.created_at AS sealed_at, s.rewrapped_at"
+    "r.cloud_deletion_pending, r.created_by, r.created_at, s.kek_id, s.created_at AS sealed_at, s.rewrapped_at, "
+    "p.cloud_id AS live_cloud_id, c.auth_url AS live_auth_url, c.region AS live_region, "
+    "c.interface AS live_interface, c.ca_bundle_sha256 AS live_ca_sha256"
+)
+_CRED_FROM = (
+    "FROM credential_ref r JOIN sealed_secret s ON s.id = r.secret_id "
+    "JOIN project_connection p ON p.id = r.project_connection_id JOIN cloud c ON c.id = p.cloud_id"
 )
 
 
@@ -386,6 +425,10 @@ def credential_out(row: Any, now: datetime | None = None) -> dict[str, Any]:
     """Metadata only. The secret is write-only: ``secret_set`` says it exists, never what it is."""
     d = dict(row._mapping)
     now = now or datetime.now(UTC)
+    live = endpoint_digest(d.pop("live_auth_url"), d.pop("live_region"), d.pop("live_interface"),
+                           d.pop("live_ca_sha256"))  # fmt: skip
+    #: False when the cloud endpoint changed since upload: the worker refuses the credential (review CS-1).
+    d["endpoint_matches"] = d["endpoint_sha256"] == live and d.pop("live_cloud_id") == d["cloud_id"]
     vr = d.pop("validation_result") or {}
     d["validation"] = {
         "state": "pending" if d["last_validated_at"] is None or (
@@ -400,7 +443,9 @@ def credential_out(row: Any, now: datetime | None = None) -> dict[str, Any]:
     d["ssh_public_key_fingerprint"] = (
         ssh_fingerprint(d["ssh_public_key"]) if d.get("ssh_public_key") else None
     )
-    exp = d.get("expires_at")
+    dates = [x for x in (d.get("expires_at"), d.get("verified_expires_at")) if x is not None]
+    exp = min(dates) if dates else None
+    d["effective_expires_at"] = exp
     d["expires_in_days"] = (exp - now).days if exp else None
     d["expired"] = bool(exp and exp <= now)
     d["expiry_warning"] = next(
@@ -415,7 +460,7 @@ def list_credentials(
 ) -> list[dict[str, Any]]:
     where = "" if include_history else "AND r.state IN ('pending', 'active')"
     rows = db.execute(
-        text(f"SELECT {_CRED_COLS} FROM credential_ref r JOIN sealed_secret s ON s.id = r.secret_id "  # noqa: S608
+        text(f"SELECT {_CRED_COLS} {_CRED_FROM} "  # noqa: S608
              f"WHERE r.project_connection_id = :p {where} ORDER BY r.created_at DESC, r.id"), {"p": pc_id},
     ).all()  # fmt: skip
     return [credential_out(r) for r in rows]
@@ -423,8 +468,7 @@ def list_credentials(
 
 def get_credential(db: Session, cred_id: UUID) -> dict[str, Any] | None:
     row = db.execute(
-        text(f"SELECT {_CRED_COLS} FROM credential_ref r JOIN sealed_secret s ON s.id = r.secret_id "  # noqa: S608
-             "WHERE r.id = :i"), {"i": cred_id},
+        text(f"SELECT {_CRED_COLS} {_CRED_FROM} WHERE r.id = :i"), {"i": cred_id},  # noqa: S608
     ).one_or_none()  # fmt: skip
     return credential_out(row) if row else None
 
@@ -509,10 +553,26 @@ def upload_credential(
     created_by: UUID | None,
 ) -> dict[str, Any]:
     """Seal ``secret`` to the worker key and register a **pending** credential; the worker validates it out of band
-    and switches it in (security-model.md 4.4). ``secret`` is wiped here, whatever happens."""
+    and switches it in (security-model.md 4.4). ``secret`` is wiped here, whatever happens.
+
+    The secret is bound (AAD and immutable columns) to the connection, the kind, the cloud and the digest of the
+    cloud's endpoint as it is **now** (review CS-1, CS-2); the cloud row is share-locked until commit so the endpoint
+    cannot change between reading and binding."""
     try:
-        if get_connection(db, pc_id) is None:
+        if kek.kek_id not in announced_keys(db):
+            raise DomainError(503, "credential-store-key-unknown", "Worker key not announced",
+                              f"The worker has not announced the key {kek.kek_id} the api seals to: a secret sealed "
+                              "to it could not be opened (rotate the worker's key first, then the api's).",
+                              "Check kek.public_key_file against the worker's key (ovlm kek status).")  # fmt: skip
+        pc = get_connection(db, pc_id)
+        if pc is None:
             raise not_found("connection-not-found", "Project connection")
+        db.execute(text("SELECT 1 FROM cloud WHERE id = :c FOR SHARE"), {"c": pc["cloud_id"]})
+        pc = get_connection(db, pc_id)
+        assert pc is not None  # noqa: S101 - the cloud is locked and the connection cannot be deleted with it
+        ca_sha = pc["ca_bundle_ref"].removeprefix("sha256:") if pc["ca_bundle_ref"] else None
+        destination = Destination(str(pc_id), upload.kind, str(pc["cloud_id"]),
+                                  endpoint_digest(pc["auth_url"], pc["region"], pc["interface"], ca_sha))  # fmt: skip
         pending = db.execute(
             text("SELECT 1 FROM credential_ref WHERE project_connection_id = :p AND kind = :k AND state = 'pending'"),
             {"p": pc_id, "k": upload.kind},
@@ -536,17 +596,19 @@ def upload_credential(
             )
         cred_id, secret_id = new_id(), new_id()
         try:
-            sealed = kek.seal(secret, SealContext(CREDENTIAL_CONTEXT_TABLE, str(cred_id), "secret"))
+            sealed = kek.seal(secret, credential_context(cred_id, destination))
         except EnvelopeError as exc:
             raise _invalid(str(exc)) from None
         insert_sealed(db, secret_id, sealed)
         db.execute(
             text(
                 "INSERT INTO credential_ref (id, project_connection_id, kind, secret_id, app_credential_id, "
-                "ssh_public_key, expires_at, created_by) VALUES (:i, :p, :k, :s, :a, :pk, :e, :by)"
+                "ssh_public_key, expires_at, cloud_id, endpoint_sha256, created_by) "
+                "VALUES (:i, :p, :k, :s, :a, :pk, :e, :c, :d, :by)"
             ),
             {"i": cred_id, "p": pc_id, "k": upload.kind, "s": secret_id, "a": upload.app_credential_id,
-             "pk": public_line, "e": upload.expires_at, "by": created_by},
+             "pk": public_line, "e": upload.expires_at, "c": destination.cloud_id,
+             "d": destination.endpoint_sha256, "by": created_by},
         )  # fmt: skip
     finally:
         secret[:] = b"\0" * len(secret)

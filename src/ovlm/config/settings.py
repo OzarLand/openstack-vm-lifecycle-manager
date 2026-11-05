@@ -201,6 +201,9 @@ class KekSettings(_Section):
     public_key_file: Path | None = None
     #: Worker: seconds between runs of the credential validation job (and of the re-wrap job during a rotation).
     validation_interval: float = Field(default=60.0, ge=5)
+    #: Worker: seconds after which an active credential is validated again against Keystone (default daily; review
+    #: CS-4: a credential revoked or re-roled in Keystone is noticed without waiting for a run to fail).
+    revalidation_interval: float = Field(default=86400.0, ge=300)
 
     @field_validator("previous_private_key_files", mode="before")
     @classmethod

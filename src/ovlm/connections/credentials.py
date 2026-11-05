@@ -2,8 +2,13 @@
 them (security-model.md 5.1 "Read path"). Never imported by the api (import-linter contract).
 
 * Only an ``active`` credential whose last validation succeeded is used; an expired one is refused with a reason
-  (security-model.md 4.4: an expired write credential blocks new runs). Nothing is cached: a rotation or a failed
+  (security-model.md 4.4: an expired write credential blocks new runs). The expiry used is the earlier of the
+  uploaded one and the one Keystone reported at validation (review CS-3). Nothing is cached: a rotation or a failed
   re-validation takes effect at the next call.
+* **Destination binding (review CS-1, CS-2).** A secret is decrypted only for the endpoint it was uploaded and
+  validated for: the AAD context is built from the **live** connection and cloud rows (:meth:`ConnectionInfo.
+  destination`); a credential whose recorded destination differs is refused *before* anything is decrypted, and one
+  whose row was rebound does not authenticate.
 * The plaintext lives in a ``bytearray`` that is wiped after the client object is built. What a client library needs
   as ``str`` (the application credential secret for keystoneauth) or ``bytes`` (the guest key for the runner) is an
   immutable copy that Python cannot wipe; it is released with the client object at the end of the step attempt.
@@ -23,12 +28,17 @@ from uuid import UUID
 from sqlalchemy import Connection, Engine, text
 
 from ovlm.config.secrets import register_secret
-from ovlm.secrets.keyring import Keyring, KeyringError, wipe
-from ovlm.secrets.store import credential_context, load_sealed
+from ovlm.secrets.keyring import Keyring, KeyringError, UnknownKekError, wipe
+from ovlm.secrets.store import Destination, credential_context, endpoint_digest, load_sealed
 
 
 class CredentialUnavailableError(ValueError):
     """No usable credential; the message says why and is safe to show (no secret material)."""
+
+
+class CredentialKeyMissingError(CredentialUnavailableError):
+    """The secret is wrapped to a key this worker does not hold: an operational state (rotation order), not a
+    verdict on the credential (review CS-5)."""
 
 
 @dataclass(frozen=True)
@@ -42,6 +52,15 @@ class ConnectionInfo:
     openstack_project_id: str
     ca_bundle_pem: str | None = field(default=None, repr=False)
     ca_bundle_sha256: str | None = None
+    cloud_id: str = ""
+
+    @property
+    def endpoint_sha256(self) -> str:
+        return endpoint_digest(self.auth_url, self.region, self.interface, self.ca_bundle_sha256)
+
+    def destination(self, kind: str) -> Destination:
+        """Where a secret of ``kind`` of this connection may go **now** (the AAD binding of :mod:`ovlm.secrets.store`)."""
+        return Destination(self.id, kind, self.cloud_id, self.endpoint_sha256)
 
 
 @dataclass(frozen=True)
@@ -60,7 +79,7 @@ class AppCredential:
 def load_connection(c: Connection, pc_id: str) -> ConnectionInfo | None:
     row = c.execute(
         text(
-            "SELECT p.id, p.name, p.enabled, p.openstack_project_id, c.auth_url, c.region, c.interface, "
+            "SELECT p.id, p.name, p.enabled, p.openstack_project_id, p.cloud_id, c.auth_url, c.region, c.interface, "
             "c.ca_bundle_pem, c.ca_bundle_sha256 FROM project_connection p JOIN cloud c ON c.id = p.cloud_id "
             "WHERE p.id = CAST(:p AS uuid)"
         ),
@@ -70,7 +89,7 @@ def load_connection(c: Connection, pc_id: str) -> ConnectionInfo | None:
         return None
     return ConnectionInfo(
         str(row.id), row.name, bool(row.enabled), row.auth_url, row.region, row.interface,
-        row.openstack_project_id, row.ca_bundle_pem, row.ca_bundle_sha256,
+        row.openstack_project_id, row.ca_bundle_pem, row.ca_bundle_sha256, str(row.cloud_id),
     )  # fmt: skip
 
 
@@ -105,18 +124,45 @@ _KIND_LABEL = {
 def _active_row(c: Connection, pc_id: str, kind: str) -> Any:
     return c.execute(
         text(
-            "SELECT id, secret_id, app_credential_id, ssh_public_key, expires_at, validation_result, "
-            "last_validated_at, validation_requested_at FROM credential_ref "
+            "SELECT id, kind, secret_id, app_credential_id, ssh_public_key, expires_at, verified_expires_at, "
+            "cloud_id, endpoint_sha256, validation_result, last_validated_at, validation_requested_at "
+            "FROM credential_ref "
             "WHERE project_connection_id = CAST(:p AS uuid) AND kind = :k AND state = 'active'"
         ),
         {"p": pc_id, "k": kind},
     ).one_or_none()
 
 
-def usable_row(c: Connection, pc_id: str, kind: str, now: datetime | None = None) -> Any:
-    """The active, validated, unexpired credential row of ``kind``, or :class:`CredentialUnavailableError`."""
+def effective_expiry(row: Any) -> datetime | None:
+    """The earlier of the uploaded expiry and the one Keystone reported at validation (review CS-3)."""
+    dates = [
+        d for d in (row.expires_at, getattr(row, "verified_expires_at", None)) if d is not None
+    ]
+    return min(dates) if dates else None
+
+
+def binding_mismatch(row: Any, info: ConnectionInfo) -> str | None:
+    """Why the credential row is not bound to the connection's **current** destination, or ``None``. Checked before
+    anything is decrypted (the AAD would refuse it anyway)."""
+    if str(row.cloud_id) != info.cloud_id:
+        return (
+            "the project connection was moved to another cloud since this credential was uploaded"
+        )
+    if row.endpoint_sha256 != info.endpoint_sha256:
+        return (
+            "the cloud endpoint (auth_url, region, interface or CA bundle) changed since this credential was "
+            "uploaded: a secret is only ever sent to the endpoint it was validated for, so the cloud admin's "
+            "credential must be uploaded again for the new endpoint"
+        )
+    return None
+
+
+def usable_row(c: Connection, info: ConnectionInfo, kind: str, now: datetime | None = None) -> Any:
+    """The active, validated, unexpired credential row of ``kind`` bound to the connection's current endpoint, or
+    :class:`CredentialUnavailableError`."""
     now = now or datetime.now(UTC)
     label = _KIND_LABEL[kind]
+    pc_id = info.id
     row = _active_row(c, pc_id, kind)
     if row is None:
         raise CredentialUnavailableError(
@@ -128,9 +174,13 @@ def usable_row(c: Connection, pc_id: str, kind: str, now: datetime | None = None
         raise CredentialUnavailableError(
             f"the {label} of this project failed its last validation: {str(result.get('reason') or 'unknown')[:200]}"
         )
-    if row.expires_at is not None and row.expires_at <= now:
+    mismatch = binding_mismatch(row, info)
+    if mismatch is not None:
+        raise CredentialUnavailableError(f"the {label} of this project is refused: {mismatch}")
+    expiry = effective_expiry(row)
+    if expiry is not None and expiry <= now:
         raise CredentialUnavailableError(
-            f"the {label} of this project expired at {row.expires_at.isoformat()}: the cloud admin creates a new "
+            f"the {label} of this project expired at {expiry.isoformat()}: the cloud admin creates a new "
             "application credential and an admin uploads it"
         )
     return row
@@ -148,20 +198,32 @@ def _connection(c: Connection, pc_id: str) -> ConnectionInfo:
 class CredentialStore:
     """The worker's view of the store: the engine (role ``ovlm_worker``) and the key ring."""
 
-    def __init__(self, engine: Engine, keyring: Keyring, ca_dir: Path) -> None:
+    def __init__(
+        self, engine: Engine, keyring: Keyring, ca_dir: Path, *, revalidate_after: float = 86400.0
+    ) -> None:
         self.engine = engine
         self.keyring = keyring
         self.ca_dir = ca_dir
+        #: Seconds after which an active credential is validated again (review CS-4, ``kek.revalidation_interval``).
+        self.revalidate_after = revalidate_after
 
     def __repr__(self) -> str:
         return f"CredentialStore({self.keyring!r})"
 
-    def unseal_for(self, c: Connection, cred_id: Any, secret_id: Any) -> bytearray:
+    def unseal_for(
+        self, c: Connection, cred_id: Any, secret_id: Any, destination: Destination
+    ) -> bytearray:
+        """Decrypt for ``destination``, which the caller builds from the **live** connection
+        (:meth:`ConnectionInfo.destination`)."""
         sealed = load_sealed(c, secret_id)
         if sealed is None:
             raise CredentialUnavailableError("the credential's sealed secret is missing")
         try:
-            return self.keyring.unseal(sealed, credential_context(cred_id))
+            return self.keyring.unseal(sealed, credential_context(cred_id, destination))
+        except UnknownKekError as exc:
+            raise CredentialKeyMissingError(
+                f"the credential cannot be decrypted by this worker yet: {exc} (rotate the worker's key first)"
+            ) from None
         except KeyringError as exc:
             raise CredentialUnavailableError(
                 f"the credential cannot be decrypted by this worker: {exc}"
@@ -175,8 +237,8 @@ class CredentialStore:
         """The active ``os_read``/``os_write`` credential of a project, decrypted now."""
         with self.engine.connect() as c:
             info = _connection(c, pc_id)
-            row = usable_row(c, pc_id, kind)
-            buf = self.unseal_for(c, row.id, row.secret_id)
+            row = usable_row(c, info, kind)
+            buf = self.unseal_for(c, row.id, row.secret_id, info.destination(kind))
         try:
             secret = buf.decode("ascii")
         except UnicodeDecodeError:
@@ -186,17 +248,19 @@ class CredentialStore:
         finally:
             wipe(buf)
         register_secret(secret)  # redaction backstop (security-model.md 5.2)
+        expiry = effective_expiry(row)
+        assert expiry is not None  # noqa: S101 - os_* rows always carry one (CHECK constraint)
         return AppCredential(
-            info, str(row.id), kind, row.app_credential_id, secret, row.expires_at,
+            info, str(row.id), kind, row.app_credential_id, secret, expiry,
             (row.validation_result or {}).get("user_id"),
         )  # fmt: skip
 
     def guest_key(self, pc_id: str) -> tuple[bytes, str]:
         """``(private OpenSSH key, public line)`` of the project's guest SSH key, decrypted now."""
         with self.engine.connect() as c:
-            _connection(c, pc_id)
-            row = usable_row(c, pc_id, "ssh_key")
-            buf = self.unseal_for(c, row.id, row.secret_id)
+            info = _connection(c, pc_id)
+            row = usable_row(c, info, "ssh_key")
+            buf = self.unseal_for(c, row.id, row.secret_id, info.destination("ssh_key"))
         try:
             return bytes(buf), row.ssh_public_key
         finally:
@@ -205,9 +269,9 @@ class CredentialStore:
     def write_metadata(self, pc_id: str) -> tuple[datetime | None, str | None]:
         """``(expires_at, user_id)`` of the active write credential, without decrypting anything."""
         with self.engine.connect() as c:
-            _connection(c, pc_id)
-            row = usable_row(c, pc_id, "os_write")
-        return row.expires_at, (row.validation_result or {}).get("user_id")
+            info = _connection(c, pc_id)
+            row = usable_row(c, info, "os_write")
+        return effective_expiry(row), (row.validation_result or {}).get("user_id")
 
     def ca_path(self, info: ConnectionInfo) -> Path | None:
         return ca_bundle_path(info, self.ca_dir)

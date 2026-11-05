@@ -894,7 +894,24 @@ def credential_store(settings: Any, engine: Engine) -> Any:
     )
     log.info("credential store key ring loaded", extra={"kek_id": keyring.current_kek_id,
                                                         "kek_ids": sorted(keyring.kek_ids)})  # fmt: skip
-    return CredentialStore(engine, keyring, settings.automation.run_root / ".ca")
+    store = CredentialStore(engine, keyring, settings.automation.run_root / ".ca",
+                            revalidate_after=settings.kek.revalidation_interval)  # fmt: skip
+    _announce(store)
+    return store
+
+
+def _announce(store: Any) -> None:
+    """Publish the held key ids at start (the validation job repeats it every period): the api seals only to a key
+    the worker announced ("worker first" KEK rotation, review CS-5). A database not reachable yet is not fatal."""
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from ovlm.secrets.store import announce_keys
+
+    try:
+        with store.engine.begin() as c:
+            announce_keys(c, store.keyring.current_kek_id, store.keyring.kek_ids)
+    except SQLAlchemyError as exc:
+        log.warning("credential store keys not announced yet", extra={"error": type(exc).__name__})
 
 
 def credential_source(

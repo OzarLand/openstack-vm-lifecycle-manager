@@ -9,7 +9,16 @@ from ovlm import audit
 
 audit.register_entity(
     "cloud",
-    ["name", "auth_url", "region", "interface", "ca_bundle_ref", "version"],
+    [
+        "name",
+        "auth_url",
+        "region",
+        "interface",
+        "ca_bundle_ref",
+        "version",
+        "stepup_id",
+        "invalidated_count",
+    ],
 )
 audit.register_entity(
     "project_connection",
@@ -21,6 +30,7 @@ audit.register_entity(
         "guest_access",
         "enabled",
         "version",
+        "stepup_id",
     ],
 )
 audit.register_entity(
@@ -28,8 +38,8 @@ audit.register_entity(
     [
         "kind", "project_connection_id", "app_cred_id", "expires_at", "state", "kek_id",
         "ssh_public_key_fingerprint", "validation_ok", "validation_reason", "superseded_by",
-        "cloud_deletion_pending", "stepup_id",
+        "cloud_deletion_pending", "stepup_id", "cloud_id", "endpoint_sha256", "verified_expires_at",
     ],
     secret_fields=["secret"],
 )  # fmt: skip
-audit.register_entity("kek", ["kek_id", "rewrapped"])
+audit.register_entity("kek", ["kek_id", "rewrapped", "orphans_deleted"])

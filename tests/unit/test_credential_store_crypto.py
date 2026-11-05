@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from ovlm.config import Settings
+from ovlm.secrets.cli import kek_status_code
 from ovlm.secrets.envelope import (
     ALG,
     WRAPPED_DEK_BYTES,
@@ -33,11 +34,14 @@ from ovlm.secrets.keyring import (
     public_pem_of,
     wipe,
 )
-from ovlm.secrets.store import credential_context
+from ovlm.secrets.store import Destination, credential_context, endpoint_digest
 
 ROOT = Path(__file__).parents[2]
 CANARY = b"ovlm-canary-3f9a1c7e-app-credential-secret"
-CTX = credential_context("0190f1e2-0000-7000-8000-000000000001")
+PC, CLOUD = "0190f1e2-0000-7000-8000-0000000000aa", "0190f1e2-0000-7000-8000-0000000000bb"
+ENDPOINT = endpoint_digest("https://keystone.test/v3", "R1", "public", None)
+DEST = Destination(PC, "os_write", CLOUD, ENDPOINT)
+CTX = credential_context("0190f1e2-0000-7000-8000-000000000001", DEST)
 
 
 def _ring() -> Keyring:
@@ -66,7 +70,7 @@ def test_each_secret_has_its_own_data_key() -> None:
 @pytest.mark.parametrize(
     "other",
     [
-        credential_context("0190f1e2-0000-7000-8000-000000000002"),  # another row
+        credential_context("0190f1e2-0000-7000-8000-000000000002", DEST),  # another row
         SealContext(
             "credential_ref", "0190f1e2-0000-7000-8000-000000000001", "other"
         ),  # another column
@@ -80,6 +84,84 @@ def test_ciphertext_cannot_move_to_another_row_column_or_table(other: SealContex
     sealed = ring.public().seal(CANARY, CTX)
     with pytest.raises(KeyringError, match="does not authenticate"):
         ring.unseal(sealed, other)
+
+
+_ROW = "0190f1e2-0000-7000-8000-000000000001"
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        Destination(
+            "0190f1e2-0000-7000-8000-0000000000cc", "os_write", CLOUD, ENDPOINT
+        ),  # rebound (CS-2)
+        Destination(PC, "os_read", CLOUD, ENDPOINT),  # another kind
+        Destination(
+            PC, "os_write", "0190f1e2-0000-7000-8000-0000000000dd", ENDPOINT
+        ),  # moved to another cloud
+        Destination(
+            PC,
+            "os_write",
+            CLOUD,
+            endpoint_digest("https://attacker.example/v3", "R1", "public", None),
+        ),
+        Destination(
+            PC, "os_write", CLOUD, endpoint_digest("https://keystone.test/v3", "R2", "public", None)
+        ),
+        Destination(
+            PC,
+            "os_write",
+            CLOUD,
+            endpoint_digest("https://keystone.test/v3", "R1", "internal", None),
+        ),
+        Destination(
+            PC,
+            "os_write",
+            CLOUD,
+            endpoint_digest("https://keystone.test/v3", "R1", "public", "a" * 64),
+        ),
+    ],
+)
+def test_cs1_cs2_ciphertext_is_bound_to_connection_kind_cloud_and_endpoint(
+    other: Destination,
+) -> None:
+    """Review CS-1/CS-2: the same row id under another connection, kind, cloud or endpoint does not decrypt (neither
+    the wrapped data key nor the data), so the worker can never be made to send the secret elsewhere."""
+    ring = _ring()
+    sealed = ring.public().seal(CANARY, CTX)
+    with pytest.raises(KeyringError, match="does not authenticate"):
+        ring.unseal(sealed, credential_context(_ROW, other))
+    with pytest.raises(KeyringError):
+        ring.rewrap(sealed, credential_context(_ROW, other))
+    assert bytes(ring.unseal(sealed, credential_context(_ROW, DEST))) == CANARY
+
+
+def test_endpoint_digest_is_canonical_and_covers_every_endpoint_field() -> None:
+    base = ("https://keystone.test/v3", "R1", "public", None)
+    assert endpoint_digest(*base) == ENDPOINT and len(ENDPOINT) == 64
+    variants = {endpoint_digest(*v) for v in [
+        base, ("https://keystone.test/v3/", "R1", "public", None), ("https://keystone.test/v3", "R1 ", "public", None),
+        ("https://keystone.test/v3", "R1", "internal", None), ("https://keystone.test/v3", "R1", "public", "0" * 64),
+    ]}  # fmt: skip
+    assert len(variants) == 5
+    with pytest.raises(EnvelopeError):
+        SealContext("credential_ref", _ROW, "secret", ("a|b",))
+
+
+def test_retired_unbound_format_is_refused() -> None:
+    sealed = _ring().public().seal(CANARY, CTX)
+    with pytest.raises(KeyringError, match="retired format"):
+        _ring().unseal(replace(sealed, alg="ovlm-env-v1"), CTX)
+
+
+def test_cs9_kek_status_is_zero_only_when_everything_is_on_the_current_key() -> None:
+    held = frozenset({"cur", "old"})
+    assert kek_status_code({"cur": 3}, "cur", held) == 0
+    assert kek_status_code({"cur": 3, "old": 0}, "cur", held) == 0
+    assert (
+        kek_status_code({"cur": 3, "old": 1}, "cur", held) == 3
+    )  # re-wrap not finished: keep the old key
+    assert kek_status_code({"gone": 1}, "cur", held) == 2
 
 
 @pytest.mark.parametrize("field", ["wrapped_dek", "nonce", "ciphertext"])

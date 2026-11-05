@@ -2,6 +2,11 @@
 
 * Clouds and project connections: **admin**, human session (``credential.manage``); every change is audited.
   Listing project connections is open to every role, filtered by the caller's project scopes (security-model.md 3.3).
+* Anything that decides **where a secret goes** takes the same TOTP step-up and typed confirmation as an upload
+  (review CS-1): every cloud ``PATCH`` (all its fields are endpoint fields: ``auth_url``, region, interface, CA
+  bundle) and ``DELETE``, and a change of a connection's ``guest_access`` (the jump host the guest key is used
+  against). A cloud endpoint change also sends every credential of the cloud back to validation, where the worker
+  refuses it without decrypting it: secrets are bound to the endpoint they were uploaded for.
 * Credentials: **admin**, human session, a **TOTP step-up** bound to the action and target, and a typed confirmation
   (the connection's name). The secret is **write-only**: it is sealed here with the worker's public key and never
   returned, logged or audited (``secret_set: true``; audit records only that it changed). The api cannot decrypt it.
@@ -40,6 +45,9 @@ Me = Annotated[Principal, Depends(current_principal)]
 
 UPLOAD_STEPUP_ACTION = "credential.upload"
 DELETE_STEPUP_ACTION = "credential.delete"
+CLOUD_UPDATE_STEPUP_ACTION = "cloud.update"
+CLOUD_DELETE_STEPUP_ACTION = "cloud.delete"
+CONNECTION_UPDATE_STEPUP_ACTION = "project_connection.update"
 
 
 class _Body(BaseModel):
@@ -101,6 +109,21 @@ class CloudPatch(_Body):
     interface: Literal["public", "internal"] | None = None
     ca_bundle_pem: str | None = Field(default=None, max_length=262144)
     clear_ca_bundle: bool = False
+    #: Step-up ``cloud.update`` for this cloud (every field decides where secrets are sent).
+    stepup_id: UUID
+    #: Must equal the cloud's name.
+    typed_confirmation: str = Field(max_length=100)
+
+
+class StepUpConfirmation(_Body):
+    stepup_id: UUID
+    typed_confirmation: str = Field(max_length=100)
+
+
+def _confirm(typed: str, expected: str, what: str = "project connection") -> None:
+    if not expected or " ".join(typed.split()).lower() != expected:
+        raise DomainError(422, "confirmation-mismatch", "Typed confirmation does not match",
+                          f"Type the {what}'s name ({expected!r}) to confirm.")  # fmt: skip
 
 
 @router.get("/clouds")
@@ -126,23 +149,50 @@ def get_cloud(cloud_id: UUID, db: Db, _: Admin) -> dict[str, Any]:
     return out
 
 
+def _cloud_or_404(db: Session, cloud_id: UUID) -> dict[str, Any]:
+    cloud = svc.get_cloud(db, cloud_id)
+    if cloud is None:
+        raise not_found("cloud-not-found", "Cloud")
+    return cloud
+
+
 @router.patch("/clouds/{cloud_id}")
 def update_cloud(cloud_id: UUID, body: CloudPatch, db: Db, who: Admin) -> dict[str, Any]:
+    """Step-up + typed confirmation (CS-1). An endpoint change sends the cloud's credentials back to validation;
+    the worker refuses them (bound to the old endpoint) and the cloud admin's credentials must be uploaded again."""
+    _confirm(body.typed_confirmation, _cloud_or_404(db, cloud_id)["name"], "cloud")
+    stepup_id = consume_stepup(
+        db, who, body.stepup_id, action=CLOUD_UPDATE_STEPUP_ACTION, target_id=str(cloud_id)
+    )
     before, after = svc.update_cloud(
         db, cloud_id, version=body.version, auth_url=body.auth_url, region=body.region, interface=body.interface,
         ca_bundle_pem=body.ca_bundle_pem, clear_ca_bundle=body.clear_ca_bundle,
     )  # fmt: skip
-    audit_change(
-        db, who, "cloud.update", "cloud", str(cloud_id), scope=GLOBAL, before=before, after=after
+    invalidated = (
+        svc.invalidate_cloud_credentials(db, cloud_id)
+        if svc.endpoint_changed(before, after)
+        else []
     )
+    audit_change(db, who, "cloud.update", "cloud", str(cloud_id), scope=GLOBAL, before=before,
+                 after={**after, "stepup_id": stepup_id, "invalidated_count": len(invalidated)})  # fmt: skip
+    for cred_id in invalidated:
+        cred = svc.get_credential(db, cred_id)
+        if cred is not None:
+            _audit_cred(db, who, "credential.endpoint_changed", cred, stepup_id=stepup_id,
+                        validation_reason="the cloud endpoint changed: re-validation requested")  # fmt: skip
     db.commit()
     return after
 
 
 @router.delete("/clouds/{cloud_id}", status_code=204)
-def delete_cloud(cloud_id: UUID, db: Db, who: Admin) -> Response:
+def delete_cloud(cloud_id: UUID, body: StepUpConfirmation, db: Db, who: Admin) -> Response:
+    _confirm(body.typed_confirmation, _cloud_or_404(db, cloud_id)["name"], "cloud")
+    stepup_id = consume_stepup(
+        db, who, body.stepup_id, action=CLOUD_DELETE_STEPUP_ACTION, target_id=str(cloud_id)
+    )
     before = svc.delete_cloud(db, cloud_id)
-    audit_change(db, who, "cloud.delete", "cloud", str(cloud_id), scope=GLOBAL, before=before)
+    audit_change(db, who, "cloud.delete", "cloud", str(cloud_id), scope=GLOBAL, before=before,
+                 after={"stepup_id": stepup_id})  # fmt: skip
     db.commit()
     return Response(status_code=204)
 
@@ -162,8 +212,11 @@ class ConnectionIn(_Body):
 class ConnectionPatch(_Body):
     version: int
     openstack_project_name: str | None = Field(default=None, min_length=1, max_length=255)
+    #: Changing it takes a step-up ``project_connection.update`` and the typed connection name (CS-1).
     guest_access: dict[str, Any] | None = None
     enabled: bool | None = None
+    stepup_id: UUID | None = None
+    typed_confirmation: str | None = Field(default=None, max_length=100)
 
 
 def _visible_connection(db: Session, who: Principal, pc_id: UUID) -> dict[str, Any]:
@@ -200,12 +253,29 @@ def get_connection(pc_id: UUID, db: Db, who: Me) -> dict[str, Any]:
 
 @router.patch("/project-connections/{pc_id}")
 def update_connection(pc_id: UUID, body: ConnectionPatch, db: Db, who: Admin) -> dict[str, Any]:
+    stepup_id: UUID | None = None
+    current = svc.get_connection(db, pc_id)
+    if current is None:
+        raise not_found("connection-not-found", "Project connection")
+    if (
+        body.guest_access is not None
+        and svc.guest_access_of(body.guest_access) != current["guest_access"]
+    ):
+        if body.stepup_id is None or body.typed_confirmation is None:
+            raise DomainError(403, "stepup-required", "Step-up authentication required",
+                              "Changing guest_access decides where the guest SSH key is used.",
+                              f"POST /api/v1/session/reauth for action {CONNECTION_UPDATE_STEPUP_ACTION!r} and this "
+                              "connection, then send stepup_id and typed_confirmation (the connection's name).")  # fmt: skip
+        _confirm(body.typed_confirmation, current["name"])
+        stepup_id = consume_stepup(
+            db, who, body.stepup_id, action=CONNECTION_UPDATE_STEPUP_ACTION, target_id=str(pc_id)
+        )
     before, after = svc.update_connection(
         db, pc_id, version=body.version, openstack_project_name=body.openstack_project_name,
         guest_access=body.guest_access, enabled=body.enabled,
     )  # fmt: skip
     audit_change(db, who, "project_connection.update", "project_connection", str(pc_id),
-                 scope=f"project:{pc_id}", before=before, after=after)  # fmt: skip
+                 scope=f"project:{pc_id}", before=before, after={**after, "stepup_id": stepup_id})  # fmt: skip
     db.commit()
     return after
 
@@ -238,12 +308,6 @@ class CredentialIn(_Body):
 class CredentialAction(_Body):
     stepup_id: UUID
     typed_confirmation: str = Field(max_length=100)
-
-
-def _confirm(typed: str, expected: str) -> None:
-    if " ".join(typed.split()).lower() != expected:
-        raise DomainError(422, "confirmation-mismatch", "Typed confirmation does not match",
-                          f"Type the project connection's name ({expected!r}) to confirm.")  # fmt: skip
 
 
 @router.get("/project-connections/{pc_id}/credentials")
@@ -309,7 +373,9 @@ def delete_credential(cred_id: UUID, body: CredentialAction, db: Db, who: Admin)
     if cred is None:
         raise not_found("credential-not-found", "Credential")
     pc = svc.get_connection(db, cred["project_connection_id"])
-    _confirm(body.typed_confirmation, pc["name"] if pc else "")
+    if pc is None:  # CS-8: never compare against an empty expected name
+        raise not_found("connection-not-found", "Project connection")
+    _confirm(body.typed_confirmation, pc["name"])
     stepup_id = consume_stepup(
         db, who, body.stepup_id, action=DELETE_STEPUP_ACTION, target_id=str(cred_id)
     )
