@@ -19,6 +19,7 @@ from uuid import UUID
 from sqlalchemy import Row, Select, and_, any_, false, literal, or_, select
 from sqlalchemy.orm import Session
 
+from ovlm.inventory.reasons import public_error
 from ovlm.inventory.tables import OBSERVATION_STATUSES, OBSERVED, REVISIONS, sync_run
 
 MAX_PAGE = 200
@@ -242,7 +243,7 @@ def _sync_dict(r: Row[Any]) -> dict[str, Any]:
         "finished_at": r.finished_at.isoformat() if r.finished_at else None,
         "counts": r.counts,
         "versions": r.versions,
-        "error": r.error,
+        "error": public_error(r.error),  # a fixed code only (review IS-4)
         "workflow_run_id": str(r.workflow_run_id) if r.workflow_run_id else None,
     }
 

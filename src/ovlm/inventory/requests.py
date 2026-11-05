@@ -17,6 +17,7 @@ from uuid import UUID
 
 from sqlalchemy import Connection, bindparam, text
 
+from ovlm.inventory.reasons import public_reason
 from ovlm.workflow.requests import request_run
 
 KIND = "inventory_sync"
@@ -41,7 +42,9 @@ def _run_dict(r: Any) -> dict[str, Any]:
         "state": r.state,
         "requested_at": r.started_at.isoformat() if r.started_at else None,
         "finished_at": r.finished_at.isoformat() if r.finished_at else None,
-        "end_reason": r.end_reason,
+        "end_reason": public_reason(
+            r.end_reason
+        ),  # a fixed code, never exception text (review IS-4)
         "origin": (r.subject or {}).get("origin"),
     }
 
