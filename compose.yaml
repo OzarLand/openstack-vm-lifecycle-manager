@@ -71,6 +71,13 @@ services:
     build:
       context: .
       target: worker
+      # Builds behind an HTTPS-only egress proxy: set HTTPS_PROXY (and NO_PROXY) in .env, see docs/install-guide.md 5a.
+      # Empty (the default) means no proxy. apt in the worker stage uses https:// sources (Dockerfile APT_URI_SCHEME).
+      args:
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        https_proxy: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1}
+        no_proxy: ${NO_PROXY:-localhost,127.0.0.1,::1}
     command: ["worker"]
     init: true                          # minimal init: signal forwarding and reaping
     # Starts as container root with four capabilities; the entrypoint drops to uid ovlm and keeps only
@@ -89,6 +96,13 @@ services:
       OVLM_AUTOMATION__REQUIRE_TMPFS: "true"
       OVLM_AUTOMATION__RUN_USER: ovlm-ansible
       OVLM_KEK__PRIVATE_KEY_FILE: /run/ovlm-kek/worker_kek   # the launcher's 0600 copy, readable by uid ovlm only
+      # Egress proxy for the OpenStack APIs (openstacksdk/keystoneauth honour these; docs/install-guide.md 5a).
+      # NO_PROXY must list the project subnet(s) and guest addresses: SSH never uses an HTTP proxy, and OVLM's own
+      # guest health probe ignores proxy variables altogether, so guests are always reached directly. Empty = no proxy.
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,::1}
     secrets: [db_worker_password, worker_kek]   # the KEK private key: worker only (security-model.md 5.1)
     tmpfs:
       - /run/ovlm:mode=0710,uid=10001,gid=10002   # automation.run_root: memory only; group ovlm-ansible may traverse

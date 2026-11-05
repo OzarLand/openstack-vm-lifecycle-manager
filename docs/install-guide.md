@@ -141,6 +141,44 @@ trust a wider range than your proxy.
 With `OVLM_DEVELOPMENT_MODE` off, the api **refuses to start without** `OVLM_EXTERNAL_URL`, and the worker refuses
 to start without its separate Ansible user (`compose.yaml` sets it). Treat a start-up error as the check working.
 
+## 5a. Reaching OpenStack through an egress proxy (optional)
+
+Some projects have **no direct Internet**: the OpenStack APIs, the package archives and the registries are reached
+through an operator-provided proxy. OVLM supports one that allows `CONNECT` to port 443 only (plain HTTP refused).
+The rule is: **the worker reaches the OpenStack APIs through the proxy, and reaches guests directly.**
+
+Put the settings in a `.env` file next to `compose.yaml` (Compose reads it; it is git-ignored):
+
+```bash
+HTTPS_PROXY=http://proxy.example:3128
+# Hosts and networks that must NOT use the proxy: loopback, the Compose service names, and the project subnet(s)
+# and any guest addresses. Keep the loopback entries.
+NO_PROXY=localhost,127.0.0.1,::1,postgres,api,10.20.0.0/24
+```
+
+| What | Behaviour |
+|---|---|
+| `compose.yaml` | Passes `HTTPS_PROXY`, `https_proxy`, `NO_PROXY`, `no_proxy` to the **worker** only (the api never calls OpenStack), and the same values as **build arguments** of the worker image. Both unset: no proxy |
+| OpenStack API calls (openstacksdk, keystoneauth, `requests`) | Use the proxy, except for hosts matched by `NO_PROXY` (host names, domain suffixes, IP addresses and CIDR blocks). Unit tested: `tests/unit/test_egress_proxy.py` |
+| SSH to guests (host-key scan, Ansible) | Never uses the proxy: OpenSSH does not read these variables |
+| The external health probe (OVLM's own HTTP check of a guest) | **Never** uses a proxy, whatever the variables say (`UrllibGetter` builds its opener with an empty proxy map). It must see the guest, not a proxy's answer. Unit tested |
+| Git clone of the automation repository | Runs with a scrubbed environment and does **not** get the proxy: the repository host must be reachable directly. Not covered by this setting |
+
+⚠️ `NO_PROXY` must contain the project subnet(s): if an OpenStack endpoint or a guest sits on the project network,
+the proxy must not be used for it. CIDR blocks are honoured by `requests` (the SDK) for IP-address URLs only.
+**Status:** unit tested; not yet verified against a real proxy (the Felcloud lab run is the first test).
+
+**Building the images behind such a proxy.** `docker compose build` uses the same `HTTPS_PROXY`/`NO_PROXY` from `.env`
+as build arguments. The Dockerfile's apt sources use **`https://`** by default (`APT_URI_SCHEME`, set it to `http`
+with `--build-arg` to restore the base image's own sources), so no hand-built base image is needed. pip and the git
+fetch of the pinned collection honour the proxy variables too. A TLS-intercepting proxy needs its CA as the optional
+`pip_ca` build secret (pip, git and apt use it). The Docker **daemon** needs the proxy for image pulls: a systemd
+drop-in `Environment="HTTPS_PROXY=..."` for `docker.service` (the lab kit writes it).
+
+Hosts the proxy must allow for a build and a first start: the Debian archive (`deb.debian.org`,
+`security.debian.org`), `pypi.org` and `files.pythonhosted.org`, `github.com`, and the registry of the base images
+(Docker Hub: `registry-1.docker.io`, `auth.docker.io`, `production.cloudflare.docker.com`).
+
 ## 6. Create the two Keystone application credentials
 
 OVLM uses two credentials, one per purpose, in **one dedicated project**:

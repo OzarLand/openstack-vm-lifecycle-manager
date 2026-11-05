@@ -17,10 +17,19 @@ fi
 export OS_CLOUD
 : "${OVLM_LAB_WORKDIR:=$HOME/.ovlm-lab}"
 : "${OVLM_LAB_TARGET_FLAVOR:=G0.basic.1c1g}"
-: "${OVLM_LAB_IMAGE:=Ubuntu 24.04 LTS}"
+: "${OVLM_LAB_IMAGE:=Ubuntu 24.04 LTS - Noble Numbat}"   # the exact Glance name; override in lab.env if yours differs
 : "${OVLM_LAB_VOLUME_TYPE:=NVMe}"
 : "${OVLM_LAB_DATA_SIZE_GB:=2}"
 : "${OVLM_LAB_TAG:=ovlm-lab}"
+# Egress proxy (optional). The project network may have no direct Internet: then the lab host (and blue, for apt)
+# reach the world only through an operator-provided HTTPS-only proxy (CONNECT 443; plain HTTP refused).
+#   OVLM_LAB_HTTPS_PROXY   http://host:port of that proxy (no credentials in the URL). Empty = direct Internet.
+#   OVLM_LAB_NO_PROXY      extra no-proxy entries (comma separated): the project subnet CIDR and guest addresses.
+#   OVLM_LAB_APT_MIRROR    https URL of the Ubuntu archive that apt uses on the VMs behind the proxy.
+: "${OVLM_LAB_HTTPS_PROXY:=}"
+: "${OVLM_LAB_NO_PROXY:=}"
+: "${OVLM_LAB_APT_MIRROR:=https://archive.ubuntu.com/ubuntu}"
+: "${OVLM_LAB_APT_SECURITY_MIRROR:=https://security.ubuntu.com/ubuntu}"
 export OVLM_LAB_TARGET_FLAVOR   # read by redact() so the flavor name is not mistaken for a hostname
 
 # Names. The prefix is the contract of ADR-0007; nothing else is ever created or deleted.
@@ -47,6 +56,8 @@ warn() { printf '[%s] WARNING: %s\n' "$(date -u +%H:%M:%SZ)" "$*" >&2; }
 die()  { printf '[%s] ERROR: %s\n' "$(date -u +%H:%M:%SZ)" "$*" >&2; exit 1; }
 
 need_cmd() { local c; for c in "$@"; do command -v "$c" >/dev/null 2>&1 || die "missing command: $c"; done; }
+# Tools every script needs on the operator machine, checked in --dry-run too so the operator learns before a real run.
+need_jq() { need_cmd jq; }
 need_var() { local v; for v in "$@"; do [[ -n "${!v:-}" ]] || die "missing setting: $v (see lab.env.example)"; done; }
 
 # Parse the flags every script shares; leaves the rest in the array REST.
@@ -65,6 +76,19 @@ parse_common() {
 # ovlm_name_ok NAME: the only names this kit accepts.
 ovlm_name_ok() { [[ "$1" =~ ^ovlm-[a-z0-9][a-z0-9-]*$ ]]; }
 assert_ovlm() { ovlm_name_ok "$1" || die "refusing: '$1' is not an ovlm-* name (ADR-0007)"; }
+
+# Proxy settings go into cloud-init user-data and shell scripts: accept only plain values, never credentials.
+# Sets NO_PROXY_FULL (loopback + the operator's entries) for use by the VMs.
+validate_proxy_settings() {
+  NO_PROXY_FULL="localhost,127.0.0.1,::1${OVLM_LAB_NO_PROXY:+,$OVLM_LAB_NO_PROXY}"
+  export NO_PROXY_FULL
+  [[ -z "$OVLM_LAB_HTTPS_PROXY" ]] && return 0
+  [[ "$OVLM_LAB_HTTPS_PROXY" =~ ^https?://[A-Za-z0-9._-]+(:[0-9]{1,5})?/?$ ]] \
+    || die "OVLM_LAB_HTTPS_PROXY must look like http://host:port, with no user name or password in it"
+  [[ "$OVLM_LAB_NO_PROXY" =~ ^[A-Za-z0-9._:/,-]*$ ]] || die "OVLM_LAB_NO_PROXY may hold only host names, addresses and CIDRs separated by commas"
+  [[ "$OVLM_LAB_APT_MIRROR" =~ ^https://[A-Za-z0-9._/-]+$ && "$OVLM_LAB_APT_SECURITY_MIRROR" =~ ^https://[A-Za-z0-9._/-]+$ ]] \
+    || die "OVLM_LAB_APT_MIRROR and OVLM_LAB_APT_SECURITY_MIRROR must be https:// URLs (the proxy refuses plain HTTP)"
+}
 
 umask 077
 mkdir_work() { mkdir -p "$OVLM_LAB_WORKDIR"; chmod 700 "$OVLM_LAB_WORKDIR"; }

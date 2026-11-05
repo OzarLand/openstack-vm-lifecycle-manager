@@ -94,8 +94,21 @@ FROM base AS worker
 # every security update and would break rebuilds. The base image digest above fixes the rest of the OS.
 ARG OPENSSH_CLIENT_VERSION=1:9.2p1-*
 ARG GIT_VERSION=1:2.39.*
-RUN apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+# apt over HTTPS by default: a build behind an HTTPS-only egress proxy (CONNECT 443; plain HTTP refused) works without a
+# hand-built base image. The proxy itself comes from the usual HTTPS_PROXY/https_proxy build args (compose.yaml passes
+# them from .env); a TLS-intercepting proxy's CA goes in the optional `pip_ca` build secret, as for pip. Set
+# `--build-arg APT_URI_SCHEME=http` to get the base image's own http:// sources back.
+ARG APT_URI_SCHEME=https
+RUN --mount=type=secret,id=pip_ca,required=false \
+    set -eu; \
+    case "${APT_URI_SCHEME}" in http|https) ;; *) echo "APT_URI_SCHEME must be http or https" >&2; exit 1 ;; esac; \
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*; do \
+      if [ -f "$f" ]; then sed -i -E "s#https?://#${APT_URI_SCHEME}://#g" "$f"; fi; \
+    done; \
+    apt_opts=""; \
+    if [ -s /run/secrets/pip_ca ]; then apt_opts="-o Acquire::https::CaInfo=/run/secrets/pip_ca"; fi; \
+    apt-get $apt_opts update \
+ && DEBIAN_FRONTEND=noninteractive apt-get $apt_opts install -y --no-install-recommends \
       "openssh-client=${OPENSSH_CLIENT_VERSION}" "git=${GIT_VERSION}" \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=venv-worker /opt/venv /opt/venv
