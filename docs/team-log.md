@@ -851,3 +851,17 @@ Felcloud acceptance campaign.
   - the initial workload `ovlm-acc-blue` and the data volume `ovlm-acc-data`.
 
   No credentials, no floating IP and no renewal yet: those wait for the credential store.
+
+## Credential store integrated — 2026-11-05 06:30 UTC
+
+The encrypted credential store and project connections (Opus, $6.30) are merged into the working branch.
+
+**Verified by Agent 1:**
+- lint clean, with a new import contract: the api cannot import the unsealing code;
+- 1179 unit tests pass (also as non-root);
+- 439 integration tests pass.
+
+An independent security review (Fable, focused) has started:
+https://claude.ai/code/session_016ti9w1bamZWQzvNipNj5Ag (`claude/ovlm-review-credential-store`).
+
+`ozar-dev` is preparing the Felcloud lab: building the OVLM images on `ovlm-lab-host`.
