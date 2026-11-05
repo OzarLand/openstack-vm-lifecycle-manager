@@ -973,3 +973,23 @@ Still running on Felcloud: `ovlm-lab-host`, `ovlm-acc-blue`, `ovlm-acc-data`. No
 - **Host-key trust:** IS-1, IS-3, IS-4, IS-8 (#21) and IS-11, IS-12 (#22) fixed, verified independently, merged.
 - `ozar-dev` redeploys OVLM at `d133b3e`, creates profile v2 (`playbook_dir: ansible/playbooks`), creates the plan and
   asks the maintainer for G1.
+
+## First real renewal on Felcloud: G1 approved, B1–B5 passed, three more fixes — 2026-11-05 17:00 UTC
+
+- The maintainer reset the approver accounts (fresh enrolment links, own passwords and TOTP) and **approved G1** as
+  approver-a. The requester (admin) cannot approve its own plan.
+- **B1–B5 passed on Felcloud:** green `ovlm-acc-ovlm-…` created, ACTIVE in about 40 s, SSH reachable about 100 s
+  later. Blue untouched and serving (2,700+ probes OK through the floating IP).
+- **B6 parked safely in `needs_human`** on lab bug K: with two OS users (the production setup) the worker could not
+  read Ansible's `result.json` (0600), and the run-dir wipe left Ansible's private directories. CI and local tests run
+  as root, so they never saw it. Fixed on both sides:
+  [#23](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/23) (role writes 0640/0770; the wipe runs as
+  the run user first; J: version-check temp dir under the run root; I: kit SSH key) and
+  [#24](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/24) (the worker reads a run-user-only result
+  as the run user, so the parked run, pinned to the older automation SHA, resumes without a rollback or a new G1).
+  New tests switch to a real second user as root.
+- [#22](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/22): IS-11 fixed, IS-1 closed.
+- `ozar-dev`'s login expired once; the maintainer reconnected it. It now redeploys at `86e7463`, retries B6 and asks
+  for G2.
+- Lab settings `ozar-dev` set (configuration, recorded in its notes): renewal timeouts from measured values with
+  margin (worst case 49 min, inside the policy's 1 h window), and the OVLM repository in `automation.allowed_repos`.

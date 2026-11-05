@@ -89,7 +89,7 @@ policy editor, approval requester) and G3 excludes the G1/G2 deciders (tested, U
 the run starter is refused by the worker even when the stored requester set was forged (tested).
 
 **4. Guest path.** Bootstrap key: generated in memory, private part only in user-data, public key and fingerprint
-in the ledger; cloud-init `ssh_deletekeys`/`ssh_genkeytypes: []` so the guest boots with exactly that key;
+in the ledger; cloud-init `ssh_deletekeys` and `ssh_genkeytypes: [ed25519]` (an empty list fails the cloud-init schema, lab bug M) so the guest boots with exactly that key;
 rotation behind a fence check, new keys read back over the authenticated session and verified before pinning; the
 re-run gap is REN-2. Pinning: `StrictHostKeyChecking=yes`, `BatchMode=yes`, a per-call `known_hosts` in a 0700
 directory, key file 0600 removed in `finally`, scrubbed environment (unit-tested through a fake `ssh`). Blue: keys
