@@ -256,15 +256,12 @@ def _short_module(module: str | None) -> str | None:
 
 
 def _command_argv(args: Any) -> list[str] | None:
-    if isinstance(args, str):
-        raw = args
-    elif isinstance(args, dict):
+    raw: Any = args
+    if isinstance(args, dict):
         if isinstance(args.get("argv"), list):
             return [str(a) for a in args["argv"]]
         raw = args.get("cmd")
-        if not isinstance(raw, str):
-            return None
-    else:
+    if not isinstance(raw, str):
         return None
     try:
         return shlex.split(raw)
