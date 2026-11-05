@@ -54,11 +54,12 @@ cd openstack-vm-lifecycle-manager
 ## 3. Generate the secrets and start the stack
 
 ```bash
-make secrets   # random database passwords in ./secrets (git-ignored, files, never env values)
+make secrets   # random database passwords, the TOTP key and the worker key pair in ./secrets (git-ignored)
 make up        # builds both images, starts postgres, migrate, api and worker, waits until healthy
 ```
 
-`make secrets` never overwrites an existing file. `make up` runs `make secrets` itself, so the first command is
+`make secrets` never overwrites an existing file. `secrets/totp_key` is the Fernet key that encrypts TOTP secrets
+at rest (`auth.totp_key_file`); Compose mounts it into the **api only**. Without it TOTP enrolment fails closed (503). `make up` runs `make secrets` itself, so the first command is
 only there to show you where the secrets live.
 
 Check it:
@@ -95,9 +96,15 @@ URL once §5 is done. Open it in your browser, then:
 3. Create other users through the API (`POST /api/v1/users`). Each one gets an enrolment link too. The admin never
    sets anyone's password.
 
-If you lose the link before using it, running the command again with the same username fails (`a user with this
-username already exists`, exit code 2). Use another username, or, on an evaluation host, start clean (🛑 deletes the database, see §9) with
-`make down` and `make up`.
+If you lose the link before using it, or it expires, ask for a new one with `--reissue`:
+
+```bash
+docker compose exec api ovlm admin create --username alice --enrol-link --reissue
+```
+
+It works only for an admin who **never finished enrolment** (no password set yet). It revokes every earlier unused
+link of that user, prints a new single-use link, and is audited (`user.enrolment_link.reissue`). An admin who already
+enrolled and lost their credentials is reset by another admin instead.
 
 Every use of this command is audited with `principal_type=system`, `auth_method=cli`.
 
@@ -225,10 +232,19 @@ the database, an environment value or `compose.yaml`. The interim for lab use is
 permission checked, and a **reported deviation from the design**, not the finished store. Do not use it outside a
 disposable lab.
 
-## 7. Try the read-only inventory (the one thing that works with a credential)
+## 7. Inventory sync
 
-The `ovlm inventory sync` command reads one project and prints counts only. With `--dry-run` it writes nothing and
-needs no database. Create `clouds.yaml` from the **reader** credential, mode 0600, outside the repository:
+**In OVLM.** Once a project connection's read credential is uploaded and validated (`state: active`), the worker
+syncs the project's inventory with it: every `inventory.sync_interval` (default 900 seconds; `0` turns the periodic
+sync off) and on request, `POST /api/v1/projects/<project connection id>/syncs` (operator or admin; an API token
+needs the `inventory:sync` or `operate` scope). The request answers 202 with the run, or 409 while a sync of that
+project is queued or running. `GET /api/v1/projects/<id>/syncs` lists the sync records (status, kind, counts,
+error) and the recent runs; a missing, failing, expired or re-bound credential, or a token scoped to another
+OpenStack project, shows there as a failed sync with its reason and changes nothing.
+
+**Read-only check from a `clouds.yaml`.** `ovlm inventory sync --dry-run` reads one project and prints counts only.
+It writes nothing and needs no database. Create `clouds.yaml` from the **reader** credential, mode 0600, outside the
+repository:
 
 ```yaml
 clouds:
@@ -248,9 +264,9 @@ Run it from a source checkout (`make install` first, see [CONTRIBUTING.md](../CO
 uv run --frozen ovlm inventory sync --cloud ovlm-reader --clouds-yaml /path/to/clouds.yaml --dry-run
 ```
 
-The command sends only GET and HEAD requests (plus the token request). Environment variables are not read.
-Without `--dry-run` it writes to the database as the worker role, which this Compose stack does not expose. Treat
-that mode as developer-only for now.
+The command sends only GET and HEAD requests (plus the token request). Environment variables are not read. Its
+former database-writing mode is retired: the inventory is filed only by the worker, under the real project
+connection, with the credential from the encrypted store.
 
 ## 8. What does not work yet
 
@@ -258,7 +274,8 @@ that mode as developer-only for now.
 |---|---|
 | Encrypted credential store (seal in the api, unseal in the worker) | 🟡 Implemented, reviewed, fixes verified; not lab validated. Worker container hardening (CS-6) still open |
 | Registering a cloud project from the UI or API | 🟡 Implemented with the credential store; not lab validated |
-| Scheduled inventory sync by the worker | ⬜ Depends on project connections |
+| Inventory sync by the worker (on request and periodic, with the stored read credential) | 🟡 Implemented, unit and integration tested with a fake cloud; not lab validated |
+| Blue's SSH host key: scan at registration, operator confirmation | 🟡 Implemented, integration tested with an `ssh-keyscan` double; not lab validated |
 | End-to-end renewal on a real cloud | ⬜ Not started. Not lab validated |
 | TLS proxy example configuration | ⬜ Not provided. Bring your own |
 | Backup and restore of the database and the key | ⬜ Designed ([security-model.md §5](security-model.md)), not documented as a procedure |

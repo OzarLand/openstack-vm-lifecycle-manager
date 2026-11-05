@@ -437,17 +437,13 @@ def test_tables_module_matches_the_migrated_schema(
     assert set(REVISIONS) == set(OBSERVED) == set(RESOURCES)
 
 
-def test_cli_sync_command_writes_through_the_real_path(worker_engine: Engine) -> None:
+def test_cli_dry_run_writes_nothing(worker_engine: Engine) -> None:
+    """The CLI only reads: its database-writing mode (clouds.yaml credentials, made-up connection id) is retired."""
     from ovlm.inventory.cli import sync_command
 
     fake, _ = _world()
-    code, out = sync_command(fake, cloud="lab", engine=worker_engine)
-    assert code == 0 and out["status"] == "succeeded" and out["kind"] == "full"
-    assert len(_rows(worker_engine, "server")) == 2
-    code2, out2 = sync_command(
-        fake, cloud="lab", engine=worker_engine
-    )  # same project id: a delta now
-    assert code2 == 0 and out2["project_connection_id"] == out["project_connection_id"]
-    fake.fail("list_volumes", OpenStackError("down"))
-    code3, out3 = sync_command(fake, cloud="lab", engine=worker_engine, kind="full")
-    assert code3 == 1 and out3["status"] == "failed"
+    code, out = sync_command(fake, cloud="lab")
+    assert code == 0 and out["status"] == "read_ok" and out["dry_run"] is True
+    assert _rows(worker_engine, "server") == {}
+    with worker_engine.connect() as c:
+        assert c.execute(select(func.count()).select_from(sync_run)).scalar_one() == 0

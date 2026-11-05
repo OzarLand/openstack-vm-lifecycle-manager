@@ -50,7 +50,8 @@ def build_registry(
 ) -> Registry:
     """Workflow definitions of this release.
 
-    ``readiness`` (E4-1) reads the database only. ``bluegreen_fip_v1`` (E5-4) gets its production ports from
+    ``readiness`` (E4-1) reads the database only. ``inventory_sync`` reads OpenStack with the project's read
+    credential (:mod:`ovlm.inventory.job`). ``bluegreen_fip_v1`` (E5-4) gets its production ports from
     :func:`ovlm.renewal.production.production_deps` (guarded SDK write client per project credential, the automation
     runner from ``Settings.automation``, OpenSSH and HTTP probes); tests pass ``renewal_deps`` (doubles). Its
     ``api_unreachable`` re-probe runs every ``poll.max_interval`` (renewal-workflow.md 5)."""
@@ -65,9 +66,39 @@ def build_registry(
         registry.register(BlueGreenFipV1(renewal_deps or production_deps(settings, engine, store)))
         registry.register(reprobe.RenewalReprobe(engine))
         registry.periodic.append(reprobe.periodic_job(settings.poll.max_interval))
+        _register_inventory_jobs(registry, settings, engine, store)
+        _register_host_key_scan(registry, settings, engine)
         if store is not None:
             _register_credential_jobs(registry, settings, store)
     return registry
+
+
+def _register_host_key_scan(registry: Registry, settings: Settings, engine: Engine) -> None:
+    """``host_key_scan``: ``ssh-keyscan`` of a newly registered VM; an operator confirms the fingerprint (ADR-0006)."""
+    from ovlm.registry.host_key_scan import HostKeyScanDefinition
+    from ovlm.renewal.production import OpenSshTransport
+
+    ssh = OpenSshTransport(settings.automation.run_root / f".ssh-scan-{uuid.uuid4().hex[:8]}")
+    registry.register(HostKeyScanDefinition(engine, ssh.keyscan))
+
+
+def _register_inventory_jobs(
+    registry: Registry, settings: Settings, engine: Engine, store: Any
+) -> None:
+    """``inventory_sync`` (one project connection, its read credential from the store) and the periodic job that
+    queues one for every enabled connection with a validated read credential every ``inventory.sync_interval``
+    (``0``: off). Without a KEK every sync fails with a clear reason."""
+    from ovlm.inventory import job as inventory_job
+
+    access = (
+        inventory_job.StoreReadAccess(store) if store is not None else inventory_job.NoReadAccess()
+    )
+    registry.register(
+        inventory_job.InventorySyncDefinition(engine, access, inventory_job.sync_config(settings))
+    )
+    if settings.inventory.sync_interval > 0:
+        registry.register(inventory_job.InventorySyncScheduleDefinition(engine))
+        registry.periodic.append(inventory_job.periodic_job(settings.inventory.sync_interval))
 
 
 def _register_credential_jobs(registry: Registry, settings: Settings, store: Any) -> None:

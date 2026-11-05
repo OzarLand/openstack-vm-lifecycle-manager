@@ -129,3 +129,32 @@ def test_the_sdk_session_follows_https_proxy_and_no_proxy(monkeypatch: pytest.Mo
 def test_without_proxy_variables_the_sdk_goes_direct(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _write_session()
     assert "https" not in _proxies_for(session, "https://keystone.example:5000/v3")
+
+
+def _read_session() -> Any:
+    """The requests session behind the inventory's read client, built exactly as the sync job builds it."""
+    from datetime import UTC, datetime
+
+    from ovlm.connections.credentials import AppCredential, ConnectionInfo, connect_read_credential
+
+    info = ConnectionInfo("pc", "lab", True, AUTH_URL, "R1", "public", "0" * 32)
+    cred = AppCredential(
+        info, "cred", "os_read", "app-cred-id", "app-cred-r3ad-value", datetime.now(UTC)
+    )
+    client = connect_read_credential(cred, None, process_role="worker")
+    return client._conn.session.session
+
+
+def test_the_inventory_read_session_follows_https_proxy_and_no_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", PROXY)
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,10.0.0.0/24")
+    session = _read_session()
+    assert session.trust_env is True
+    assert _proxies_for(session, "https://keystone.example:5000/v3").get("https") == PROXY
+    assert "https" not in _proxies_for(session, "https://10.0.0.7:8443/")
+
+
+def test_without_proxy_variables_the_inventory_read_session_goes_direct() -> None:
+    assert "https" not in _proxies_for(_read_session(), "https://keystone.example:5000/v3")

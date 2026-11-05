@@ -114,6 +114,7 @@ Typed confirmation (TC) = FR-UI-2. ✓ = allowed, — = denied.
 | FR-INV | View inventory, VM details | ✓ | ✓ | ✓ | ✓ |
 | FR-INV | Trigger sync | — | ✓ | — | ✓ |
 | FR-REG | Register / unregister VM, create service | — | ✓ | — | — |
+| FR-REG | Confirm a managed VM's scanned SSH host-key fingerprint (ADR-0006; human session) | — | ✓ | — | — |
 | FR-REG | Create/edit profile (incl. automation ref + SHA, health check) | — | ✓ | — | — |
 | FR-REG | Manage automation repo allowlist | — | — | — | ✓ |
 | FR-POL | Create/edit policy (incl. approval rules, SoD, retention) | — | — | — | ✓ |

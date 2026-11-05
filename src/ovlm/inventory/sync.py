@@ -1,10 +1,8 @@
 """The inventory sync job (worker process only: it calls OpenStack through a ``ReadClient``).
 
-A plain function, ``run_inventory_sync``. INTEGRATION POINT (E5-1): the workflow engine runs background jobs as
-single-step ``workflow_run``s of kind ``inventory_sync`` (architecture.md section 4); its step handler must call
-this function with the run's ``project_connection_id`` and store ``workflow_run_id`` (accepted below, written to
-``sync_run``). Nothing here depends on the engine. Until then ``ovlm inventory sync`` and the worker entry point
-``inventory.cli`` call it directly.
+A plain function, ``run_inventory_sync``. The ``inventory_sync`` workflow (:mod:`ovlm.inventory.job`) calls it with
+the run's real ``project_connection_id`` and ``workflow_run_id`` (written to ``sync_run``), after opening the read
+client from the project's stored read credential. Nothing here depends on the engine.
 
 Rules implemented (data-model.md section 3, openstack-integration.md section 1 and recommendation 9):
 
@@ -74,8 +72,8 @@ class SyncAlreadyRunningError(RuntimeError):
 
 @dataclass(frozen=True)
 class SyncConfig:
-    """Mirrors ``inventory.{sync_interval, gone_after_missed_syncs}`` (architecture.md section 5). Defaults are
-    TBD in the lab; wiring into ``Settings`` is left to the config owner."""
+    """Mirrors ``Settings.inventory`` (architecture.md section 5); the worker builds it with
+    :func:`ovlm.inventory.job.sync_config`. Defaults are TBD in the lab."""
 
     gone_after_missed_syncs: int = 3
     #: A delta asks for changes since (previous successful sync start - overlap): covers clock skew.

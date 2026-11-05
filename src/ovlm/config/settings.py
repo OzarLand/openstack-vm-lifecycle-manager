@@ -187,6 +187,19 @@ class RenewalSettings(_Section):
         return value
 
 
+class InventorySettings(_Section):
+    """Inventory sync (architecture.md section 5, data-model.md section 3)."""
+
+    #: Seconds between periodic syncs of every enabled project connection that has a validated read credential.
+    #: ``0`` disables the periodic sync (an operator can still ask for one: ``POST /projects/{id}/syncs``).
+    sync_interval: float = Field(default=900.0, ge=0)
+    #: A resource absent from this many successive full syncs becomes ``gone`` (never deleted).
+    gone_after_missed_syncs: int = Field(default=3, ge=1)
+    #: ``auto`` syncs run a full listing when the last full one is older than this (seconds); otherwise a
+    #: servers delta (Nova ``changes-since``).
+    full_sync_every: float = Field(default=6 * 3600.0, gt=0)
+
+
 class KekSettings(_Section):
     """The worker key pair of the credential store (security-model.md 5.1, ``docs/credential-store.md``).
 
@@ -366,6 +379,7 @@ class Settings(BaseSettings):
     auth: AuthSettings = AuthSettings()
     automation: AutomationSettings = AutomationSettings()
     kek: KekSettings = KekSettings()
+    inventory: InventorySettings = InventorySettings()
 
     @model_validator(mode="after")
     def _check(self) -> Settings:

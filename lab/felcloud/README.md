@@ -167,6 +167,10 @@ ssh ubuntu@<lab-host> 'cd ovlm && docker compose exec api ovlm admin create --us
 ssh -L 8000:127.0.0.1:8000 ubuntu@<lab-host>       # keep open; the UI and API are now on http://127.0.0.1:8000
 ```
 Open the enrolment link, set up TOTP (a human does this). The link is a single-use secret: do not paste it anywhere.
+`make secrets` (run by `host-setup`) generates the development TOTP key the api needs (`secrets/totp_key`), so
+enrolment does not fail with 503. If the link expired or was lost before it was used, issue a new one (it revokes the
+old link; only for an admin who never finished enrolment, audited):
+`docker compose exec api ovlm admin create --username <name> --enrol-link --reissue`.
 
 ### Step 4 — credentials ⚠️ (two paths)
 
@@ -178,8 +182,10 @@ Tries `openstack application credential create --role reader ovlm-inventory` and
 - **If the cloud refuses** (for example the user lacks the role, or application credentials are disabled), the script
   says so and creates nothing. The maintainer must create two application credentials in this project with these
   names and roles, and hand over the secrets out of band.
-- **Human step, not automatable:** upload each secret with `PUT /api/v1/projects/{id}/credentials/read` and
-  `.../write`, then `POST .../credentials/{kind}/test`. This needs an OVLM **admin session with TOTP**, created and
+- **Human step, not automatable:** upload each secret with `POST /api/v1/project-connections/{id}/credentials`
+  (`kind` `os_read`, `os_write`, then `ssh_key`; TOTP step-up and the connection name as typed confirmation). The
+  worker validates each one (`GET /api/v1/credentials/{id}` shows `state: active`; `POST .../validate` re-checks).
+  This needs an OVLM **admin session with TOTP**, created and
   enrolled by a human (`ovlm admin create --enrol-link`). An agent must not create the admin or hold its TOTP seed:
   that would bypass a control the design reserves for people. **Delete the credential files** afterwards
   (`shred -u`).
@@ -252,7 +258,9 @@ scenario needs a fresh blue: use the **reset** below.
 ./destroy-lab.sh --keep-host --keep-credentials      # 🛑 types DESTROY-OVLM-LAB; also deletes ovlm-acc-data
 ./create-lab.sh base && ./create-lab.sh workload && ./create-lab.sh configure --confirm FORMAT-<new id> && ./create-lab.sh fip
 ```
-Then re-sync inventory in OVLM and re-register the new blue (scenarios.md, step A1–A2).
+Then re-sync the inventory in OVLM (`POST /api/v1/projects/{project connection id}/syncs`, operator; or wait for the
+periodic sync, every 15 minutes) and re-register the new blue, then confirm its new host-key fingerprint: a
+recreated blue has a new host key (scenarios.md, steps A1–A2).
 
 ## 7. Stop conditions (any one: stop, collect evidence, tell the maintainer)
 

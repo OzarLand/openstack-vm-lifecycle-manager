@@ -29,6 +29,7 @@ EXPECTED: dict[Action, set[str]] = {
     Action.INVENTORY_VIEW: {V, O, AP, AD},
     Action.INVENTORY_SYNC: {O, AD},
     Action.REGISTRY_MANAGE: {O},
+    Action.HOST_KEY_CONFIRM: {O},  # ADR-0006, security-model.md 3.1
     Action.PROFILE_EDIT: {O},
     Action.AUTOMATION_REPO_MANAGE: {AD},
     Action.POLICY_EDIT: {AD},
@@ -54,7 +55,7 @@ HUMAN_ONLY = {
     Action.APPROVAL_DECIDE, Action.LINT_WAIVER_GRANT, Action.EXCEPTION_GRANT, Action.USER_MANAGE,
     Action.CREDENTIAL_MANAGE, Action.SETTINGS_MANAGE, Action.POLICY_EDIT, Action.AUTOMATION_REPO_MANAGE,
     Action.AUDIT_EXPORT, Action.TOKEN_CREATE_OWN, Action.RUN_REVERT, Action.RUN_MARK_RESOLVED,
-    Action.READINESS_ATTEST,
+    Action.READINESS_ATTEST, Action.HOST_KEY_CONFIRM,
 }  # fmt: skip
 P1, P2 = uuid4(), uuid4()
 

@@ -108,3 +108,15 @@ def test_openstack_http_debug_is_refused_in_production() -> None:
 def test_trusted_proxies_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OVLM_HTTP__TRUSTED_PROXIES", '["172.18.0.0/16"]')
     assert [str(n) for n in Settings().http.trusted_proxies] == ["172.18.0.0/16"]
+
+
+def test_inventory_sync_interval_defaults_to_15_minutes_and_0_disables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    s = Settings(process_role="worker")
+    assert s.inventory.sync_interval == 900.0 and s.inventory.gone_after_missed_syncs == 3
+    monkeypatch.setenv("OVLM_INVENTORY__SYNC_INTERVAL", "0")
+    assert Settings(process_role="worker").inventory.sync_interval == 0
+    monkeypatch.setenv("OVLM_INVENTORY__SYNC_INTERVAL", "-1")
+    with pytest.raises(ValidationError):
+        Settings(process_role="worker")

@@ -54,7 +54,8 @@ services:
       # OVLM_HTTP__TRUSTED_PROXIES (the proxy's address) instead, and never development mode.
       OVLM_DEVELOPMENT_MODE: "true"
       OVLM_KEK__PUBLIC_KEY_FILE: /run/secrets/worker_kek_pub   # seal only: the api never holds the private key
-    secrets: [db_api_password, worker_kek_pub]
+      OVLM_AUTH__TOTP_KEY_FILE: /run/secrets/totp_key   # encrypts TOTP secrets at rest; api only (dev key: make secrets)
+    secrets: [db_api_password, worker_kek_pub, totp_key]
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -123,6 +124,7 @@ secrets:
   db_worker_password: {file: ./secrets/db_worker_password}
   worker_kek: {file: ./secrets/worker_kek}           # 0400 on the host: unreadable to ovlm-ansible in the container
   worker_kek_pub: {file: ./secrets/worker_kek.pub}
+  totp_key: {file: ./secrets/totp_key}               # dev-only Fernet key (make secrets); api only
 
 volumes:
   pgdata:
