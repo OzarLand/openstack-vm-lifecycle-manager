@@ -178,8 +178,14 @@ Tries `openstack application credential create --role reader ovlm-inventory` and
 - **If the cloud refuses** (for example the user lacks the role, or application credentials are disabled), the script
   says so and creates nothing. The maintainer must create two application credentials in this project with these
   names and roles, and hand over the secrets out of band.
-- Upload each secret: `PUT /api/v1/projects/{id}/credentials/read` and `.../write` (admin session + TOTP), then
-  `POST .../credentials/{kind}/test`. **Delete the credential files** afterwards (`shred -u`).
+- **Human step, not automatable:** upload each secret with `PUT /api/v1/projects/{id}/credentials/read` and
+  `.../write`, then `POST .../credentials/{kind}/test`. This needs an OVLM **admin session with TOTP**, created and
+  enrolled by a human (`ovlm admin create --enrol-link`). An agent must not create the admin or hold its TOTP seed:
+  that would bypass a control the design reserves for people. **Delete the credential files** afterwards
+  (`shred -u`).
+- Verified on Felcloud (2026-11-05): a restricted application credential can `GET` its own Keystone record (HTTP 200),
+  which the CS-3 expiry check needs. It can also list the user's other application credentials (metadata only, never
+  a secret).
 - The credentials belong to the same Keystone user as `ozar-dev`'s session: the security model prefers a dedicated
   service user. This is part of the residual risk the maintainer accepted in ADR-0007.
 

@@ -191,12 +191,11 @@ if [ "$ROLE" = host ]; then
   apt-get install -y ca-certificates docker.io docker-compose-v2 git make jq curl python3-venv
   apt-get install -y docker-buildx || true
   if [ -n "$PROXY" ]; then
-    # Docker daemon (image pulls) and Docker builds (RUN steps) through the proxy; HTTPS only
+    # Docker daemon (image pulls) through the proxy; HTTPS only. Builds get the proxy from compose.yaml build args.
+    # No client-side "proxies.default": Docker would inject it into every container (the api too), and only the
+    # worker may have the proxy (install-guide 5a).
     mkdir -p /etc/systemd/system/docker.service.d
     printf '[Service]\nEnvironment="HTTPS_PROXY=%s" "NO_PROXY=%s"\n' "$PROXY" "$NOPROXY" > /etc/systemd/system/docker.service.d/10-ovlm-proxy.conf
-    install -d -o ubuntu -g ubuntu -m 0700 /home/ubuntu/.docker
-    printf '{"proxies":{"default":{"httpsProxy":"%s","noProxy":"%s"}}}\n' "$PROXY" "$NOPROXY" > /home/ubuntu/.docker/config.json
-    chown ubuntu:ubuntu /home/ubuntu/.docker/config.json
     systemctl daemon-reload
     systemctl restart docker
   fi
@@ -352,10 +351,11 @@ export ANSIBLE_ROLES_PATH="$HOME/ovlm/ansible/roles"
 ansible-galaxy collection install -r requirements.yml
 work=~/lab-work; known="$work/known_hosts_blue"; res="$work/results"
 mkdir -p "$res"; chmod 700 "$work" "$res"   # a dedicated directory: the result role sets 0700 on its parent (never /tmp)
-printf '[ovlm_target]\nblue ansible_host=%s ansible_user=ubuntu ansible_ssh_private_key_file=%s/.ssh/ovlm_target ansible_ssh_common_args="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=%s"\n' "$bip" "$HOME" "$known" > "$work/inventory.ini"
+printf '[ovlm_target]\nblue ansible_host=%s ansible_user=ubuntu ansible_ssh_private_key_file=%s/.ssh/ovlm_target ansible_python_interpreter=/usr/bin/python3 ansible_ssh_common_args="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=%s"\n' "$bip" "$HOME" "$known" > "$work/inventory.ini"
 printf '{"ovlm":{"role":"old","data_volume":{"id":"%s","mount_point":"/srv/data","fs_type":"ext4","first_use":false},"vars":{"app_port":8080}}}' "$vol" > "$work/extravars.json"
 inv="$work/inventory.ini"; ev="@$work/extravars.json"
-sshb() { ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$known" -i ~/.ssh/ovlm_target "ubuntu@$bip" "$@"; }
+# -n: never read stdin, or the first call swallows the rest of this heredoc script and the stage silently does nothing
+sshb() { ssh -n -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFile=$known" -i ~/.ssh/ovlm_target "ubuntu@$bip" "$@"; }
 
 # where is blue? mounted = finished earlier; stale = the OLD order left an immutable, unmounted /srv/data; blank = new
 if sshb mountpoint -q /srv/data; then state=mounted
