@@ -23,6 +23,7 @@ from ovlm.api.routes_profiles import router as profiles_router
 from ovlm.api.routes_readiness import router as readiness_router
 from ovlm.api.routes_renewal import router as renewal_router
 from ovlm.config import Settings
+from ovlm.connections.api import router as connections_router
 from ovlm.db.engine import make_engine
 from ovlm.observability.context import bind_context
 from ovlm.observability.metrics import BUILD_INFO, HTTP_REQUESTS, InternalServer
@@ -138,4 +139,5 @@ def create_app(
     app.include_router(profiles_router)
     app.include_router(policies_router)
     app.include_router(automation_router)
+    app.include_router(connections_router)
     return app

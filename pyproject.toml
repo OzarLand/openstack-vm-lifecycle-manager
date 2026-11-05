@@ -86,6 +86,13 @@ forbidden_modules = ["ovlm.openstack", "ovlm.automation", "ovlm.worker", "openst
 allow_indirect_imports = false
 
 [[tool.importlinter.contracts]]
+name = "the api cannot decrypt: only the worker side imports the KEK key ring (security-model.md 5.1)"
+type = "forbidden"
+source_modules = ["ovlm.api", "ovlm.ui", "ovlm.connections.api", "ovlm.connections.service", "ovlm.secrets.envelope", "ovlm.secrets.store"]
+forbidden_modules = ["ovlm.secrets.keyring", "ovlm.connections.credentials", "ovlm.connections.validation"]
+allow_indirect_imports = false
+
+[[tool.importlinter.contracts]]
 name = "config imports no other ovlm module"
 type = "forbidden"
 source_modules = ["ovlm.config"]
