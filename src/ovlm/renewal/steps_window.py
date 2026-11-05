@@ -27,7 +27,7 @@ from ovlm.auth.sod import Gate
 from ovlm.openstack import errors as oe
 from ovlm.openstack.write import SNAPSHOT_RUN_KEY, snapshot_name
 from ovlm.renewal import metrics
-from ovlm.renewal.base import RStep, StepRefusal
+from ovlm.renewal.base import BLUE_HOST_KEY_UNTRUSTED, RStep, StepRefusal, blue_host_key_problems
 from ovlm.renewal.closed_table import TRIGGER_BUDGET, TRIGGER_EVIDENCE
 from ovlm.renewal.ledger import fenced_write, ledger_intend, ledger_present, snapshot_row
 from ovlm.renewal.plans import load_facts, now_db
@@ -115,6 +115,16 @@ class QuiesceOld(WindowAnsible):
             return {"fail": f}
         if self.db_seconds_since(ctx, "downtime_started_at") is not None:
             return self.reclaim_probe(ctx, r, dv)
+        # IS-1: the first SSH to blue. Before the outage starts, re-read the live row: the key must still be
+        # confirmed, be the plan's, and have been confirmed by an active user. Parks (needs_human), no restore.
+        with ctx.read() as c:
+            key_problems = blue_host_key_problems(c, r, check_confirmer=True)
+        if key_problems:
+            return {
+                "fail": self.fail(
+                    ctx, E.NEEDS_HUMAN, BLUE_HOST_KEY_UNTRUSTED, problems=key_problems
+                )
+            }
         refusals: list[str] = []
         back = "await_cutover"
         g2 = gate_check(self, ctx, Gate.CUTOVER, check_expiry=True)
