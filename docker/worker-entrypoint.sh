@@ -15,6 +15,14 @@ else
     set -- ovlm "$@"
 fi
 if [ "$(id -u)" = 0 ]; then
+    # Credential store KEK (security-model.md 5.1): the Docker secret is a 0400 file owned by the host user, so
+    # neither ovlm nor ovlm-ansible can read it. Root reads it once (CAP_DAC_READ_SEARCH, dropped below) and a
+    # process running as ovlm writes the copy into the 0700 tmpfs /run/ovlm-kek (mode 0600). Never an env value.
+    if [ -f /run/secrets/worker_kek ] && [ -d /run/ovlm-kek ] && [ ! -s /run/ovlm-kek/worker_kek ]; then
+        setpriv --reuid=10001 --regid=10001 --clear-groups -- \
+            sh -c 'umask 077; cat > /run/ovlm-kek/.worker_kek.tmp && mv /run/ovlm-kek/.worker_kek.tmp /run/ovlm-kek/worker_kek' \
+            < /run/secrets/worker_kek
+    fi
     exec setpriv --reuid=10001 --regid=10001 --groups=10002 \
         --inh-caps=+setuid,+setgid,+kill --ambient-caps=+setuid,+setgid,+kill \
         --bounding-set=-all,+setuid,+setgid,+kill --no-new-privs -- "$@"

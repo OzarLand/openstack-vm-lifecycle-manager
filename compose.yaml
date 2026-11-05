@@ -53,7 +53,8 @@ services:
       # Development stack: no TLS proxy and no external_url. A real installation sets OVLM_EXTERNAL_URL and
       # OVLM_HTTP__TRUSTED_PROXIES (the proxy's address) instead, and never development mode.
       OVLM_DEVELOPMENT_MODE: "true"
-    secrets: [db_api_password]
+      OVLM_KEK__PUBLIC_KEY_FILE: /run/secrets/worker_kek_pub   # seal only: the api never holds the private key
+    secrets: [db_api_password, worker_kek_pub]
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -76,8 +77,10 @@ services:
     # CAP_SETUID/SETGID/KILL (ambient) so the worker can run ansible-runner as `ovlm-ansible` and stop its tree.
     # SETPCAP is needed once, by the launcher, to trim the bounding set. Nothing runs as root afterwards.
     # (automation-contract.md section 11.) no-new-privileges stays on: no setuid binary, no sudo.
+    # DAC_READ_SEARCH lets the launcher (root) read the 0400 KEK file once to copy it, as uid ovlm, into the worker's
+    # private tmpfs; the launcher then drops it from every set before the worker starts (worker-entrypoint.sh).
     user: "0:0"
-    cap_add: [SETUID, SETGID, SETPCAP, KILL]
+    cap_add: [SETUID, SETGID, SETPCAP, KILL, DAC_READ_SEARCH]
     environment:
       <<: *ovlm-env
       OVLM_DB__PASSWORD_FILE: /run/secrets/db_worker_password
@@ -85,9 +88,11 @@ services:
       OVLM_AUTOMATION__RUN_ROOT: /run/ovlm
       OVLM_AUTOMATION__REQUIRE_TMPFS: "true"
       OVLM_AUTOMATION__RUN_USER: ovlm-ansible
-    secrets: [db_worker_password]
+      OVLM_KEK__PRIVATE_KEY_FILE: /run/ovlm-kek/worker_kek   # the launcher's 0600 copy, readable by uid ovlm only
+    secrets: [db_worker_password, worker_kek]   # the KEK private key: worker only (security-model.md 5.1)
     tmpfs:
       - /run/ovlm:mode=0710,uid=10001,gid=10002   # automation.run_root: memory only; group ovlm-ansible may traverse
+      - /run/ovlm-kek:mode=0700,uid=10001,gid=10001   # the KEK copy: uid ovlm only (not ovlm-ansible)
     stop_grace_period: 40s
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -102,6 +107,8 @@ secrets:
   db_owner_password: {file: ./secrets/db_owner_password}
   db_api_password: {file: ./secrets/db_api_password}
   db_worker_password: {file: ./secrets/db_worker_password}
+  worker_kek: {file: ./secrets/worker_kek}           # 0400 on the host: unreadable to ovlm-ansible in the container
+  worker_kek_pub: {file: ./secrets/worker_kek.pub}
 
 volumes:
   pgdata:
