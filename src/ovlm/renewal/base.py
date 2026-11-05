@@ -22,6 +22,7 @@ from ovlm.automation.types import AutomationError
 from ovlm.openstack import errors as oe
 from ovlm.openstack.retry import classify as os_classify
 from ovlm.openstack.write import GuardedWriteClient
+from ovlm.registry.ssh_target import first_fixed_address
 from ovlm.renewal.config import RenewalConfig
 from ovlm.renewal.ledger import DbOwnershipRegistry, green_row, plan_resolved
 from ovlm.renewal.ports import CloudPort, GuestPort, GuestRef
@@ -119,9 +120,15 @@ class RStep(Step):
         )
 
     def blue_ref(self, ctx: StepContext) -> GuestRef:
+        """Blue's SSH target. Refuses (``needs_human``) when the live ``managed_vm`` row no longer carries the
+        confirmed fingerprint the plan pinned (IS-1): no SSH to blue ever uses a key whose confirmation is gone."""
         r = self.resolved(ctx)
+        with ctx.read() as c:
+            problems = blue_host_key_problems(c, r, check_confirmer=False)
+        if problems:
+            raise StepRefusal(ErrorClass.NEEDS_HUMAN, BLUE_HOST_KEY_UNTRUSTED, problems=problems)
         port = self.wc(ctx).get_port(r["blue"]["port_id"])
-        address = port.fixed_ips[0][0] if port.fixed_ips else ""
+        address = first_fixed_address(port.fixed_ips) or ""  # the scan's rule too (IS-3)
         return GuestRef(
             r["blue"]["server_id"],
             address,
@@ -187,6 +194,47 @@ class RStep(Step):
                 ctx, ErrorClass.NEEDS_HUMAN, "state_lookup_failed", message=str(exc)[:300]
             )
         return self.fail(ctx, ErrorClass.RETRYABLE, type(exc).__name__, message=str(exc)[:300])
+
+
+BLUE_HOST_KEY_UNTRUSTED = "blue_host_key_untrusted"
+
+
+def blue_host_key_problems(
+    conn: Any, resolved: Mapping[str, Any], *, check_confirmer: bool = True
+) -> list[str]:
+    """Why blue's host key may not be trusted now, from the **live** ``managed_vm`` row (empty: trusted).
+
+    Review IS-1: the plan snapshots the fingerprint when it is resolved, so a row forged before then would be
+    pinned for every SSH to blue. The first SSH to blue (W1, before the outage starts) re-reads the row and requires
+    a confirmation, the plan's fingerprint, and a confirmer who is an active human user (``app_user``: API tokens
+    and agents are never confirmers). ``check_confirmer=False`` (every later SSH to blue, restore included) checks
+    only that the confirmed key is still the plan's: disabling the confirmer mid-outage must not block a restore.
+    """
+    blue = resolved.get("blue") or {}
+    pinned = blue.get("host_key_fingerprint")
+    if not pinned:
+        return ["the plan pins no host-key fingerprint for blue"]
+    row = conn.execute(
+        text(
+            "SELECT m.ssh_host_key_fingerprint AS fp, m.host_key_confirmed_at AS confirmed_at, "
+            "m.host_key_confirmed_by AS confirmed_by, u.state AS confirmer_state "
+            "FROM managed_vm m LEFT JOIN app_user u ON u.id = m.host_key_confirmed_by WHERE m.id = :v"
+        ),
+        {"v": blue.get("managed_vm_id")},
+    ).first()
+    if row is None:
+        return ["blue's managed VM record no longer exists"]
+    problems: list[str] = []
+    if row.confirmed_at is None:
+        problems.append("blue's host key is not confirmed")
+    if row.fp != pinned:
+        problems.append("blue's recorded host-key fingerprint is not the one the plan pinned")
+    if check_confirmer and row.confirmed_at is not None:
+        if row.confirmed_by is None or row.confirmer_state is None:
+            problems.append("blue's host key was not confirmed by a known user")
+        elif row.confirmer_state != "active":
+            problems.append(f"the user who confirmed blue's host key is {row.confirmer_state}")
+    return problems
 
 
 def project_of(resolved: Mapping[str, Any]) -> str:

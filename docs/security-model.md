@@ -4,7 +4,7 @@
 |---|---|
 | Owner | Agent 8 — Security Engineer |
 | Status | **Designed** (Phase 1 proposal, nothing implemented) |
-| Last updated | 2026-11-04 |
+| Last updated | 2026-11-05 |
 
 Scope: `api`, `worker`, PostgreSQL, Ansible, OVLM's OpenStack credentials, managed guests. Inputs: [functional-requirements.md](functional-requirements.md) (NFR-4/5, FR-REN-6,
 FR-AUD, FR-UI-2), [openstack-integration.md](openstack-integration.md) (Agent 3, "OSI" below; its tags SV =
@@ -21,6 +21,10 @@ SOURCE-VERIFIED, DU = DOCUMENTED-UNVERIFIED, AS = ASSUMPTION are kept), [automat
 >
 > **Revision 2026-11-04 (image/docs alignment)**: §6.1 records an open item for the security review (cloud-init user
 > `sudo NOPASSWD` for the B5 host-key rotation).
+>
+> **Revision 2026-11-05 (inventory sync / host-key review fixes)**: blue's host-key trust is enforced in the database and
+> re-checked by the worker (§6.2.1, review IS-1); one SSH address rule for the scan and the renewal (§6.2.1, IS-3);
+> viewers see reason codes for failed syncs, never exception text (§4.1, IS-4, IS-8); acceptance criteria 28-31 (§10).
 
 ## 1. Threat model
 
@@ -178,6 +182,15 @@ Read-only is not guaranteed by the role alone (T3). Controls: (1) the inventory 
 requests hook that raises before sending any method other than GET/HEAD — cheap and cloud-independent; (2) GET-only
 access rules (§4.4); (3) onboarding checklist asks the cloud admin to state `enforce_new_defaults` (OSI open question 1).
 
+**What a failed sync shows** (review IS-4, IS-8). SDK and keystoneauth messages carry the Keystone URL, HTTP status
+lines and response fragments; log redaction removes registered secrets, not those. Viewers therefore see a **fixed
+reason code** only: `sync_run.error` is `{"code": ...}` and a run's `end_reason` is the code (`credential_unavailable`,
+`client_setup_failed`, `auth_failed`, `project_mismatch`, `cloud_error`, `interrupted`, `sync_already_running`,
+`worker_error`; `src/ovlm/inventory/reasons.py`). The redacted text goes to the worker log and to the step error's
+`detail` (`workflow_step.error`, not served by the api). Records written before the codes are mapped when read. A read
+client that cannot be built from a valid credential (a bad CA file, a configuration error) is a recorded
+`client_setup_failed`, not an endless retry; a database error while reading the credential stays retryable.
+
 ### 4.2 Write credential (`ovlm-renewal`, role `member`, one project)
 Used **only by the worker**, only inside a renewal step whose gate is approved (FR-REN-6).
 
@@ -312,7 +325,36 @@ tofu`). The console log is a secondary source, selectable per profile where it i
 opt-in** (a new profile version, hence re-approval). If no key can be verified before the deadline the step fails with
 "host key unverifiable" (no outage yet). The verified (rotated) key is pinned
 in a per-run `known_hosts` with `StrictHostKeyChecking=yes`. Blue's key is recorded at registration (TOFU, confirmed
-by the operator). cloud-init regenerates host keys on a new instance (OSI §9, AS), so green always needs this step.
+by the operator, §6.2.1). cloud-init regenerates host keys on a new instance (OSI §9, AS), so green always needs this step.
+
+#### 6.2.1 Blue's host key (the existing VM)
+
+The renewal reaches blue with `StrictHostKeyChecking=yes` and accepts only keys whose SHA-256 fingerprint equals the
+plan's snapshot of `managed_vm.ssh_host_key_fingerprint`; a plan is refused unless that fingerprint was **confirmed** by
+an operator in a human session (ADR-0006, api-design.md §3.3). The confirmation is the trust root of every later SSH
+to blue, so it is protected against a compromised api or `ovlm_api` role (review IS-1, migration `registry_0002`):
+
+| Control | Where | What it stops |
+|---|---|---|
+| Column grants: `ovlm_api` may UPDATE only `host_key_confirmed_by/at`; the worker only `ssh_host_key_fingerprint` (no grant on `host_key_confirmed_*`) | `registry_0001` | the api writing a fingerprint; the worker confirming one |
+| Insert guard `managed_vm_api_insert_guard`: for `current_user = 'ovlm_api'`, `ssh_host_key_fingerprint`, `host_key_confirmed_by`, `host_key_confirmed_at` must be NULL (SQLSTATE 42501) | `registry_0002` | inserting a row that arrives already scanned or confirmed |
+| Tombstone `managed_vm_tombstone`: every deleted id is recorded by a `SECURITY DEFINER` AFTER DELETE trigger (fixed `search_path = pg_catalog, public, pg_temp`, EXECUTE revoked from PUBLIC); the insert guard refuses a tomb-stoned id for **every** role. `ovlm_api` has SELECT only on it | `registry_0002` | delete + re-insert under the same id (the reviewer's probe), so an approved plan can never be pointed at a forged row |
+| `managed_vm_host_key_follow`: any change of `ssh_host_key_fingerprint` clears `host_key_confirmed_*`, whoever writes it; CHECK `managed_vm_host_key_confirmation`: a confirmation names its confirmer and a fingerprint | `registry_0002` | a confirmation outliving the key it vouched for (the scan's own `WHERE` is the first line) |
+| Live re-check at the first SSH to blue: W1 `quiesce_old`, **before** the outage starts, re-reads the row and refuses unless the key is confirmed, the fingerprint equals the plan's, and `host_key_confirmed_by` is an `active` `app_user` (a human: tokens and agents are never confirmers). Refusal parks `needs_human` with `blue_host_key_untrusted`: nothing ran on blue, no restore. Every later SSH to blue (`blue_ref`, restore included) re-checks that the row still carries the plan's confirmed fingerprint, but not the confirmer's state, so disabling a user mid-outage cannot block a restore | `src/ovlm/renewal/base.py` `blue_host_key_problems`, `steps_window.py` | a plan that snapshot a key forged or changed before the run |
+
+The role cannot switch these off: `TRUNCATE` (which would skip the row trigger), `ALTER TABLE … DISABLE TRIGGER`,
+`DROP TRIGGER`, `SET session_replication_role = replica`, a temporary table shadowing the tombstone, CREATE in
+`public`, replacing or altering the functions, writing the tombstone and dropping the CHECK are all refused to
+`ovlm_api` (tested, as for the credential store in reviews/verification-credential-store-fixes.md). Residual: a
+compromised api can still confirm a **scanned** key in the name of a real active operator (it holds the column grant
+by design); the out-of-band comparison and the audit row are the controls (review IS-2).
+
+**Which address is scanned** (review IS-3). The scan and the renewal use one rule (`src/ovlm/registry/ssh_target.py`):
+`fixed_ips[0]` of the port the **service floating IP** is attached to. The scan finds that floating IP in the latest
+profile version (`cutover.floating_ip_id`); before a profile exists it takes the only port of blue that carries a
+floating IP and refuses when there are several. The scanned port id and floating IP id are in the step evidence and
+the audit row (`managed_vm.host_key_scan`), next to the address and fingerprint. The target is always an inventory
+address parsed as an IP (no hostname, `ssh-keyscan … --`).
 
 ### 6.3 Network path
 Worker → guest SSH (22) on the fixed IP: green has no FIP before cutover. Options: worker on a routed management
@@ -420,3 +462,7 @@ destructive action needs a named human owner (OzarLand rule 6). Audit records `p
 25. Step-up reuse is refused: a consumed step-up, one older than 5 minutes, or one bound to another action type or target is rejected.
 26. Admin-set password is impossible: no API or UI path lets an admin choose or read another user's password; user creation and reset return only a one-time enrolment link.
 27. An assessment without typed confirmation runs no repo code on the live VM (only OVLM-owned read-only checks and static analysis).
+28. `ovlm_api` cannot delete a confirmed managed VM and re-insert it under the same id (tombstone, every role), cannot insert a row with a fingerprint or a confirmation, and cannot disable the guards (TRUNCATE, DISABLE TRIGGER, `session_replication_role`, temp-table shadowing, function replacement); a fingerprint change clears the confirmation (`tests/integration/test_managed_vm_host_key_guard.py`).
+29. W1 refuses blue before the outage when the live row's key is unconfirmed, differs from the plan's, or was confirmed by a disabled or unknown user (`tests/integration/renewal/test_blue_host_key_live_check.py`).
+30. The host-key scan targets `fixed_ips[0]` of the service floating IP's port, as the renewal does, and records the port id (`tests/integration/test_host_key_scan.py::test_is3_*`).
+31. Viewers see only reason codes for failed syncs (no Keystone URL, status line or exception text, also for records written before the codes); a client set-up error is a recorded failure (`tests/integration/test_inventory_sync_job.py`).

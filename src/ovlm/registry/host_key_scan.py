@@ -3,8 +3,8 @@
 ADR-0006 "Blue": the fingerprint is recorded at registration by a worker scan and **confirmed by an operator**
 (:mod:`ovlm.registry.host_keys`). This single step:
 
-* finds the VM's fixed address in the inventory (the port carrying a floating IP first, IPv4 first): the address
-  the renewal itself uses to reach blue (``port.fixed_ips[0]`` of the FIP's port);
+* finds the address the renewal itself uses to reach blue, by the same rule (:mod:`ovlm.registry.ssh_target`,
+  review IS-3): ``fixed_ips[0]`` of the service floating IP's port, from the inventory;
 * runs ``ssh-keyscan`` (no authentication, no credential, nothing sent but the SSH handshake);
 * writes the preferred key's SHA-256 fingerprint (ed25519, then ECDSA, then RSA) to
   ``managed_vm.ssh_host_key_fingerprint``. All scanned fingerprints are kept in the step evidence.
@@ -16,7 +16,6 @@ confirmed one in place. No key answered: the run fails with ``unreachable`` (re-
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 from collections.abc import Callable, Mapping
 from typing import Any, ClassVar
@@ -29,6 +28,7 @@ from ovlm import audit
 from ovlm.auth.dbutil import rowcount
 from ovlm.automation.hostkeys import PublicKey
 from ovlm.registry.host_keys import KIND, STRATEGY, STRATEGY_VERSION
+from ovlm.registry.ssh_target import NoSshTargetError, blue_ssh_target
 from ovlm.workflow.contract import (
     Act,
     Admission,
@@ -70,31 +70,6 @@ def preferred(keys: list[PublicKey]) -> PublicKey | None:
     return ranked[0] if ranked else None
 
 
-def vm_address(conn: Any, managed_vm_id: str) -> str | None:
-    """The VM's fixed address from the inventory: the port with a floating IP first, then IPv4 before IPv6."""
-    rows = conn.execute(
-        text(
-            "SELECT p.fixed_ips, EXISTS (SELECT 1 FROM observed_floating_ip f WHERE f.port_id = p.openstack_id "
-            "  AND f.project_connection_id = p.project_connection_id AND f.status = 'present') AS has_fip "
-            "FROM managed_vm m JOIN observed_server s ON s.id = m.observed_server_id "
-            "JOIN observed_port p ON p.device_id = s.openstack_id AND p.project_connection_id = s.project_connection_id "
-            "WHERE m.id = :v AND p.status = 'present' ORDER BY has_fip DESC, p.openstack_id"
-        ),
-        {"v": managed_vm_id},
-    ).all()
-    for r in rows:
-        addresses = []
-        for ip in r.fixed_ips or ():
-            try:
-                addresses.append(ipaddress.ip_address(str(ip.get("ip_address"))))
-            except (ValueError, AttributeError):
-                continue
-        addresses.sort(key=lambda a: a.version)
-        if addresses:
-            return str(addresses[0])
-    return None
-
-
 def _vm(conn: Any, managed_vm_id: str) -> Any:
     return conn.execute(
         text(
@@ -125,13 +100,14 @@ class ScanStep(Step):
     def act(self, ctx: StepContext, intent: Mapping[str, Any]) -> None:
         vm_id = str(intent["managed_vm_id"])
         with self.engine.connect() as c:
-            vm, address = _vm(c, vm_id), vm_address(c, vm_id)
-        if vm is None:
-            raise _ScanFailed("the managed VM no longer exists")
-        if address is None:
-            raise _ScanFailed(
-                "the inventory shows no fixed address for this VM: sync the project and scan again"
-            )
+            vm = _vm(c, vm_id)
+            if vm is None:
+                raise _ScanFailed("the managed VM no longer exists")
+            try:
+                target = blue_ssh_target(c, vm_id)
+            except NoSshTargetError as exc:
+                raise _ScanFailed(str(exc)) from None
+        address = target.address
         keys = self.keyscan(address, SSH_PORT)
         key = preferred(keys)
         if key is None:
@@ -156,7 +132,7 @@ class ScanStep(Step):
                 result="failure" if changed else "success", principal_type="worker", auth_method="none",
                 run_id=UUID(ctx.run.id), project_scope=f"project:{vm.project_connection_id}",
                 after={"managed_vm_id": vm_id, "fingerprint": key.fingerprint, "key_type": key.type,
-                       "address": address},
+                       "address": address, "port_id": target.port_id, "floating_ip_id": target.floating_ip_id},
             )  # fmt: skip
         if changed:
             raise _ScanFailed(
@@ -166,7 +142,8 @@ class ScanStep(Step):
             )
         ctx.checkpoint(
             evidence={"recorded": True, "fingerprint": key.fingerprint, "key_type": key.type,
-                      "address": address, "scanned": scanned}
+                      "address": address, "port_id": target.port_id, "floating_ip_id": target.floating_ip_id,
+                      "target_source": target.source, "scanned": scanned}
         )  # fmt: skip
 
     def verify(self, ctx: StepContext, intent: Mapping[str, Any]) -> Outcome:
