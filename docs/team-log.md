@@ -865,3 +865,25 @@ An independent security review (Fable, focused) has started:
 https://claude.ai/code/session_016ti9w1bamZWQzvNipNj5Ag (`claude/ovlm-review-credential-store`).
 
 `ozar-dev` is preparing the Felcloud lab: building the OVLM images on `ovlm-lab-host`.
+
+## Security review and first lab run — 2026-11-05 07:00 UTC
+
+**Credential store review** (Fable, focused): two High and three Medium findings.
+- CS-1 (High): changing a connection's `auth_url` without step-up could redirect a stored secret to another endpoint.
+- CS-2 (High): the AES-GCM associated data does not bind the connection, so the api role could rebind credential rows.
+- CS-3: the Keystone expiry is not read from Keystone. CS-4: no periodic re-validation or metric. CS-5: an unknown KEK
+  should be a transient error.
+
+A fix round has started (Opus): https://claude.ai/code/session_016ti9w37cpmnkxrzhX6CZn8
+(`claude/ovlm-fix-credential-store`). A short fresh verification follows before the PR.
+
+**First Felcloud run by `ozar-dev`** (steps 0–3 and 5):
+- baseline snapshot taken; `ovlm-lab-host` built; **`make smoke` passed on Felcloud**; guard diff: 0 violations;
+- step 5 stopped: the `configure` phase made `/srv/data` immutable before the bootstrap step, on an already formatted
+  volume. Nine kit bugs were found, and one environment fact: the project network has no direct Internet access, so
+  the worker must reach OpenStack through an HTTPS proxy while reaching guests directly.
+
+A kit fix round has started (Sonnet): https://claude.ai/code/session_016ti9w2cf2jBz2TrGgmbZeS
+(`claude/ovlm-lab-kit-fixes`), including `HTTPS_PROXY`/`NO_PROXY` support in the worker.
+
+Still running on Felcloud: `ovlm-lab-host`, `ovlm-acc-blue`, `ovlm-acc-data`. No floating IP touched.
