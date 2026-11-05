@@ -20,7 +20,7 @@
         <dt>Role</dt><dd>{{ managed.role }}</dd>
         <dt>Profile</dt><dd>{% if desired and desired.profile_id %}<span class="mono">{{ desired.profile_id | short_id }}</span>{% if desired.profile_version %} v{{ desired.profile_version }}{% endif %}{% else %}<span class="muted">no profile assigned</span>{% endif %}</dd>
         <dt>Registered</dt><dd>{{ managed.registered_at | timestamp }}</dd>
-        <dt>SSH host key</dt><dd>{% if managed.host_key_confirmed_at %}confirmed {{ managed.host_key_confirmed_at | timestamp }}{% else %}<span class="muted">not confirmed</span>{% endif %}</dd>
+        <dt>SSH host key</dt><dd>{% if managed.ssh_host_key_fingerprint %}<code>{{ managed.ssh_host_key_fingerprint }}</code> {% endif %}{% if managed.host_key_confirmed_at %}confirmed {{ managed.host_key_confirmed_at | timestamp }}{% elif managed.ssh_host_key_fingerprint %}<span class="muted">scanned, not confirmed (compare with the VM's console, then confirm: POST /api/v1/managed-vms/{{ managed.id }}/host-key/confirm)</span>{% else %}<span class="muted">not scanned yet</span>{% endif %}</dd>
       </dl>
       <p class="muted">Profile contents and drift against the observed state arrive with the profiles module.</p>
     {% else %}

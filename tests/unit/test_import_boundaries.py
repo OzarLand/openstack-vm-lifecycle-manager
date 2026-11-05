@@ -64,3 +64,22 @@ def test_importing_the_api_app_loads_no_outbound_module() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_api_loads_no_sync_job_scan_job_or_unsealing_code() -> None:
+    """The api only queues inventory syncs and host-key scans: the worker-side jobs (OpenStack read client, the
+    credential store's unsealing, ssh-keyscan) never load in the api process."""
+    import subprocess
+
+    worker_only = (
+        "ovlm.inventory.job", "ovlm.inventory.sync", "ovlm.registry.host_key_scan", "ovlm.connections.credentials",
+        "ovlm.connections.validation", "ovlm.secrets.keyring", "ovlm.renewal.production",
+    )  # fmt: skip
+    code = (
+        "import sys; import ovlm.api.app; "
+        f"bad=[m for m in {worker_only!r} if m in sys.modules]; print(bad); sys.exit(1 if bad else 0)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

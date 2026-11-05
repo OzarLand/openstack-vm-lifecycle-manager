@@ -37,6 +37,9 @@ class Action(StrEnum):
     INVENTORY_VIEW = "inventory.view"
     INVENTORY_SYNC = "inventory.sync"
     REGISTRY_MANAGE = "registry.manage"  # register/unregister VM, create/edit/delete service
+    HOST_KEY_CONFIRM = (
+        "host_key.confirm"  # confirm a managed VM's scanned SSH host key (ADR-0006), human session
+    )
     PROFILE_EDIT = "profile.edit"  # incl. automation ref + SHA, health check
     AUTOMATION_REPO_MANAGE = "automation_repo.manage"
     POLICY_EDIT = "policy.edit"  # incl. approval rules, SoD, retention
@@ -89,6 +92,7 @@ MATRIX: dict[Action, Rule] = {
     Action.INVENTORY_VIEW: _r(*ALL),
     Action.INVENTORY_SYNC: _r("operator", "admin", token_scope="inventory:sync"),  # noqa: S106
     Action.REGISTRY_MANAGE: _r("operator"),
+    Action.HOST_KEY_CONFIRM: _r("operator", human_only=True),
     Action.PROFILE_EDIT: _r("operator"),
     Action.AUTOMATION_REPO_MANAGE: _r("admin", human_only=True),
     Action.POLICY_EDIT: _r("admin", human_only=True),

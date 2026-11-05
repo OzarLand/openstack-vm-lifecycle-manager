@@ -218,6 +218,15 @@ def resolve_plan(
             "Not the current VM",
             "Only the service's current VM can be renewed.",
         )
+    if not vm["ssh_host_key_fingerprint"] or vm["host_key_confirmed_at"] is None:
+        # Blue is reached over SSH with StrictHostKeyChecking against this fingerprint only (ADR-0006): without
+        # a confirmed one, the run would stop at its first step on blue ("host key unverifiable").
+        raise _err(
+            409, "host-key-unconfirmed", "Host key not confirmed",
+            "The current VM's SSH host-key fingerprint has not been scanned and confirmed.",
+            "Wait for the host-key scan started at registration (or POST /api/v1/managed-vms/{id}/host-key-scans), "
+            "compare the fingerprint with the VM's console, then POST /api/v1/managed-vms/{id}/host-key/confirm.",
+        )  # fmt: skip
     svc = (
         conn.execute(text("SELECT * FROM service WHERE id = :id"), {"id": vm["service_id"]})
         .mappings()
