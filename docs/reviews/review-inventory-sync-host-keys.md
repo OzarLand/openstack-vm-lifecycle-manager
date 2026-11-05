@@ -41,9 +41,16 @@ same pattern; Low = hardening; Info = checked, no change required.
 ## Fixes (2026-11-05)
 
 The **Fixed** column records what changed on `claude/ovlm-fix-host-key-review` (from f0e854a). Every fix has a
-regression test that fails on f0e854a and passes after it. Results of that branch: `make lint` passed; unit tests
-passed as root and as a non-root user; the integration suite passed against a local PostgreSQL 16 with
-`OVLM_TEST_DATABASE_URL` (counts in the branch's report). Not run: `make smoke`, the Felcloud lab.
+regression test that fails on f0e854a and passes after it (checked by running the new tests against f0e854a's code:
+the reviewer's probe "DID NOT RAISE", the IS-8 run never finished, the IS-3 scans hit the other address).
+
+| Check | Result |
+|---|---|
+| `make lint` | passed (ruff, ruff format, mypy, import-linter: 3 contracts kept) |
+| Unit tests as root | 1244 passed, 1 skipped (the worker-user file-mode check, root only) |
+| Unit tests as a non-root user | 1243 passed, 2 skipped (the two tests that switch OS user need root) |
+| Full integration suite, local PostgreSQL 16.15 via `OVLM_TEST_DATABASE_URL` | 508 passed, 11 skipped (`test_automation_container.py`: Docker not available) |
+| Not run | `make smoke` (Compose stack), the Felcloud lab |
 
 ## Verdict
 
