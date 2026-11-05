@@ -67,8 +67,12 @@ def test_each_secret_has_its_own_data_key() -> None:
     "other",
     [
         credential_context("0190f1e2-0000-7000-8000-000000000002"),  # another row
-        SealContext("credential_ref", "0190f1e2-0000-7000-8000-000000000001", "other"),  # another column
-        SealContext("other_table", "0190f1e2-0000-7000-8000-000000000001", "secret"),  # another table
+        SealContext(
+            "credential_ref", "0190f1e2-0000-7000-8000-000000000001", "other"
+        ),  # another column
+        SealContext(
+            "other_table", "0190f1e2-0000-7000-8000-000000000001", "secret"
+        ),  # another table
     ],
 )
 def test_ciphertext_cannot_move_to_another_row_column_or_table(other: SealContext) -> None:
@@ -85,7 +89,7 @@ def test_tampering_is_detected(field: str) -> None:
     raw = bytearray(getattr(sealed, field))
     raw[-1] ^= 1
     with pytest.raises(KeyringError):
-        ring.unseal(replace(sealed, **{field: bytes(raw)}), CTX)
+        ring.unseal(replace(sealed, **{field: bytes(raw)}), CTX)  # type: ignore[arg-type]
 
 
 def test_kek_id_is_bound_to_the_wrap() -> None:
@@ -179,7 +183,9 @@ def test_key_file_must_be_x25519_and_owned_by_the_worker(tmp_path: Path) -> None
     other = tmp_path / "ed"
     other.write_bytes(
         Ed25519PrivateKey.generate().private_bytes(
-            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
         )
     )
     other.chmod(0o400)
@@ -251,9 +257,13 @@ def test_settings_refuse_a_private_key_outside_the_worker(tmp_path: Path) -> Non
 def test_credentials_dir_is_development_only(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="development_mode only"):
         Settings(
-            process_role="worker", external_url="https://x.test", renewal={"credentials_dir": tmp_path}
+            process_role="worker",
+            external_url="https://x.test",
+            renewal={"credentials_dir": tmp_path},
         )
-    dev = Settings(process_role="worker", development_mode=True, renewal={"credentials_dir": tmp_path})
+    dev = Settings(
+        process_role="worker", development_mode=True, renewal={"credentials_dir": tmp_path}
+    )
     assert dev.renewal.credentials_dir == tmp_path
 
 
@@ -274,7 +284,9 @@ def test_api_process_never_imports_the_key_ring() -> None:
 def test_import_linter_forbids_the_key_ring_in_the_api() -> None:
     text = (ROOT / "pyproject.toml").read_text()
     assert "the api cannot decrypt" in text
-    block = text.split("the api cannot decrypt", 1)[1].split("[[tool.importlinter.contracts]]", 1)[0]
+    block = text.split("the api cannot decrypt", 1)[1].split("[[tool.importlinter.contracts]]", 1)[
+        0
+    ]
     assert '"ovlm.api"' in block and '"ovlm.secrets.keyring"' in block
     assert "allow_indirect_imports = false" in block
 

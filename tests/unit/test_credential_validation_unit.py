@@ -4,6 +4,7 @@ upload checks, and how the renewal's production ports use the store's refusals."
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -56,7 +57,9 @@ def test_valid_read_and_write_credentials() -> None:
         ("os_read", {"restricted": False}, "unrestricted"),
     ],
 )
-def test_wrong_scope_roles_id_or_unrestricted_are_refused(kind: str, change: dict[str, Any], reason: str) -> None:
+def test_wrong_scope_roles_id_or_unrestricted_are_refused(
+    kind: str, change: dict[str, Any], reason: str
+) -> None:
     ok, why = evaluate_token(kind, facts(**change), CONN, APP, LATER, NOW)
     assert not ok and reason in why
 
@@ -114,7 +117,9 @@ def test_keystone_check_sends_exactly_one_token_request() -> None:
 
 def test_keystone_refusal_is_a_verdict_and_carries_no_secret() -> None:
     with pytest.raises(KeystoneRefusedError) as exc:
-        keystone_token_check("https://keystone.test/v3", APP, "s3cret-canary", True, adapter=CannedKeystone(401))
+        keystone_token_check(
+            "https://keystone.test/v3", APP, "s3cret-canary", True, adapter=CannedKeystone(401)
+        )
     assert "s3cret-canary" not in str(exc.value) and "401" in str(exc.value)
 
 
@@ -127,7 +132,7 @@ def test_upload_checks() -> None:
     with pytest.raises(DomainError) as e:
         check_upload("os_write", APP, NOW - timedelta(days=1), now=NOW)
     assert e.value.code == "credential-expired"
-    for bad in (
+    bads: list[Callable[[], object]] = [
         lambda: check_upload("os_read", APP, NOW + timedelta(days=181), now=NOW),
         lambda: check_upload("os_read", APP, None, now=NOW),
         lambda: check_upload("os_read", None, LATER, now=NOW),
@@ -135,7 +140,8 @@ def test_upload_checks() -> None:
         lambda: check_upload("os_read", "not-hex", LATER, now=NOW),
         lambda: check_upload("ssh_key", APP, None, now=NOW),
         lambda: check_upload("vault_password", None, None, now=NOW),
-    ):
+    ]
+    for bad in bads:
         with pytest.raises(DomainError):
             bad()
     assert check_upload("ssh_key", None, None, now=NOW).kind == "ssh_key"
@@ -143,7 +149,11 @@ def test_upload_checks() -> None:
 
 def test_auth_url_and_project_id_normalisation() -> None:
     assert normalise_auth_url("https://keystone.test:5000/v3/") == "https://keystone.test:5000/v3"
-    for bad in ("http://keystone.test/v3", "https://user:pw@keystone.test/v3", "https://k.test/v3?x=1"):
+    for bad in (
+        "http://keystone.test/v3",
+        "https://user:pw@keystone.test/v3",
+        "https://k.test/v3?x=1",
+    ):
         with pytest.raises(DomainError):
             normalise_auth_url(bad)
     assert normalise_project_id("01234567-89AB-CDEF-0123-456789ABCDEF") == PROJECT
@@ -156,13 +166,17 @@ def test_auth_url_and_project_id_normalisation() -> None:
 
 class _RefusingStore:
     def app_credential(self, pc: str, kind: str) -> Any:
-        raise CredentialUnavailableError("the write application credential (os_write) of this project expired at X")
+        raise CredentialUnavailableError(
+            "the write application credential (os_write) of this project expired at X"
+        )
 
     def guest_key(self, pc: str) -> Any:
         raise AssertionError("not reached")
 
     def write_metadata(self, pc: str) -> Any:
-        raise CredentialUnavailableError("this project has no validated write application credential (os_write)")
+        raise CredentialUnavailableError(
+            "this project has no validated write application credential (os_write)"
+        )
 
     def ca_path(self, info: Any) -> None:
         return None
@@ -170,7 +184,10 @@ class _RefusingStore:
 
 def test_admission_gets_the_store_reason_and_steps_stop_for_a_human() -> None:
     port = SdkCloudPort(StoreCredentialSource(_RefusingStore()))
-    assert port.unavailable_reason("pc") == "the write application credential (os_write) of this project expired at X"
+    assert (
+        port.unavailable_reason("pc")
+        == "the write application credential (os_write) of this project expired at X"
+    )
     with pytest.raises(AutomationError, match="no validated write"):
         port.write_credential_expires_at("pc")
     with pytest.raises(AutomationError, match="expired at X"):
