@@ -4,7 +4,7 @@
 |---|---|
 | Owner | Agent 2 — Chief Architect |
 | Status | **Designed** (Phase 1 proposal; nothing implemented) |
-| Last updated | 2026-11-04 |
+| Last updated | 2026-11-05 |
 
 > **Revision 2026-11-04**: DB role split `ovlm_api` / `ovlm_worker` with grants, `run_signal`, run `requested` state
 > (SEC-R-1); requester set and hash inputs on approvals, automation diff on plans (SEC-R-2); automation artefact
@@ -18,6 +18,10 @@
 > credential rotation fields (SEC-R-13); live-VM assessment flag (SEC-R-28); host-key policy `injected` (ADR-0006);
 > `profile_version` insert-only for the api (SEC-R-36); snapshot retention after restore (SRE-R-31); signal semantics
 > (SRE-R-24).
+>
+> **Revision 2026-11-05 (inventory sync / host-key review fixes)**: `managed_vm` insert guard, tombstone, confirmation
+> cleared on fingerprint change and CHECK (`registry_0002`, review IS-1); `sync_run.error` holds a reason code only
+> (IS-4).
 
 PostgreSQL, SQLAlchemy 2 + Alembic. Conventions: `id uuid` PK (UUIDv7, time-ordered); `created_at`, `updated_at`
 `timestamptz`; `version int` for optimistic concurrency where an API exposes ETags; enumerations as `text` + `CHECK`;
@@ -51,7 +55,7 @@ security_group, image, flavor}`:
 
 | Table | Key columns | Constraints / notes |
 |---|---|---|
-| `sync_run` | `project_connection_id`, `kind` (`full`, `servers_delta`), `started_at`, `finished_at`, `status`, `counts` jsonb, `error` jsonb, `workflow_run_id` | One row per sync; a failed sync never marks anything `gone` |
+| `sync_run` | `project_connection_id`, `kind` (`full`, `servers_delta`), `started_at`, `finished_at`, `status`, `counts` jsonb, `error` jsonb, `workflow_run_id` | One row per sync; a failed sync never marks anything `gone`. `error` is `{"code": ...}`, a fixed reason code (`src/ovlm/inventory/reasons.py`; security-model.md §4.1): viewers read it, so no exception text is stored (review IS-4). Rows written before hold `{"type", "message"}` and are shown as a code |
 | `observed_X` (current) | `project_connection_id`, `openstack_id`, `name`, typed key fields, `payload` jsonb (normalized), `payload_hash`, `first_seen_sync_id`, `last_seen_sync_id`, `missed_syncs int`, `status` (`present`, `gone`, `unknown`), `gone_at` | `UNIQUE(project_connection_id, openstack_id)`. Row is updated in place; history lives in revisions |
 | `observed_X_revision` | `observed_X_id`, `sync_run_id`, `payload`, `payload_hash`, `observed_at` | Inserted only when `payload_hash` changes (append-only). This is the FR-INV-3 snapshot. |
 
@@ -75,7 +79,8 @@ tombstone (deleted servers are returned with `changes-since`, SOURCE-VERIFIED §
 |---|---|---|
 | `service_group` | `name`, `description` | optional grouping for policy binding |
 | `service` | `name`, `slug`, `service_group_id`, `project_connection_id`, `owner_contact`, `current_profile_id` | `UNIQUE(slug)`; the long-lived identity (FR-REG-1) |
-| `managed_vm` | `service_id`, `observed_server_id`, `openstack_server_id`, `role` (`current`, `retained`, `candidate`, `retired`), `registered_by`, `registered_at`, `ssh_host_key_fingerprint`, `host_key_confirmed_by/at`, `launched_at_effective` | Partial unique: one `current` per service (`UNIQUE(service_id) WHERE role='current'`); `UNIQUE(openstack_server_id)` |
+| `managed_vm` | `service_id`, `observed_server_id`, `openstack_server_id`, `role` (`current`, `retained`, `candidate`, `retired`), `registered_by`, `registered_at`, `ssh_host_key_fingerprint`, `host_key_confirmed_by/at`, `launched_at_effective` | Partial unique: one `current` per service (`UNIQUE(service_id) WHERE role='current'`); `UNIQUE(openstack_server_id)`. Host-key trust (security-model.md §6.2.1, review IS-1): trigger `managed_vm_api_insert_guard` (no fingerprint or confirmation in an `ovlm_api` insert; no tomb-stoned id for any role); `managed_vm_host_key_follow` clears `host_key_confirmed_*` when the fingerprint changes; CHECK `managed_vm_host_key_confirmation` (confirmed_at and confirmed_by both set or both NULL, and a confirmation needs a fingerprint) |
+| `managed_vm_tombstone` | `id` (a deleted `managed_vm.id`), `openstack_server_id`, `deleted_by_role`, `deleted_at` | Written only by the `SECURITY DEFINER` AFTER DELETE trigger on `managed_vm`; SELECT for `ovlm_api` and `ovlm_worker`, no other grant. A deleted id is never inserted again; re-registering the same server draws a new id |
 
 Renewal moves `current` → `retained` → `retired` for blue and creates green as `candidate` → `current` (one
 transaction at `verify_external` success).
@@ -155,7 +160,8 @@ mounted into api or worker containers, SEC-R-18) owns all tables; `ovlm_audit_ad
 | users, sessions, api tokens, step-up records, role bindings + history (security-model.md) | read/write | SELECT on users, step-up records, role bindings + history (to re-validate approvals); nothing on sessions/tokens |
 | sealed secret values | INSERT (seal) only; **no SELECT** on ciphertext columns | SELECT; UPDATE (re-wrap) |
 | `credential_ref` metadata, `cloud`, `project_connection` | read/write | SELECT; UPDATE on validation columns |
-| `service`, `managed_vm`, `profile`, `policy*` | read/write (no UPDATE of `managed_vm.role`) | SELECT; UPDATE `managed_vm.role`, `ssh_host_key_fingerprint` |
+| `service`, `managed_vm`, `profile`, `policy*` | read/write (`managed_vm`: SELECT, INSERT, DELETE, UPDATE of `host_key_confirmed_by/at` only; inserts guarded, deletes tomb-stoned) | SELECT; UPDATE `managed_vm.role`, `ssh_host_key_fingerprint` (clears the confirmation when it changes) |
+| `managed_vm_tombstone` | SELECT | SELECT |
 | `profile_version` | INSERT, SELECT only (no UPDATE, no DELETE, SEC-R-36) | SELECT; UPDATE `lint_result` only |
 | `lint_waiver`, `installation_setting` | INSERT, SELECT | SELECT |
 | `renewal_plan`, `approval` | read/write (no UPDATE of `renewal_plan.automation_diff`) | SELECT; UPDATE `renewal_plan.automation_diff`, `renewal_plan.state` (`started`) |

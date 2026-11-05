@@ -39,16 +39,10 @@ def one(phase: str, tasks: str, **kw: str) -> dict[str, str]:
     return {f"playbooks/{phase}.yml": play(tasks, **kw)}
 
 
-def test_reference_workload_only_trips_the_probe_rule() -> None:
+def test_reference_workload_is_clean_without_waivers() -> None:
+    # Its check_mode: false tasks are all read-only probes (allowlisted modules or programs, changed_when: false).
     res = lint_repo(ROOT / "ansible", "playbooks")
-    assert {f.rule for f in res.findings} == {
-        "check_mode_forced"
-    }  # read-only probes; needs an audited waiver
-    waived = lint_repo(
-        ROOT / "ansible", "playbooks",
-        waivers=StaticWaivers((Waiver("w1", "check_mode_forced", "roles/*/tasks/*.yml", "appr", "probes"),)),
-    )  # fmt: skip
-    assert waived.ok and waived.waived
+    assert res.ok and not res.findings, res.findings
 
 
 def test_clean_playbook_passes(tmp_path: Path) -> None:
@@ -323,3 +317,65 @@ def test_requirements_pins(tmp_path: Path) -> None:
     assert chk(f"roles:\n  - src: https://x/r.git\n    version: {'a' * 40}\n") == []
     assert chk("roles:\n  - name: geerlingguy.nginx\n    version: latest\n") != []
     assert check_requirements_pinned(tmp_path / "missing.yml") == []
+
+
+# ---- roles next to the playbook directory (ansible/playbooks + ansible/roles) ---------------------------
+
+
+def test_the_reference_workload_lints_in_its_real_layout() -> None:
+    repo = Path(__file__).resolve().parents[3]
+    result = lint_repo(repo, "ansible/playbooks")
+    unresolved = [f for f in result.findings if f.rule == "unresolved_include"]
+    assert not unresolved, unresolved
+    assert result.ok, result.findings
+
+
+def test_sibling_roles_dir_is_found_and_stays_inside_the_repo(tmp_path: Path) -> None:
+    pb = tmp_path / "ansible" / "playbooks"
+    pb.mkdir(parents=True)
+    (tmp_path / "ansible" / "roles" / "app" / "tasks").mkdir(parents=True)
+    (tmp_path / "ansible" / "roles" / "app" / "tasks" / "main.yml").write_text(
+        "- ansible.builtin.debug:\n    msg: hi\n"
+    )
+    linter = lint_mod._Linter(tmp_path, "ansible/playbooks", None, None)  # noqa: SLF001
+    assert linter.role_dirs("app") == [tmp_path.resolve() / "ansible" / "roles" / "app"]
+    top = lint_mod._Linter(tmp_path, "playbooks", None, None)  # noqa: SLF001
+    assert top.role_dirs("app") == []  # the repository root's parent is never searched
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        "- ansible.builtin.command: mountpoint -q /srv/data\n  changed_when: false\n  check_mode: false",
+        "- ansible.builtin.command: {argv: [findmnt, -n, /srv/data]}\n  changed_when: false\n  check_mode: false",
+        "- ansible.builtin.command: e2fsck -n /dev/vdb\n  changed_when: false\n  check_mode: false",
+        "- ansible.builtin.command: start-stop-daemon --status --pidfile /run/x.pid\n  changed_when: false\n  check_mode: false",
+        "- ansible.builtin.stat: {path: /srv/data}\n  check_mode: false",
+        "- ansible.builtin.uri: {url: 'http://127.0.0.1:8080/health'}\n  check_mode: false",
+        "- ansible.builtin.wait_for: {port: 8080}\n  check_mode: false",
+    ],
+)
+def test_read_only_probes_may_force_check_mode(tmp_path: Path, task: str) -> None:
+    assert "check_mode_forced" not in rules(tmp_path, one("configure", task))
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        # not provably read-only: shell, an unlisted program, a templated program, a repair flag, a write method
+        "- ansible.builtin.shell: mountpoint -q /srv/data\n  changed_when: false\n  check_mode: false",
+        "- ansible.builtin.command: rm -rf /srv/data\n  changed_when: false\n  check_mode: false",
+        "- ansible.builtin.command: '{{ prog }} /srv/data'\n  changed_when: false\n  check_mode: false",
+        "- ansible.builtin.command: e2fsck -n -y /dev/vdb\n  changed_when: false\n  check_mode: false",
+        "- ansible.builtin.command: e2fsck -p /dev/vdb\n  changed_when: false\n  check_mode: false",
+        "- ansible.builtin.command: start-stop-daemon --stop --pidfile /run/x.pid\n  changed_when: false\n  check_mode: false",
+        "- ansible.builtin.command: mountpoint -q /srv/data\n  check_mode: false",  # changed_when missing
+        "- ansible.builtin.command: mountpoint -q /srv/data\n  changed_when: false\n  always_run: true",
+        "- ansible.builtin.uri: {url: 'http://x/', method: POST}\n  check_mode: false",
+        "- ansible.builtin.uri: {url: 'http://x/', dest: /etc/passwd}\n  check_mode: false",
+        "- community.general.anything: {}\n  check_mode: false",
+        "- block:\n    - ansible.builtin.stat: {path: /x}\n  check_mode: false",  # block-level forcing
+    ],
+)
+def test_anything_else_that_forces_check_mode_stays_blocked(tmp_path: Path, task: str) -> None:
+    assert "check_mode_forced" in rules(tmp_path, one("configure", task))

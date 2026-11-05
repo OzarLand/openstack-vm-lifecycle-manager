@@ -57,7 +57,7 @@ WAIVE_PROBES = Waiver(
     rule="check_mode_forced",
     path_glob="roles/*/tasks/*.yml",
     approver="test-approver",
-    reason="read-only probes must also run under --check (reference workload)",
+    reason="a read-only task outside the lint allowlist must also run under --check (test fixture)",
 )
 VOLUME = DataVolume(
     id="0f1e2d3c-4b5a-4697-8877-665544332211", mount_point="/srv/data", fs_type="ext4"
@@ -186,6 +186,14 @@ def repo(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
         ANSIBLE_DIR, root, dirs_exist_ok=True,
         ignore=shutil.ignore_patterns("work", "__pycache__", "*.pyc"),
     )  # fmt: skip
+    # The reference roles pass the lint with no waiver (their forced tasks are allowlisted read-only probes). To keep
+    # the waiver path under test, add one harmless forced task whose program is not on the read-only list.
+    preflight = root / "roles" / "preflight" / "tasks" / "main.yml"
+    preflight.write_text(
+        preflight.read_text()
+        + '\n- name: "Kernel release (read-only; not on the lint allowlist, so it needs the waiver)"\n'
+        "  ansible.builtin.command: uname -r\n  changed_when: false\n  check_mode: false\n"
+    )
     env = {
         "PATH": os.environ["PATH"],
         "GIT_CONFIG_GLOBAL": "/dev/null",

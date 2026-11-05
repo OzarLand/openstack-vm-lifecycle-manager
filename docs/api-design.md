@@ -65,7 +65,7 @@ approver). "op" below = operator. SoD (requester ≠ approver; retirement two-pe
 | Method + path | Role | Notes |
 |---|---|---|
 | `POST /projects/{id}/syncs` | op or admin (token scope `inventory:sync` or `operate`) | `{id}` is the project connection id. **202** run (`inventory_sync`); **409** `sync-already-pending` while a sync of that project is queued or running (the run id is in `detail`); 404 when the project is not visible; 409 `project-disabled`. The worker uses the connection's validated read credential and refuses a token scoped to another OpenStack project. The worker also queues one per eligible connection every `inventory.sync_interval` (0: off) |
-| `GET /projects/{id}/syncs`, `GET /syncs/{id}` | viewer | `items`: sync records (status, kind, counts, error, `workflow_run_id`); `runs`: the recent sync runs (state, origin `api`/`periodic`, why one ended) |
+| `GET /projects/{id}/syncs`, `GET /syncs/{id}` | viewer | `items`: sync records (status, kind, counts, `error` = `{"code": ...}`, `workflow_run_id`); `runs`: the recent sync runs (state, origin `api`/`periodic`, `end_reason`: why one ended, as a fixed code such as `credential_unavailable`, `auth_failed`, `project_mismatch`, `cloud_error`; never exception text, security-model.md §4.1) |
 | `GET /servers?project=&status=&tag=&registered=` | viewer | observed servers |
 | `GET /servers/{id}` | viewer | observed fields + attachments + ports + FIPs + revisions link |
 | `GET /servers/{id}/revisions` | viewer | snapshot history |
@@ -77,7 +77,7 @@ approver). "op" below = operator. SoD (requester ≠ approver; retirement two-pe
 | Method + path | Role | Notes |
 |---|---|---|
 | `GET/POST /services`, `GET/PATCH/DELETE /services/{id}` | viewer / op | DELETE only if no managed VM is `current` |
-| `POST /services/{id}/managed-vms` `{observed_server_id}` | op | registration: **201** with the managed VM (created synchronously) and `host_key_scan_run`, the `host_key_scan` run it queued (worker: `ssh-keyscan` of the VM's fixed address from the inventory; the preferred key's fingerprint goes to `ssh_host_key_fingerprint`) |
+| `POST /services/{id}/managed-vms` `{observed_server_id}` | op | registration: **201** with the managed VM (created synchronously) and `host_key_scan_run`, the `host_key_scan` run it queued (worker: `ssh-keyscan` of `fixed_ips[0]` of the service floating IP's port, the address the renewal uses, security-model.md §6.2.1; the preferred key's fingerprint goes to `ssh_host_key_fingerprint`) |
 | `POST /managed-vms/{id}/host-key-scans` | op | **202** run (`host_key_scan`); a queued scan is returned (`already_pending`). A scan never replaces a **confirmed** fingerprint: a different key fails the run ("host key changed") |
 | `POST /managed-vms/{id}/host-key/confirm` `{fingerprint}` | op, human session (matrix `host_key.confirm`) | the operator confirms the scanned fingerprint after comparing it out of band (the VM's console or `ssh-keygen -lf` on the VM). The body must equal the scanned value: 409 `host-key-not-scanned`, 409 `host-key-mismatch`, 422 malformed; idempotent; audited (ADR-0006). `POST /plans` is refused (409 `host-key-unconfirmed`) until the current VM's key is confirmed: the renewal reaches blue only with this fingerprint |
 | `GET /managed-vms`, `GET /managed-vms/{id}` | viewer | response has `desired` (profile version) and `observed` blocks separately (FR-REG-4), plus `drift` (V1) |

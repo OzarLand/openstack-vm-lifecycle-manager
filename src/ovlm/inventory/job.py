@@ -19,8 +19,13 @@ connect_read_credential` (no ``clouds.yaml``, TLS verified, GET/HEAD guard insta
 ``requests`` session reads ``HTTPS_PROXY``/``NO_PROXY`` like the renewal's write session (install-guide.md 5a).
 
 A credential that is missing, invalid, expired, bound to another endpoint or sealed to a key this worker does not
-hold, and a token scoped to another project, are **recorded failures**: a ``failed`` ``sync_run`` with a safe
-reason (no secret), the run ends ``failed`` with the same reason, and nothing in the inventory changes.
+hold, a read client that cannot be built from it (review IS-8: a configuration error is not retried for ever), and
+a token scoped to another project, are **recorded failures**: a ``failed`` ``sync_run``, the run ends ``failed``,
+and nothing in the inventory changes.
+
+What viewers see is a fixed code (:mod:`ovlm.inventory.reasons`, review IS-4): ``sync_run.error`` is
+``{"code": ...}`` and the step's failure reason is the code. The redacted reason text goes to the worker log and the
+step error's ``detail`` only.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from uuid import UUID
 
 from sqlalchemy import Engine, func, insert, select, text, update
 
+from ovlm.inventory import reasons as rc
 from ovlm.inventory import requests as req
 from ovlm.inventory.ids import uuid7
 from ovlm.inventory.sync import (
@@ -75,7 +81,12 @@ NO_STORE_REASON = (
 
 
 class CredentialRefusedError(Exception):
-    """No usable read credential; the message is safe to show (it never carries secret material)."""
+    """No usable read client; the message never carries secret material (still kept out of what viewers see).
+    ``code`` is the reason code (:mod:`ovlm.inventory.reasons`)."""
+
+    def __init__(self, message: str, code: str = rc.CREDENTIAL_UNAVAILABLE) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ReadAccess(Protocol):
@@ -100,15 +111,26 @@ class StoreReadAccess:
         from ovlm.connections.credentials import CredentialUnavailableError, connect_read_credential
 
         connect = self.connect or connect_read_credential
-        try:
+        try:  # a database error here stays retryable (the engine's classify)
             cred = self.store.app_credential(project_connection_id, "os_read")
-            client = connect(
-                cred, self.store.ca_path(cred.connection), process_role=self.process_role
-            )
         except (
             CredentialUnavailableError
         ) as exc:  # missing, failed validation, expired, rebound, key missing
             raise CredentialRefusedError(str(exc)[:300]) from None
+        try:
+            client = connect(
+                cred, self.store.ca_path(cred.connection), process_role=self.process_role
+            )
+        except CredentialUnavailableError as exc:
+            raise CredentialRefusedError(str(exc)[:300]) from None
+        except Exception as exc:  # noqa: BLE001 - IS-8: building the client sends nothing (a bad CA file, a
+            # configuration error): retrying cannot help, so it is a recorded failure, not an endless retry.
+            raise CredentialRefusedError(
+                f"the read client could not be set up: {type(exc).__name__}: {redact_text(str(exc))}"[
+                    :300
+                ],
+                rc.CLIENT_SETUP_FAILED,
+            ) from None
         return client, cred.connection.openstack_project_id
 
 
@@ -144,16 +166,17 @@ def record_refusal(
     engine: Engine,
     project: UUID,
     run_id: str | None,
-    error_type: str,
+    code: str,
     message: str,
     config: SyncConfig,
 ) -> UUID:
-    """A ``failed`` ``sync_run`` that changed nothing: the sync could not start (credential, project check)."""
+    """A ``failed`` ``sync_run`` that changed nothing: the sync could not start (credential, project check).
+    The record carries the code only; the redacted ``message`` is logged (IS-4)."""
     sync_id = uuid7()
     with engine.begin() as c:
         now = c.execute(select(func.now())).scalar_one()
     kind, _ = choose_kind(engine, project, now, config)
-    error = {"type": error_type, "message": redact_text(message)[:500]}
+    error = {"code": code}
     with engine.begin() as c:
         c.execute(
             insert(sync_run).values(
@@ -163,8 +186,9 @@ def record_refusal(
         )  # fmt: skip
     log.warning(
         "inventory sync refused",
-        extra={"sync_run_id": str(sync_id), "project_connection_id": str(project), "error": error},
-    )
+        extra={"sync_run_id": str(sync_id), "project_connection_id": str(project), "code": code,
+               "reason": redact_text(message)[:500]},
+    )  # fmt: skip
     return sync_id
 
 
@@ -184,10 +208,7 @@ def close_interrupted(engine: Engine, project: UUID, run_id: str) -> int:
                     .values(
                         status="failed",
                         finished_at=func.now(),
-                        error={
-                            "type": "Interrupted",
-                            "message": "the worker stopped during the sync",
-                        },
+                        error={"code": rc.INTERRUPTED},
                     )
                 ).rowcount
             )
@@ -202,47 +223,54 @@ def sync_project(
     *,
     config: SyncConfig,
     workflow_run_id: str | None = None,
-) -> tuple[str, str | None]:
-    """One sync of one project connection with its read credential. Returns ``(status, reason)``; ``status`` is
-    ``succeeded`` or ``failed``. Raises :class:`SyncAlreadyRunningError` when another sync holds the lock."""
+) -> tuple[str, str | None, str | None]:
+    """One sync of one project connection with its read credential. Returns ``(status, code, reason)``:
+    ``status`` is ``succeeded`` or ``failed``, ``code`` the reason code (:mod:`ovlm.inventory.reasons`) and
+    ``reason`` the redacted text (worker log and step error detail only). Raises :class:`SyncAlreadyRunningError`
+    when another sync holds the lock."""
     project = UUID(project_connection_id)
     try:
         client, expected = access.open(project_connection_id)
     except CredentialRefusedError as exc:
-        record_refusal(engine, project, workflow_run_id, "CredentialUnavailable", str(exc), config)
-        return "failed", str(exc)
+        record_refusal(engine, project, workflow_run_id, exc.code, str(exc), config)
+        return "failed", exc.code, str(exc)
     try:
         actual = client.project_id()
     except Exception as exc:  # noqa: BLE001 - Keystone said no, or could not be reached: a recorded failure
         reason = f"the read credential could not obtain a token: {type(exc).__name__}: {redact_text(str(exc))}"
-        record_refusal(engine, project, workflow_run_id, "AuthenticationFailed", reason, config)
-        return "failed", reason[:300]
+        record_refusal(engine, project, workflow_run_id, rc.AUTH_FAILED, reason, config)
+        return "failed", rc.AUTH_FAILED, reason[:300]
     if normalise_project_id(actual) != normalise_project_id(expected):
         reason = (
             f"the read credential's token is scoped to OpenStack project {normalise_project_id(actual)!r}, "
             f"not to this connection's project {normalise_project_id(expected)!r}: nothing was synced"
         )
-        record_refusal(engine, project, workflow_run_id, "ProjectMismatch", reason, config)
-        return "failed", reason
+        record_refusal(engine, project, workflow_run_id, rc.PROJECT_MISMATCH, reason, config)
+        return "failed", rc.PROJECT_MISMATCH, reason
     result = run_inventory_sync(
         engine, client, project, config=config,
         workflow_run_id=UUID(workflow_run_id) if workflow_run_id else None,
     )  # fmt: skip
     if result.status == "succeeded":
-        return "succeeded", None
-    return "failed", (result.error or {}).get("message")
+        return "succeeded", None, None
+    err = result.error or {}
+    return "failed", str(err.get("code") or rc.CLOUD_ERROR), err.get("message")
 
 
 # --- workflow definitions -------------------------------------------------------------------------------------------
 
 
-def _outcome(row: Any) -> Outcome:
+def _outcome(row: Any, message: str | None = None) -> Outcome:
+    """The run's outcome from its finished ``sync_run``. A failure's reason is the code viewers see (IS-4); the
+    redacted text, when this attempt has it, goes to the step error's detail only."""
     if row.status == "succeeded":
         totals = {res: c.get("seen", 0) for res, c in (row.counts or {}).items()}
         return Done({"sync_run_id": str(row.id), "kind": row.kind, "seen": totals})
-    err = row.error or {}
-    reason = f"{err.get('type', 'Error')}: {err.get('message', '')}"[:500]
-    return Fail(ErrorClass.FATAL, reason, {"sync_run_id": str(row.id)})
+    code = (rc.public_error(row.error) or {}).get("code", rc.OTHER)
+    detail: dict[str, Any] = {"sync_run_id": str(row.id)}
+    if message:
+        detail["message"] = redact_text(message)[:500]
+    return Fail(ErrorClass.FATAL, code, detail)
 
 
 class SyncStep(Step):
@@ -250,6 +278,8 @@ class SyncStep(Step):
 
     def __init__(self, engine: Engine, access: ReadAccess, config: SyncConfig) -> None:
         self.engine, self.access, self.config = engine, access, config
+        #: run id -> the redacted reason of the attempt that just acted (act -> verify, same attempt).
+        self._reasons: dict[str, str | None] = {}
 
     def probe(self, ctx: StepContext) -> Any:
         return _sync_rows(self.engine, ctx.run.id)
@@ -257,10 +287,10 @@ class SyncStep(Step):
     def decide(self, ctx: StepContext, observed: Any) -> Decision:
         pc = ctx.run.subject.get("project_connection_id")
         if not pc:
-            return Fail(ErrorClass.FATAL, "the run names no project connection")
+            return Fail(ErrorClass.FATAL, "no_project_connection")
         finished = [r for r in observed if r.status in ("succeeded", "failed")]
         if finished:  # a previous attempt finished the sync: its outcome is the run's
-            return _outcome(finished[0])
+            return _outcome(finished[0], (ctx.previous_evidence or {}).get("reason"))
         return Act({"project_connection_id": pc, "interrupted": bool(observed)})
 
     def act(self, ctx: StepContext, intent: Mapping[str, Any]) -> None:
@@ -268,21 +298,33 @@ class SyncStep(Step):
         if intent.get("interrupted"):
             close_interrupted(self.engine, UUID(pc), ctx.run.id)
         ctx.gate("inventory:sync")
-        status, reason = sync_project(
+        status, code, reason = sync_project(
             self.engine, self.access, pc, config=self.config, workflow_run_id=ctx.run.id
         )
-        ctx.checkpoint(evidence={"status": status, "reason": reason})
+        # evidence is the step's own record (not served to viewers); the redacted reason is kept for verify
+        ctx.checkpoint(evidence={"status": status, "code": code, "reason": reason})
+        self._reasons[ctx.run.id] = reason
 
     def verify(self, ctx: StepContext, intent: Mapping[str, Any]) -> Outcome:
         finished = [r for r in self.probe(ctx) if r.status in ("succeeded", "failed")]
         if not finished:
             return Fail(ErrorClass.RETRYABLE, "the sync left no finished record")
-        return _outcome(finished[0])
+        return _outcome(finished[0], self._reasons.pop(ctx.run.id, None))
 
     def classify(self, ctx: StepContext, exc: Exception) -> Fail:
         if isinstance(exc, SyncAlreadyRunningError):
-            return Fail(ErrorClass.RETRYABLE, "another sync of this project is running")
-        return Fail(ErrorClass.RETRYABLE, f"{type(exc).__name__}: {redact_text(str(exc))}"[:500])
+            return Fail(ErrorClass.RETRYABLE, rc.SYNC_ALREADY_RUNNING)
+        log.warning(
+            "inventory sync attempt failed",
+            extra={
+                "run_id": ctx.run.id,
+                "error": f"{type(exc).__name__}: {redact_text(str(exc))}"[:500],
+            },
+        )
+        return Fail(
+            ErrorClass.RETRYABLE, rc.WORKER_ERROR,
+            {"message": f"{type(exc).__name__}: {redact_text(str(exc))}"[:500]},
+        )  # fmt: skip
 
 
 class InventorySyncDefinition(WorkflowDefinition):
@@ -302,15 +344,15 @@ class InventorySyncDefinition(WorkflowDefinition):
     def admit(self, ctx: TxContext) -> Admission | Reject | Defer:
         pc = ctx.run.subject.get("project_connection_id")
         if not pc:
-            return Reject("the run names no project connection")
+            return Reject("no_project_connection")
         row = ctx.conn.execute(
             text("SELECT enabled FROM project_connection WHERE id = CAST(:p AS uuid)"),
             {"p": str(pc)},
         ).first()
         if row is None:
-            return Reject("no such project connection")
+            return Reject("project_not_found")
         if not row.enabled:
-            return Reject("the project connection is disabled")
+            return Reject("project_disabled")
         return Admission(StepSpec(SYNC))
 
     def next(self, ctx: TxContext, done: Done) -> Transition:

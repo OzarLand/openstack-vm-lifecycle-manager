@@ -24,7 +24,7 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 from ovlm.automation import checkout as co
@@ -75,6 +75,23 @@ _MAX_EVENT_FILES = 5000
 _MAX_EVENT_BYTES = 256 * 1024
 _MAX_SUMMARY = 500
 _CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def roles_search_path(project: Path, playbook_dir: str) -> str:
+    """Ansible roles path for a checkout: ``<playbook_dir>/roles``, then the sibling ``<parent>/roles`` (the common
+    ``ansible/playbooks`` + ``ansible/roles`` layout), then ``roles`` at the repository root. Duplicates are dropped;
+    every entry stays inside the checkout because ``playbook_dir`` is a validated relative path."""
+    rel = PurePosixPath(playbook_dir.strip("/"))
+    candidates = [rel / "roles"]
+    if rel.parent != PurePosixPath("."):
+        candidates.append(rel.parent / "roles")
+    candidates.append(PurePosixPath("roles"))
+    seen: list[str] = []
+    for c in candidates:
+        path = str(project / c)
+        if path not in seen:
+            seen.append(path)
+    return ":".join(seen)
 
 
 class FenceLike(Protocol):
@@ -365,9 +382,7 @@ class AutomationRunner:
         ev_sha, ev_bytes, ev_keys = extravars_digest(extravars)
         run.write_secret("env/extravars", ev_bytes)
 
-        roles = ":".join(
-            str(project / sub) for sub in (f"{spec.playbook_dir.strip('/')}/roles", "roles")
-        )
+        roles = roles_search_path(project, spec.playbook_dir)
         collections = ":".join(str(c) for c in self._collections_search_path(project))
         run.write_file("ansible.cfg", render_ansible_cfg(p, collections, roles).encode())
         run.write_file(
@@ -469,9 +484,7 @@ class AutomationRunner:
             known_hosts = run.write_file("known_hosts", b"")
             conn = connection_vars(req, run.sub("env") / "guest_key", known_hosts, None)
             run.write_file("inventory/hosts.yml", render_inventory(req, conn).encode())
-            roles = ":".join(
-                str(project / sub) for sub in (f"{spec.playbook_dir.strip('/')}/roles", "roles")
-            )
+            roles = roles_search_path(project, spec.playbook_dir)
             collections = ":".join(str(c) for c in self._collections_search_path(project))
             run.write_file("ansible.cfg", render_ansible_cfg(run.path, collections, roles).encode())
             env = scrubbed_env(

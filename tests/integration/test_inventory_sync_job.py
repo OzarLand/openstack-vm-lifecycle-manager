@@ -97,6 +97,15 @@ def _post_sync(st: Store, c: TestClient, pc: str, **headers: str) -> Any:
     return c.post(f"/api/v1/projects/{pc}/syncs", headers=h)
 
 
+def _step_error(st: Store, run_id: str) -> dict[str, Any]:
+    """The restricted step error of a run (``workflow_step.error``, not served by the api): code and detail."""
+    [row] = st.env.sql(
+        "SELECT error FROM workflow_step WHERE run_id = CAST(:r AS uuid) AND error IS NOT NULL "
+        "ORDER BY seq DESC LIMIT 1", r=run_id,
+    )  # fmt: skip
+    return dict(row.error)
+
+
 def _runs(st: Store, pc: str) -> list[Any]:
     """The project's sync runs, oldest first, with the reason a run ended (as ``GET .../syncs`` shows it)."""
     from ovlm.inventory.requests import recent_runs
@@ -178,13 +187,10 @@ def test_a_token_scoped_to_another_project_is_refused_and_nothing_is_synced(st: 
     assert _post_sync(st, _operator(st), pc).status_code == 202
     _drive(st, cloud)
     [wr] = _runs(st, pc)
-    assert (
-        wr.state == "failed"
-        and "ProjectMismatch" in wr.end_reason
-        and OTHER_PROJECT in wr.end_reason
-    )
+    assert (wr.state, wr.end_reason) == ("failed", "project_mismatch")  # a code for viewers (IS-4)
+    assert OTHER_PROJECT in _step_error(st, wr.id)["message"]  # the text: step error and log only
     [row] = st.env.sql("SELECT status, error FROM sync_run")
-    assert row.status == "failed" and row.error["type"] == "ProjectMismatch"
+    assert row.status == "failed" and row.error == {"code": "project_mismatch"}
     assert st.env.sql("SELECT count(*) FROM observed_server")[0][0] == 0
     assert cloud.fake.calls == []  # nothing listed
 
@@ -201,11 +207,12 @@ def _sync_once(st: Store, pc: str, cloud: Cloud) -> Any:
 def test_no_read_credential_is_a_clear_failure(st: Store) -> None:
     pc = st.connection()
     run = _sync_once(st, pc, Cloud(st.store))
-    assert run.state == "failed" and "no validated read application credential" in run.end_reason
+    assert (run.state, run.end_reason) == ("failed", "credential_unavailable")
+    assert "no validated read application credential" in _step_error(st, run.id)["message"]
     [row] = st.env.sql("SELECT status, error, kind FROM sync_run")
     assert (
         row.status == "failed"
-        and row.error["type"] == "CredentialUnavailable"
+        and row.error == {"code": "credential_unavailable"}
         and row.kind == "full"
     )
 
@@ -216,7 +223,8 @@ def test_a_pending_credential_is_not_used(st: Store) -> None:
     assert st.upload(pc, "os_read", CANARY, APP_R).status_code == 202  # uploaded, not validated yet
     cloud = Cloud(st.store)
     run = _sync_once(st, pc, cloud)
-    assert run.state == "failed" and "no validated read" in run.end_reason and cloud.seen == []
+    assert run.state == "failed" and run.end_reason == "credential_unavailable" and cloud.seen == []
+    assert "no validated read" in _step_error(st, run.id)["message"]
 
 
 def test_a_credential_that_failed_validation_is_refused(st: Store) -> None:
@@ -226,11 +234,8 @@ def test_a_credential_that_failed_validation_is_refused(st: Store) -> None:
     )
     cloud = Cloud(st.store)
     run = _sync_once(st, pc, cloud)
-    assert (
-        run.state == "failed"
-        and "failed its last validation" in run.end_reason
-        and cloud.seen == []
-    )
+    assert run.state == "failed" and run.end_reason == "credential_unavailable" and cloud.seen == []
+    assert "failed its last validation" in _step_error(st, run.id)["message"]
 
 
 def test_an_expired_credential_is_refused(st: Store) -> None:
@@ -238,7 +243,8 @@ def test_an_expired_credential_is_refused(st: Store) -> None:
     st.env.sql("UPDATE credential_ref SET verified_expires_at = now() - interval '1 minute'")
     cloud = Cloud(st.store)
     run = _sync_once(st, pc, cloud)
-    assert run.state == "failed" and "expired" in run.end_reason and cloud.seen == []
+    assert run.state == "failed" and run.end_reason == "credential_unavailable" and cloud.seen == []
+    assert "expired" in _step_error(st, run.id)["message"]
 
 
 def test_a_credential_bound_to_another_endpoint_is_refused(st: Store) -> None:
@@ -246,7 +252,8 @@ def test_a_credential_bound_to_another_endpoint_is_refused(st: Store) -> None:
     st.env.sql("UPDATE cloud SET region = 'R2'")  # the endpoint changed after upload
     cloud = Cloud(st.store)
     run = _sync_once(st, pc, cloud)
-    assert run.state == "failed" and "endpoint" in run.end_reason and cloud.seen == []
+    assert run.state == "failed" and run.end_reason == "credential_unavailable" and cloud.seen == []
+    assert "endpoint" in _step_error(st, run.id)["message"]
 
 
 def test_a_secret_sealed_to_an_unknown_key_is_a_reason_not_a_crash(
@@ -258,11 +265,8 @@ def test_a_secret_sealed_to_an_unknown_key_is_a_reason_not_a_crash(
     other = Keyring(serialization.load_pem_private_key(generate_private_pem(), password=None))  # type: ignore[arg-type]
     cloud = Cloud(CredentialStore(st.worker_engine, other, tmp_path / "ca2"))
     run = _sync_once(st, pc, cloud)
-    assert (
-        run.state == "failed"
-        and "cannot be decrypted by this worker" in run.end_reason
-        and cloud.seen == []
-    )
+    assert run.state == "failed" and run.end_reason == "credential_unavailable" and cloud.seen == []
+    assert "cannot be decrypted by this worker" in _step_error(st, run.id)["message"]
 
 
 def test_a_disabled_connection_is_rejected_at_admission(st: Store) -> None:
@@ -275,8 +279,11 @@ def test_a_disabled_connection_is_rejected_at_admission(st: Store) -> None:
 
 def test_without_a_worker_key_every_sync_says_why(st: Store) -> None:
     pc = _read_ready(st)
-    status, reason = job.sync_project(st.worker_engine, job.NoReadAccess(), pc, config=SyncConfig())
-    assert status == "failed" and "kek.private_key_file" in (reason or "")
+    status, code, reason = job.sync_project(
+        st.worker_engine, job.NoReadAccess(), pc, config=SyncConfig()
+    )
+    assert (status, code) == ("failed", "credential_unavailable")
+    assert "kek.private_key_file" in (reason or "")
 
 
 def test_the_secret_never_reaches_logs_or_records_even_when_the_cloud_echoes_it(st: Store) -> None:
@@ -284,12 +291,79 @@ def test_the_secret_never_reaches_logs_or_records_even_when_the_cloud_echoes_it(
     cloud = Cloud(st.store)
     cloud.fake.fail("list_volumes", OpenStackError(f"upstream said: bad secret {CANARY}"))
     run = _sync_once(st, pc, cloud)
-    assert run.state == "failed" and CANARY not in run.end_reason
+    assert (run.state, run.end_reason) == ("failed", "cloud_error")
     [row] = st.env.sql("SELECT error FROM sync_run")
-    assert row.error["type"] == "OpenStackError" and CANARY not in row.error["message"]
+    assert row.error == {"code": "cloud_error"}
+    assert (
+        "upstream said" in _step_error(st, run.id)["message"]
+    )  # redacted text, restricted record only
     _hunt(st.env, CANARY, extra=(str(st.env.sql("SELECT * FROM sync_run")),
                                  str(st.env.sql("SELECT * FROM workflow_run")),
                                  str(st.env.sql("SELECT * FROM workflow_step"))))  # fmt: skip
+
+
+# --- review IS-4: viewers see codes, never exception text; IS-8: a client set-up error is recorded ---------------
+
+KEYSTONE_TEXT = (
+    "https://keystone.example.invalid:5000/v3/auth/tokens 401 Unauthorized {'error': 'denied'}"
+)
+
+
+def test_viewers_see_reason_codes_not_keystone_text(st: Store) -> None:
+    pc = _read_ready(st)
+    cloud = Cloud(st.store)
+
+    def refused() -> str:
+        raise RuntimeError(KEYSTONE_TEXT)
+
+    cloud.fake.project_id = refused  # type: ignore[method-assign]
+    run = _sync_once(st, pc, cloud)
+    assert (run.state, run.end_reason) == ("failed", "auth_failed")
+    assert (
+        "keystone.example.invalid" in _step_error(st, run.id)["message"]
+    )  # operators' record keeps it
+
+    viewer, _ = st.env.user_client("viewer-is4", [("viewer", "global")])
+    listing = viewer.get(f"/api/v1/projects/{pc}/syncs")
+    assert listing.status_code == 200
+    body = listing.json()
+    assert body["items"][0]["error"] == {"code": "auth_failed"}
+    assert body["runs"][0]["end_reason"] == "auth_failed"
+    one = viewer.get(f"/api/v1/syncs/{body['items'][0]['id']}").json()
+    assert one["error"] == {"code": "auth_failed"}
+    for text_ in (listing.text, str(one)):
+        assert "keystone" not in text_ and "401" not in text_ and "Unauthorized" not in text_
+
+
+def test_records_written_before_reason_codes_are_shown_as_codes(st: Store) -> None:
+    pc = _read_ready(st)
+    st.env.sql(
+        "INSERT INTO sync_run (id, project_connection_id, kind, status, started_at, finished_at, error) VALUES "
+        "(gen_random_uuid(), CAST(:p AS uuid), 'full', 'failed', now(), now(), CAST(:e AS jsonb))",
+        p=pc, e='{"type": "OpenStackError", "message": "' + KEYSTONE_TEXT.replace("'", "") + '"}',
+    )  # fmt: skip
+    viewer, _ = st.env.user_client("viewer-legacy", [("viewer", "global")])
+    r = viewer.get(f"/api/v1/projects/{pc}/syncs")
+    assert r.json()["items"][0]["error"] == {"code": "cloud_error"}
+    assert "keystone" not in r.text
+
+
+def test_a_client_set_up_error_is_a_recorded_failure_not_an_endless_retry(st: Store) -> None:
+    pc = _read_ready(st)
+    cloud = Cloud(st.store)
+    calls: list[str] = []
+
+    def broken(cred: AppCredential, ca: Path | None, *, process_role: str) -> Any:
+        calls.append(cred.kind)
+        raise ValueError("cacert /etc/ovlm/ca/missing.pem does not exist")
+
+    cloud.access = job.StoreReadAccess(st.store, connect=broken)
+    run = _sync_once(st, pc, cloud)
+    assert (run.state, run.end_reason) == ("failed", "client_setup_failed")
+    assert calls == ["os_read"]  # tried once, not retried
+    assert "missing.pem" in _step_error(st, run.id)["message"]
+    [row] = st.env.sql("SELECT status, error FROM sync_run")
+    assert row.status == "failed" and row.error == {"code": "client_setup_failed"}
 
 
 # --- api: RBAC, scopes, 404, 409 ----------------------------------------------------------------------------------

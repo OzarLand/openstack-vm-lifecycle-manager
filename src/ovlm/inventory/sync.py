@@ -32,6 +32,7 @@ from uuid import UUID
 from sqlalchemy import Connection, Engine, bindparam, case, func, insert, select, update
 
 from ovlm.inventory.ids import uuid7
+from ovlm.inventory.reasons import CLOUD_ERROR
 from ovlm.inventory.tables import OBSERVED, REVISIONS, sync_run
 from ovlm.observability.redaction import redact_text
 from ovlm.openstack.interface import ReadClient
@@ -487,11 +488,16 @@ def _run_locked(
                 )
             )  # fmt: skip
     except Exception as exc:  # noqa: BLE001 - recorded on the sync_run, nothing else was changed
-        error = {"type": type(exc).__name__, "message": redact_text(str(exc))[:500]}
+        # The record keeps a fixed code (viewers read it, review IS-4); the redacted text is logged and returned.
+        error = {
+            "code": CLOUD_ERROR,
+            "type": type(exc).__name__,
+            "message": redact_text(str(exc))[:500],
+        }
         with engine.begin() as conn:
             conn.execute(
                 update(sync_run).where(sync_run.c.id == sync_id).values(
-                    status="failed", finished_at=clock(), error=error
+                    status="failed", finished_at=clock(), error={"code": CLOUD_ERROR}
                 )
             )  # fmt: skip
         log.error("inventory sync failed", extra={"sync_run_id": str(sync_id), "error": error})

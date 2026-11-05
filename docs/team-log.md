@@ -945,3 +945,16 @@ Still running on Felcloud: `ovlm-lab-host`, `ovlm-acc-blue`, `ovlm-acc-data`. No
   - the lab policy sets `require_distinct_approvers=false` (approver-a decides G1 and G2, approver-b G3; self-approval
     stays off);
   - an unpinned ref refused at creation (422) is the A3 negative-control result.
+
+## PR #20 merged; lab resumes — 2026-11-05 11:55 UTC
+
+- [OzarLand/openstack-vm-lifecycle-manager#20](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/20)
+  merged with CI green: inventory sync through project connections (worker run, API, periodic), blue's host-key scan
+  with human confirmation (plans are refused until it is confirmed), and lab blockers G and H.
+- **Independent security review (Fable):**
+  [review-inventory-sync-host-keys.md](reviews/review-inventory-sync-host-keys.md). Fit for the Felcloud lab. IS-1
+  (Medium): the api database role could re-insert a VM with a forged, already confirmed fingerprint. It needs a
+  compromised api. The fix round is running (https://claude.ai/code/session_016ti9vzQHLcsffPMiqkPfk9) together with
+  IS-3, IS-4 and the IS-8 note.
+- `ozar-dev` is redeploying OVLM at `0625d567`, keeping the database and the TOTP key, then reruns A1–A4. The
+  maintainer confirms blue's fingerprint after comparing it out of band.

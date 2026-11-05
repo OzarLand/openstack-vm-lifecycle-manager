@@ -17,7 +17,7 @@
   check_mode: false
 
 - name: Required commands are present (read-only)
-  ansible.builtin.command: sh -c 'command -v {{ item }}'
+  ansible.builtin.command: which {{ item }}
   register: pf_cmds
   loop: [blkid, mountpoint, findmnt, fuser, readlink, e2fsck, start-stop-daemon]
   loop_control:

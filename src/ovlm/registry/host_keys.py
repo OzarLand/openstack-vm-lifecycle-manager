@@ -5,7 +5,8 @@ SHA-256 fingerprint equals ``managed_vm.ssh_host_key_fingerprint`` **confirmed**
 (``host_key_confirmed_at``); a plan is refused without it. The trust comes from the human comparison, not the scan:
 
 1. Registration (or ``POST /managed-vms/{id}/host-key-scans``) queues a ``host_key_scan`` run (worker,
-   :mod:`ovlm.registry.host_key_scan`): ``ssh-keyscan`` of the VM's fixed address from the inventory, the
+   :mod:`ovlm.registry.host_key_scan`): ``ssh-keyscan`` of the address the renewal uses (``fixed_ips[0]`` of the service floating IP's port,
+   :mod:`ovlm.registry.ssh_target`), the
    preferred key's fingerprint written to ``ssh_host_key_fingerprint``.
 2. The operator compares it with a fingerprint obtained out of band (the VM's console, cloud-init's
    ``-----BEGIN SSH HOST KEY FINGERPRINTS-----`` block, or ``ssh-keygen -lf`` run on the VM) and confirms it:
@@ -37,7 +38,8 @@ STRATEGY_VERSION = "1"
 _TERMINAL = ("rejected", "cancelled", "failed", "completed", "rolled_back")
 # Scans (worker) and confirmations (api) are audited by fingerprint and address only.
 audit.register_entity(
-    "managed_vm_host_key", ["managed_vm_id", "fingerprint", "key_type", "address"]
+    "managed_vm_host_key",
+    ["managed_vm_id", "fingerprint", "key_type", "address", "port_id", "floating_ip_id"],
 )
 
 #: OpenSSH's SHA-256 fingerprint form: ``SHA256:`` + 43 characters of unpadded base64.

@@ -1,0 +1,67 @@
+# Verification: host-key review fixes (IS-1, IS-3, IS-4, IS-8)
+
+| Field | Value |
+|---|---|
+| Verifier | Independent verification (findings only, no source changes) |
+| Scope | `f0e854a..9eda269` on `claude/ovlm-fix-host-key-review` (692c38f, b3c96b6, b491182, aa1d4c1, 2b6b508, 9eda269) |
+| Read first | [agent-working-rules.md](../agent-working-rules.md), [review-inventory-sync-host-keys.md](review-inventory-sync-host-keys.md), then the diff and the code it calls (`renewal/plans.py`, `renewal/service.py`, `renewal/steps_*.py`, the role grants in every migration) |
+| Date | 2026-11-05 |
+| Verdict | **Fit to merge** (strictly better, no regression). **IS-1 is only partly closed**: a new finding, IS-11 (Medium), reaches the same outcome through the plan. Fix IS-11 before any use beyond a disposable lab. |
+
+## What was run
+
+| Check | Result |
+|---|---|
+| `make lint` (ruff, ruff format, mypy, import-linter) | passed; 3 contracts kept, 0 broken |
+| `pytest tests/unit` as root | 1244 passed, 1 skipped (the worker-user file-mode check, root only) |
+| `pytest tests/unit` as a non-root user (`ovlmtest`, copy of the tree) | 1243 passed, 2 skipped (the two tests that switch OS user need root) |
+| `pytest tests/integration` (full suite) | 508 passed, 11 skipped (`test_automation_container.py`: Docker not available), 607 s. Run with `--ignore` of the throwaway probe file |
+| PostgreSQL | I did not use Docker. I ran a local PostgreSQL 16.15 cluster (`initdb` with trust auth, `pg_ctl` on port 55432) and set `OVLM_TEST_DATABASE_URL=postgresql+psycopg://postgres@127.0.0.1:55432/postgres`. The conftest's role and database set-up ran unchanged |
+| Throwaway probes (deleted, not committed) | `tests/integration/renewal/test_zz_verify_probe.py`, 12 tests, all passed (see below) |
+| Not run | `make smoke` (needs the Compose stack), the Felcloud lab |
+
+### Probes
+
+| Probe | Result |
+|---|---|
+| **Plan binding** (IS-11): seed a second managed VM X (another service, server `attacker-server`), confirmed for fingerprint K. Before G1, set the plan's `resolved.blue.managed_vm_id = X` and `resolved.blue.host_key_fingerprint = K`, and keep blue's real `server_id` and `port_id`. Then G1, the build, G2, drive | **W1 `quiesce_old` succeeded and ran `quiesce` on the real blue server**, pinned to K. `blue_host_key_problems` found nothing wrong |
+| `ovlm_worker`: INSERT, DELETE, TRUNCATE on `managed_vm`; UPDATE `host_key_confirmed_at`, `host_key_confirmed_by`, `id`; `SET session_replication_role`; `DISABLE TRIGGER ALL`; DELETE on the tombstone; `CREATE OR REPLACE` of `managed_vm_host_key_follow` | all 10 refused |
+| Roles and catalogue | `ovlm_api`, `ovlm_worker` and `ovlm_owner` are members of no role, are not superusers, and do not have BYPASSRLS. `pg_parameter_acl` is empty, so no role can SET `session_replication_role`. `SET ROLE ovlm_owner` and `SET ROLE ovlm_worker` are refused to `ovlm_api`. `ovlm_api` has no TEMP privilege and no CREATE on `public`. The 3 `managed_vm` triggers are enabled (`O`). All 3 functions are owned by `ovlm_owner` with `search_path=pg_catalog, public, pg_temp`, and only `managed_vm_tombstone_record` is `SECURITY DEFINER`. `ovlm_api` cannot EXECUTE the tombstone function. **`renewal_plan` has no trigger** |
+
+The `ovlm_api` bypasses (TRUNCATE, DISABLE/DROP TRIGGER, `session_replication_role`, temp-table shadowing, CREATE in
+`public`, `CREATE OR REPLACE FUNCTION`, ALTER FUNCTION, writing the tombstone, `UPDATE id`, `UPDATE` of the
+fingerprint, dropping the CHECK) are already covered by `tests/integration/test_managed_vm_host_key_guard.py`. I read
+each case and it passed in the full run. I did not duplicate them.
+
+## Findings table
+
+| Finding | Status | Evidence | Remaining action |
+|---|---|---|---|
+| **IS-1** (Medium): the api forges a confirmed host key that a renewal trusts | **Partly closed** | **Row level: closed.** `registry_0002`: the insert guard (fingerprint and `confirmed_*` must be NULL for `ovlm_api`, SQLSTATE 42501); a tombstone written by a `SECURITY DEFINER` AFTER DELETE trigger with a fixed `search_path` (`pg_temp` last), which refuses a reused id for every role; `managed_vm_host_key_follow` clears `confirmed_*` on any fingerprint change; a CHECK makes a confirmation name a confirmer and a fingerprint. Grants: `ovlm_api` has SELECT only on the tombstone and cannot EXECUTE its function; the worker cannot INSERT, DELETE or confirm (probe). The reviewer's probe fails, and every bypass listed in the brief is refused (guard tests and my worker probes). Deleting a VM that has a plan is refused by the `renewal_plan.managed_vm_id` foreign key. **Renewal level: not closed.** The live re-check reads the `managed_vm` row named by the plan's `resolved.blue.managed_vm_id`. That document is written by the api (`ovlm_api` has INSERT on `renewal_plan`, with no guard), and nothing binds the row to `resolved.blue.server_id` or to `renewal_plan.managed_vm_id`. See IS-11 | Fix IS-11. Then mark IS-1 closed |
+| IS-1 part 4: the live re-check before the first SSH to blue | Holds on every path, given the binding gap above | Every SSH to blue goes through `RStep.blue_ref`, which re-reads the row (confirmed, plan's fingerprint) before each target is built: `AnsibleStep.target` for `quiesce_old`, `recover_old_service` (the only steps with `target_role = "old"`) and the takeover probe in `WindowAnsible.interrupted`, and `BootOld`'s probe. **No build step SSHes blue**: `preflight` and `verify_cutover_preconditions` only use OpenStack APIs, and `prepare_automation`, `configure_green`, `wait_green_ssh` and `verify_green_ready` target green. So `quiesce_old` is the first SSH to blue. Two `quiesce_old` paths come before the full check (with the confirmer): the takeover probe (`interrupted`) and the re-entry after `downtime_started_at` (`reclaim_probe`). Both still pass through `blue_ref`'s check. They are reached only after an earlier attempt of the same step | None for the paths themselves. Optional: run the confirmer check in `blue_ref` while `downtime_started_at IS NULL` too |
+| IS-1: the restore steps' weaker check (no confirmer state) | Acceptable | The confirmer check adds little against a compromised api: `ovlm_api` holds UPDATE on `app_user` (including `state`) and on `host_key_confirmed_by`. The security model already lists this as a residual (IS-2). The weak check still refuses a changed or unconfirmed fingerprint. Its failure mode is a park mid-outage (availability). Only the owner or a compromised api can trigger it: a re-scan cannot replace a confirmed key, and the foreign key blocks unregistering a planned VM | None |
+| **IS-3** (Low): one address rule for scan and renewal | **Closed** | `ssh_target.blue_ssh_target` and `RStep.blue_ref` both take `first_fixed_address` (`fixed_ips[0]` in OpenStack's order). The inventory keeps that order (`inventory/sync.py:153`, a jsonb list). Both use the service FIP's port, among the present ports whose `device_id` is blue's server (the same query as `resolve_plan`, `plans.py:315-327`). The port and FIP ids are in the evidence and the audit row. **Fallback when no profile exists**: it takes only the single port with a present FIP and refuses when there are several. Misuse I checked: a tenant can create a port with `device_id` set to blue's UUID. If blue already has a FIP port, the scan refuses (denial of service only). If blue has none, the scan may reach a tenant-chosen fixed address and record that host's key. That is the same misleading-scan case the review accepted. The out-of-band comparison (IS-2) catches it, and the renewal fails closed because it pins by fingerprint at the real port's address. Scanned keys are never trusted without a confirmation | Optional, not done: refuse non-private or worker-local targets (as the review suggested). Optional: when a profile is created after a fallback scan, show a hint if its FIP port differs from the one scanned |
+| **IS-4** (Low): viewers see reason codes, not exception text | **Closed** | `sync_run.error` is written as `{"code"}` only (`job.record_refusal`, `job.close_interrupted`, `sync._run_locked`). The api serves it through `reasons.public_error` (`service._sync_dict`). `runs[].end_reason`, which may fall back to the step error's `reason`, goes through `public_reason`, an allow-list: any other text becomes `other`. Both api routes that serve these records (`GET /projects/{id}/syncs`, `GET /syncs/{id}`) use these two functions. No UI template renders `sync_run`. Older rows are mapped when read. The redacted text stays in the worker log and `workflow_step.error.detail`, which the api does not serve for this run kind | None |
+| **IS-8** (Info): a client set-up failure becomes a recorded failure | **Closed** | `StoreReadAccess.open` separates two cases. A database error while reading the credential stays retryable. Any non-`CredentialUnavailableError` exception from `connect()` becomes `CredentialRefusedError(code=client_setup_failed)`, which is a `failed` `sync_run` and a fatal step. `connect_read_credential` builds the config and session lazily and sends nothing (`credentials.py:280-308`), so no transient network error is reclassified as fatal. Covered by `test_a_client_set_up_error_is_a_recorded_failure_not_an_endless_retry` (passed) | None |
+| Earlier guarantee: a token cannot confirm | Holds | `routes_inventory` confirmation still `human_only`; `test_host_key_scan` token case passed | None |
+| Earlier guarantee: a re-scan cannot replace a confirmed key | Holds | The scan's `WHERE host_key_confirmed_at IS NULL OR ssh_host_key_fingerprint = :fp` is unchanged. A re-scan that writes the same fingerprint keeps the confirmation, because the trigger checks `IS DISTINCT FROM`. `test_host_key_scan` passed | None |
+| Earlier guarantee: plans are refused until the key is confirmed | Holds for plans the api resolves honestly | `resolve_plan` (`plans.py:221`) is unchanged. A forged plan bypasses it (IS-11) | See IS-11 |
+
+## New findings
+
+| ID | Severity | Where | Issue | Suggested fix |
+|---|---|---|---|---|
+| **IS-11** | **Medium** (confirmed by probe) | `src/ovlm/renewal/base.py:202-237` (`blue_host_key_problems`); `src/ovlm/renewal/service.py:169-188`; `migrations/versions/renewal_0001_plans_approvals_ledger.py:157` | The live re-check trusts the plan's `resolved.blue.managed_vm_id`. The api writes `resolved` (`create_plan` → `resolve_plan` → INSERT), `ovlm_api` has INSERT on `renewal_plan`, and the table has no guard. The worker recomputes the plan hash from `resolved`, which does not check `resolved` against its sources. A compromised api can therefore INSERT a plan whose `blue.server_id` and `port_id` are the victim's, while `blue.managed_vm_id` and `host_key_fingerprint` name **another** confirmed managed VM whose key it controls: any VM it registered, had scanned, and confirmed through its own column grant. Humans approving G1/G2 see the right blue name, server and FIP. W1 passes, and every SSH to blue is pinned to the attacker's key. This is the IS-1 outcome with the same preconditions (a compromised api, plus a host answering at blue's address). It does not need forged approvals, so it is outside the documented T7 residual. security-model.md §6.2.1 currently says "an approved plan can never be pointed at a forged row" | In `blue_host_key_problems`, select `m.openstack_server_id`, `m.service_id` and the project connection of `m.observed_server_id`. Refuse unless they equal `resolved.blue.server_id`, `resolved.service.id` and `resolved.service.project_connection_id`, and unless `m.id = renewal_plan.managed_vm_id` for the run's plan. Also run this binding at `preflight`. Optionally, at `preflight`, check live that `resolved.blue.port_id`'s `device_id` is blue's server (today `live_preconditions` checks only that the FIP is on that port). Add the probe above as a regression test. Correct the §6.2.1 sentence |
+| IS-12 | Info | `migrations/versions/registry_0002.py:76` | The insert guard identifies the api by `current_user = 'ovlm_api'`, as `workflow_run_api_insert_guard` does. If a deployment ever gives the api another login role, for example a member of `ovlm_api` that does not use SET ROLE, the guard switches off silently. The tombstone check does not depend on the role | Keep the single login role (install-guide). Or use `pg_has_role(current_user, 'ovlm_api', 'MEMBER')`, and add a test that fails if the runtime role is renamed |
+
+## Verdict
+
+**Fit to merge.** The branch closes IS-3, IS-4 and IS-8 completely. It closes the row-level half of IS-1 robustly:
+every database bypass in the brief is refused for `ovlm_api` and for the worker. Lint, the unit tests (as root and as a
+non-root user) and the full integration suite pass. The earlier guarantees hold: a token cannot confirm, a re-scan
+cannot replace a confirmed key, and plans are refused until the key is confirmed.
+
+**Do not record IS-1 as closed.** The plan document is api-written and is not bound to the `managed_vm` row that the
+live check reads (IS-11, Medium, probed end to end). Before any use beyond a disposable lab, fix IS-11 with the
+binding check above (a small change plus one regression test) and change IS-1's "Fixed" column to "partly" until
+then. For the Felcloud lab the earlier verdict stands, because its threat model does not include a compromised api.
