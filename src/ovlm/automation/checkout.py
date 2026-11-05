@@ -23,6 +23,7 @@ from ovlm.automation.types import AutomationError, Classification
 
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 GIT_TIMEOUT = 300
+_PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy")
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,12 @@ def _git_env(options: CloneOptions) -> dict[str, str]:
         "GIT_ALLOW_PROTOCOL": "https:ssh" + (":file" if options.allow_file else ""),
         "LC_ALL": "C",
     }
+    # Egress proxy only (install-guide 5a): a worker on a network without direct Internet reaches an https git
+    # host through the operator's HTTPS proxy. Only these four variables cross the scrub; nothing else does.
+    for name in _PROXY_VARS:
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
     if options.ssh_key_path is not None:
         known = options.ssh_known_hosts
         if known is None:

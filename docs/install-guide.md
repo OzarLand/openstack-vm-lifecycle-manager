@@ -162,7 +162,7 @@ NO_PROXY=localhost,127.0.0.1,::1,postgres,api,10.20.0.0/24
 | OpenStack API calls (openstacksdk, keystoneauth, `requests`) | Use the proxy, except for hosts matched by `NO_PROXY` (host names, domain suffixes, IP addresses and CIDR blocks). Unit tested: `tests/unit/test_egress_proxy.py` |
 | SSH to guests (host-key scan, Ansible) | Never uses the proxy: OpenSSH does not read these variables |
 | The external health probe (OVLM's own HTTP check of a guest) | **Never** uses a proxy, whatever the variables say (`UrllibGetter` builds its opener with an empty proxy map). It must see the guest, not a proxy's answer. Unit tested |
-| Git clone of the automation repository | Runs with a scrubbed environment and does **not** get the proxy: the repository host must be reachable directly. Not covered by this setting |
+| Git clone of the automation repository | Runs with a scrubbed environment; only `HTTPS_PROXY`, `NO_PROXY` and their lowercase forms are passed through, so an `https://` repository goes through the proxy. An `ssh://` repository must be reachable directly |
 
 ⚠️ `NO_PROXY` must contain the project subnet(s): if an OpenStack endpoint or a guest sits on the project network,
 the proxy must not be used for it. CIDR blocks are honoured by `requests` (the SDK) for IP-address URLs only.

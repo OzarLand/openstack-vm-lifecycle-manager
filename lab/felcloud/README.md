@@ -100,9 +100,9 @@ else (read it with `--dry-run`, and the generated first-boot script is `$OVLM_LA
 
 The proxy must allow at least: the Ubuntu archive and security mirrors, the Debian archive (`deb.debian.org`,
 `security.debian.org`), `pypi.org`, `files.pythonhosted.org`, `github.com`, Docker Hub (`registry-1.docker.io`,
-`auth.docker.io`, `production.cloudflare.docker.com`) and the OpenStack API endpoints. Not covered: the worker's git
-clone of the *automation repository* (a scrubbed environment, no proxy): use a repository host that is reachable
-directly, or ask the maintainer. Not verified against a real proxy until the first run reports back.
+`auth.docker.io`, `production.cloudflare.docker.com`) and the OpenStack API endpoints. The worker's git clone of the
+*automation repository* runs with a scrubbed environment, but `HTTPS_PROXY`/`NO_PROXY` (and their lowercase forms)
+are passed through to it, so an `https://` repository host works through the proxy; an `ssh://` one does not. Not verified against a real proxy until the first run reports back.
 
 ## 5. Rules that never bend
 
