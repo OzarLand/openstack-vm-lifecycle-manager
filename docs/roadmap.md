@@ -86,6 +86,7 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | E5-5 | Gates G1–G3, approval evidence re-validation, typed confirmation | 4 | Opus | E3-2, E5-4 | Integration tested, reviewed (PR #8) | Security tests |
 | E5-7 | Encrypted credential store and project connections (envelope AES-GCM, worker-only unsealing, Keystone application credentials) | 4 | Opus | E5-2 | Integration tested; reviewed (CS-1..CS-10), fixes verified; CS-6 open | Binding and role tests; review by 8 |
 | E5-8 | Worker egress proxy (`HTTPS_PROXY`/`NO_PROXY` for OpenStack and the automation clone, guests always direct) | 6 | Sonnet | E5-3 | Unit tested; lab check pending | Unit tests; lab run behind the Felcloud proxy |
+| E5-9 | Inventory sync through project connections (worker run, API, periodic), blue host-key scan + human confirmation | 4 | Opus | E5-7 | Integration tested; security review: fit for the lab, IS-1 fix round | Sync and host-key tests; review by 8 |
 | E5-6 | Acceptance scenario + failure scenarios on Felcloud (ADR-0007) | 9 + ozar-dev | Sonnet | E5-4 | To do | Evidence stored; status "lab validated" |
 
 ### E6 — Operator UI (HTMX)
@@ -107,6 +108,10 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | SF-4 | Remove or exclude rejected `ovlm-env-v1` credentials so `ovlm kek status` can reach 0 after rotation | N-3 (Low) | To do |
 | SF-5 | Signal a direct endpoint rewrite immediately (trigger) or document the up-to-24 h delay | N-4 (Info) | To do |
 | SF-6 | `/readyz` reports an api/worker KEK mismatch | CS-10 (Low, control done) | Optional |
+| SF-7 | `managed_vm` insert guard and tombstone, confirmation cleared on fingerprint change, live re-check at the first SSH to blue | IS-1 (Medium) | Fix round started |
+| SF-8 | One address rule for the host-key scan and the renewal | IS-3 (Low) | Fix round started |
+| SF-9 | Fixed reason codes for sync failures shown to viewers | IS-4 (Low) | Fix round started |
+| SF-10 | Host-key confirm hardening (paste, not prefill; optional step-up); `--reissue` audit names the OS user; TOTP key backup in the install guide | IS-2, IS-6, IS-7 | To do |
 
 ### Later (V1, not in the MVP)
 
