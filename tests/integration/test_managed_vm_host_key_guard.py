@@ -14,7 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
 from tests.integration.auth_support import env as auth_env  # noqa: F401
@@ -210,3 +210,34 @@ def test_is1_the_tombstone_function_cannot_be_called_or_altered_by_the_api(env: 
         "SELECT prosecdef, proconfig FROM pg_proc WHERE proname = 'managed_vm_tombstone_record'"
     )
     assert cfg.prosecdef and cfg.proconfig == ["search_path=pg_catalog, public, pg_temp"]
+
+
+def test_is12_the_insert_guard_holds_for_any_member_of_the_api_role(
+    env: Env, admin_url: Any
+) -> None:
+    """Review IS-12: a deployment that gives the api another login role, a member of ``ovlm_api`` that does not
+    ``SET ROLE``, must not switch the guard off (``registry_0003``: membership, not the role name)."""
+    vm, _ = _confirmed_vm(env)
+    row = _row(env, vm["id"])
+    alias = f"ovlm_api_alias_{uuid4().hex[:8]}"
+    db = env.api.url.database
+    su = create_engine(admin_url.set(database=db), isolation_level="AUTOCOMMIT")
+    with su.connect() as c:
+        c.execute(text(f"CREATE ROLE {alias} LOGIN PASSWORD 'alias-pw' IN ROLE ovlm_api"))
+    alias_engine = create_engine(admin_url.set(username=alias, password="alias-pw", database=db))
+    try:
+        with alias_engine.connect() as c:
+            assert c.execute(text("SELECT current_user")).scalar() == alias  # no SET ROLE
+        with pytest.raises(DBAPIError) as exc, alias_engine.begin() as c:
+            _insert(c, row, id=uuid4(), openstack_server_id="forged-server", role="candidate",
+                    ssh_host_key_fingerprint=FORGED,
+                    host_key_confirmed_by=env.operator_id, host_key_confirmed_at=row.host_key_confirmed_at)  # fmt: skip
+        assert "no host key and no confirmation" in str(exc.value)
+        assert getattr(exc.value.orig, "sqlstate", None) == "42501"
+        with alias_engine.begin() as c:  # a clean registration still works for the alias
+            _insert(c, row, id=uuid4(), openstack_server_id="other-server", role="candidate")
+    finally:
+        alias_engine.dispose()
+        with su.connect() as c:
+            c.execute(text(f"DROP ROLE {alias}"))
+        su.dispose()

@@ -118,7 +118,7 @@ class QuiesceOld(WindowAnsible):
         # IS-1: the first SSH to blue. Before the outage starts, re-read the live row: the key must still be
         # confirmed, be the plan's, and have been confirmed by an active user. Parks (needs_human), no restore.
         with ctx.read() as c:
-            key_problems = blue_host_key_problems(c, r, check_confirmer=True)
+            key_problems = blue_host_key_problems(c, r, run_id=ctx.run.id, check_confirmer=True)
         if key_problems:
             return {
                 "fail": self.fail(
