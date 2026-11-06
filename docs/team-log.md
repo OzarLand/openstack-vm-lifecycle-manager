@@ -1010,3 +1010,10 @@ Still running on Felcloud: `ovlm-lab-host`, `ovlm-acc-blue`, `ovlm-acc-data`. No
   himself (the TOTP step-up is the proof). This run's approvals therefore do not count as lab evidence for the
   approval control. `ozar-dev` will not submit any decision again; the maintainer will reset the approver accounts
   (new passwords and TOTP only he holds) and approve G1–G3 of the next run himself in the UI.
+
+## Decision: TOTP stays on for the MVP lab — 2026-11-06
+
+The maintainer asked about disabling TOTP to simplify logins until the end of the MVP. OVLM has no switch for it, and
+turning it off would mean the MVP report cannot call the TOTP approval control lab validated. **Decision (popup):
+keep TOTP.** The maintainer stores the three lab accounts (admin, approver-a, approver-b) and their TOTP entries in a
+password manager that also generates TOTP codes. No code change.

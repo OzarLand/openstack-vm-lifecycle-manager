@@ -18,7 +18,7 @@ This page is everything needed to resume, by this session or a new one. The stor
 
 ## Next steps, in order (tomorrow)
 
-1. **Maintainer:** reset `approver-a` and `approver-b` himself (`~/.ovlm-lab/reset-approver.sh` on ozar-dev, own passwords, new TOTP). After that no agent holds approver secrets.
+1. **Maintainer:** reset `approver-a` and `approver-b` himself (`~/.ovlm-lab/reset-approver.sh` on ozar-dev, own passwords, new TOTP), and store the three accounts with their TOTP in his password manager (decision 2026-11-06: TOTP stays on). After that no agent holds approver secrets.
 2. `ozar-dev` redeploys OVLM at `aba9ec2` (keep DB and TOTP key), `make smoke`.
 3. **Maintainer:** rollback of run `01a1ac5d` in the UI with his own typed confirmation (deletes green, blue untouched).
 4. `ozar-dev`: profile v3 pinned to `aba9ec2` (`playbook_dir: ansible/playbooks`), readiness, new plan.
