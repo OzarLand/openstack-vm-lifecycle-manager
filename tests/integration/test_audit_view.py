@@ -173,7 +173,19 @@ def test_run_filter_returns_the_whole_trail_of_one_run(env: Env) -> None:
     )
     put(env, "service.create", scope=mine)
 
-    assert sorted(ids(w.op.get("/api/v1/audit", params={"run": run}))) == sorted(expected)
+    got = w.op.get("/api/v1/audit", params={"run": run}).json()["items"]
+    assert set(expected) <= {i["id"] for i in got}
+    # AU-1: the plan's own events come with the run: plan.create, and the approvals of the plan (G1 is the plan's)
+    extra = [i for i in got if i["id"] not in expected]
+    assert extra and {i["action"] for i in extra} <= {
+        "plan.create",
+        "approval.request",
+        "approval.decide",
+    }
+    assert all(i["target_type"] in ("renewal_plan", "approval") for i in extra)
+    assert any(
+        i["action"] == "approval.decide" and i["target_type"] == "approval" for i in extra
+    )  # G1
     assert (
         w.other.get("/api/v1/audit", params={"run": run}).json()["items"] == []
     )  # invisible project: nothing

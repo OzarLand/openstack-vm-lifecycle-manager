@@ -16,12 +16,12 @@
   <header class="topbar">
     <a class="brand" href="/"><span class="mark" aria-hidden="true"></span>OVLM <span class="muted">OpenStack VM Lifecycle Manager</span></a>
     {% if who %}
-    <div class="who">
+    <div class="who" data-testid="whoami">
       <span class="user">{{ who.username }}</span>
-      <span class="roles">{% for role, scope in (roles or []) %}<span class="chip">{{ role }} · {{ scope }}</span>{% endfor %}</span>
+      <span class="roles"> · {% for role, scope in (roles or []) %}<span class="chip">{{ role }} ({{ scope }})</span>{% else %}<span class="chip">no roles</span>{% endfor %}</span>
       <form method="post" action="/logout" class="inline">
         <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
-        <button type="submit" class="link">Log out</button>
+        <button type="submit" class="link">Sign out / switch account</button>
       </form>
     </div>
     {% endif %}

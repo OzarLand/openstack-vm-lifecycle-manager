@@ -64,7 +64,7 @@ def test_layout_has_navigation_identity_logout_and_csrf_header_for_htmx(env: Env
     for label in ("Dashboard", "Inventory", "Services", "Renewals", "Audit"):
         assert f">{label}</a>" in r.text
     assert 'aria-current="page"' in r.text and 'href="#main"' in r.text  # skip link, current page
-    assert "operator" in r.text and "all projects" in r.text
+    assert "operator (global)" in r.text and "Sign out / switch account" in r.text
     assert 'action="/logout"' in r.text
     m = HX_HEADERS.search(r.text)
     assert m and json.loads(unescape(m.group(1))) == {"X-CSRF-Token": csrf_of(s)}
