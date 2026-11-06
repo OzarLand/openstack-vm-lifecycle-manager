@@ -114,3 +114,23 @@ def test_crash_in_restore_converges(world: World, step: str) -> None:
     assert w.crashes == 1
     restored(w)
     assert w.cloud.calls.count("detach_volume") == 2  # W3 once, S4 once
+
+
+@pytest.mark.parametrize("point", ("after_act", "after_verify_before_commit"))
+def test_abort_crash_after_green_was_deleted_finishes_the_discard(world: World, point: str) -> None:
+    """Lab bug S: the worker dies right after Nova accepted green's delete. Nova then still lists green as DELETED
+    (a tombstone, not a 404). The next attempt must treat it as gone, not unlock it again and stop on an
+    'unverifiable' ownership check."""
+    w = world
+    w.cloud.keep_tombstones = True
+    # as Felcloud did: GET after the delete answers status DELETED, not 404
+    w.cloud.get_returns_deleted = True
+    w.start()
+    w.drive(until="await_cutover")
+    _crash("discard_green", point)
+    w.signal("abort", tc=w.green_tc())
+    r = w.drive()
+    assert w.crashes == 1
+    assert r["state"] == "rolled_back", explain(w)
+    assert w.cloud.calls.count("delete_server") == 1
+    assert w.locks() == [] and w.cloud.snapshot()["servers"][w.ids["blue"]]["status"] == "ACTIVE"
