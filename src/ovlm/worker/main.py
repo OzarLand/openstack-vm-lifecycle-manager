@@ -34,6 +34,7 @@ from ovlm.observability.metrics import (
     record_heartbeat,
 )
 from ovlm.readiness.job import ReadinessDefinition
+from ovlm.workflow.audit import DbAuditSink
 from ovlm.workflow.crashpoint import ENV_VAR as CRASHPOINT_ENV
 from ovlm.workflow.engine import Claim, EngineConfig, WorkflowEngine
 from ovlm.workflow.registry import Registry
@@ -266,7 +267,10 @@ def run(settings: Settings | None = None) -> int:
     try:
         check_schema_at_head(engine, settings.migrations_dir)
         workflow = WorkflowEngine(
-            engine, build_registry(settings, engine), EngineConfig.from_settings(settings)
+            engine,
+            build_registry(settings, engine),
+            EngineConfig.from_settings(settings),
+            audit=DbAuditSink(),
         )
         worker = Worker(settings, engine, workflow)
         BUILD_INFO.labels(__version__, "worker").set(1)
