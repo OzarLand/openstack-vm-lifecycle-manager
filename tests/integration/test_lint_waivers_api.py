@@ -175,3 +175,52 @@ def test_the_api_role_cannot_delete_or_rewrite_a_waiver(env: Env) -> None:
         env.auth.sql("SELECT path_glob FROM lint_waiver WHERE id = :i", i=wid)[0][0]
         == "roles/probe/*"
     )
+
+
+def _stepup_row(
+    env: Env,
+    user: UUID | str,
+    action: str,
+    target: str,
+    *,
+    method: str = "password+totp",
+    consumed: bool = True,
+) -> str:
+    """A step-up row written as the owner (what the api would have stored), consumed or not."""
+    sid = str(uuid4())
+    env.auth.sql(
+        "INSERT INTO stepup (id, user_id, session_id_hash, action, target_id, auth_method, created_at, expires_at, "
+        "consumed_at) VALUES (:i, :u, 'sess', :a, :t, :m, now() - interval '1 minute', now() + interval '4 minutes', "
+        "CASE WHEN :c THEN now() END)",
+        i=sid, u=str(user), a=action, t=target, m=method, c=consumed,
+    )  # fmt: skip
+    return sid
+
+
+CATCH_ALL = ("*", "**", "*/*", "**/*", "*/**", "[a-z]*")
+
+
+def test_sfr2_a_catch_all_glob_is_refused_by_the_api_and_the_database(env: Env) -> None:
+    """Review SFR-2: a glob with no literal path segment waives the rule for the whole repository."""
+    profile, version = _version(env)
+    ap, secret = _user(env, "approver4", [("approver", "global")])
+    sid = _stepup(env, ap, secret, "lint_waiver.grant", version)
+    for glob in CATCH_ALL:
+        refused = _grant(ap, profile, sid, path_glob=glob)
+        assert refused.status_code == 422 and "literal path segment" in refused.json()["detail"], (
+            glob
+        )
+    for glob in ("roles/probe/*", "*/tasks/main.yml", "playbooks/configure.yml"):
+        ok = _grant(
+            ap, profile, _stepup(env, ap, secret, "lint_waiver.grant", version), path_glob=glob
+        )
+        assert ok.status_code == 201, (glob, ok.text)
+    # the CHECK holds whoever writes the row (the owner here, which the api guard does not cover)
+    for glob in CATCH_ALL:
+        with pytest.raises(DBAPIError, match="lint_waiver_path_glob_check"):
+            env.auth.sql(
+                "INSERT INTO lint_waiver (id, profile_version_id, rule, path_glob, reason, granted_by, stepup_id) "
+                "VALUES (:i, :v, 'no_log_secret', :g, :why, :u, :s)",
+                i=str(uuid4()), v=version, g=glob, why=REASON, u=str(ap.user_id),
+                s=_stepup_row(env, ap.user_id, "lint_waiver.grant", version),
+            )  # fmt: skip

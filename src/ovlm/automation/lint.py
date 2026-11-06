@@ -30,7 +30,7 @@ import hashlib
 import json
 import re
 import shlex
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
@@ -137,7 +137,7 @@ class Waiver:
 
     id: str
     rule: str
-    path_glob: str  # fnmatch pattern on the repo-relative path; "*" waives the rule everywhere
+    path_glob: str  # fnmatch pattern on the repo-relative path ("*" matches "/"; the api refuses catch-alls)
     approver: str
     reason: str
 
@@ -689,6 +689,29 @@ def lint_repo(
     can append the audit row (the lint itself touches no database).
     """
     return _Linter(root, playbook_dir, waivers, on_waiver).run()
+
+
+def waiver_reach(
+    root: Path, waivers: Iterable[Waiver], findings: Iterable[Finding]
+) -> list[dict[str, Any]]:
+    """How much each waiver matched in this checkout (review SFR-2, for B6's step evidence): the regular files whose
+    repository-relative path its glob matches (what it *could* cover) and the findings it did cover."""
+    root = root.resolve()
+    paths: list[str] = []
+    for p in sorted(root.rglob("*")):
+        if p.is_file() and not p.is_symlink():
+            paths.append(str(PurePosixPath(p.relative_to(root))))
+    covered = [f.waived_by for f in findings if f.waived_by is not None]
+    return [
+        {
+            "id": w.id,
+            "rule": w.rule,
+            "path_glob": w.path_glob,
+            "files_matched": sum(1 for p in paths if fnmatch.fnmatchcase(p, w.path_glob)),
+            "findings_matched": covered.count(w.id),
+        }
+        for w in waivers
+    ]
 
 
 # ---- requirements pin check (contract section 1/2: a pin check, not an install) ---------------------------

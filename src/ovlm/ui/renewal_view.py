@@ -148,6 +148,14 @@ NEEDS_HUMAN: Mapping[str, tuple[str, list[str]]] = {
             "Retry step re-checks; if it keeps failing, Rollback deletes the new VM.",
         ],
     ),
+    "lint_waiver_too_broad": (
+        "A lint waiver of the profile version covered more than 20 findings in the automation, so OVLM stopped "
+        "before running it: the waiver's path glob is probably broader than intended.",
+        [
+            "Read the step evidence: it lists each waiver with the files and findings it matched.",
+            "Ask an approver to revoke the waiver and grant a narrower one, then start a new plan.",
+        ],
+    ),
     "compute_host_down": (
         "OpenStack refused the call because the VM's compute host is down.",
         [_ADMIN + " Fix the host or evacuate the VM.", _AFTER_FIX],

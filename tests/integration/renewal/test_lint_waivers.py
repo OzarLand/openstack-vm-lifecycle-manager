@@ -23,8 +23,10 @@ from ovlm.auth.principal import Principal
 from ovlm.automation.lint import lint_repo
 from ovlm.automation.types import AutomationError
 from ovlm.profiles import waivers
+from ovlm.renewal.base import StepRefusal
 from ovlm.renewal.plans import KIND, STRATEGY, STRATEGY_VERSION, load_facts
 from ovlm.renewal.production import RunnerGuestPort
+from ovlm.workflow.contract import ErrorClass
 from ovlm.workflow.requests import request_run
 from tests.integration.renewal.conftest import World
 
@@ -110,7 +112,11 @@ class _LintingRunner:
             raise AutomationError(
                 f"blocking lint findings: {sorted({f.rule for f in res.blocking})}"
             )
-        return SimpleNamespace(evidence=lambda: {"waived": [f.waived_by for f in res.waived]})
+        return SimpleNamespace(
+            checkout=self.repo,
+            lint=res,
+            evidence=lambda: {"waived": [f.waived_by for f in res.waived]},
+        )
 
 
 class _Fence:
@@ -126,22 +132,37 @@ class _Port(RunnerGuestPort):
         return None
 
 
+def _repo(tmp_path: Path, tasks: str = PROBE) -> Path:
+    repo = tmp_path / "repo"
+    (repo / "playbooks").mkdir(parents=True)
+    (repo / "playbooks" / "configure.yml").write_text("- hosts: ovlm_target\n  roles: [probe]\n")
+    (repo / "roles" / "probe" / "tasks").mkdir(parents=True)
+    (repo / "roles" / "probe" / "tasks" / "main.yml").write_text(tasks)
+    (repo / "roles" / "probe" / "defaults").mkdir(parents=True)
+    (repo / "roles" / "probe" / "defaults" / "main.yml").write_text("probe: true\n")
+    return repo
+
+
+def _port(w: World, repo: Path) -> _Port:
+    return _Port(w.worker, _LintingRunner(repo), None, ssh=None, http=None)  # type: ignore[arg-type]
+
+
 def test_b6_lints_with_the_waivers_of_the_profile_version_and_audits_them(
     world: World, tmp_path: Path
 ) -> None:
     w = world
     run_id = w.start()
-    repo = tmp_path / "repo"
-    (repo / "playbooks").mkdir(parents=True)
-    (repo / "playbooks" / "configure.yml").write_text("- hosts: ovlm_target\n  roles: [probe]\n")
-    (repo / "roles" / "probe" / "tasks").mkdir(parents=True)
-    (repo / "roles" / "probe" / "tasks" / "main.yml").write_text(PROBE)
-    port = _Port(w.worker, _LintingRunner(repo), None, ssh=None, http=None)  # type: ignore[arg-type]
+    port = _port(w, _repo(tmp_path))
 
     with pytest.raises(AutomationError, match="check_mode_forced"):
         port.prepare(run_id, {}, _Fence())  # no waiver yet: blocking
     granted = _grant(w, "ap")
-    assert port.prepare(run_id, {}, _Fence()) == {"waived": [granted["id"]]}
+    # SFR-2: the step evidence says how much each waiver matched (files of the checkout, findings it covered)
+    assert port.prepare(run_id, {}, _Fence()) == {
+        "waived": [granted["id"]],
+        "lint_waivers": [{"id": granted["id"], "rule": "check_mode_forced", "path_glob": "roles/probe/*",
+                          "files_matched": 2, "findings_matched": 1}],
+    }  # fmt: skip
     [row] = w.q(
         "SELECT target_id, run_id, project_scope, after FROM audit_event "
         "WHERE action = 'automation.lint_waiver.applied'"
@@ -167,3 +188,26 @@ def test_b6_lints_with_the_waivers_of_the_profile_version_and_audits_them(
         s.commit()
     with pytest.raises(AutomationError, match="check_mode_forced"):
         port.prepare(run_id, {}, _Fence())
+
+
+def test_sfr2_b6_stops_for_a_human_when_a_waiver_covers_more_than_20_findings(
+    world: World, tmp_path: Path
+) -> None:
+    """Review SFR-2: a glob broader than intended is seen before a run, not after: B6 refuses a waiver that covered
+    more than 20 findings (``needs_human``, reason ``lint_waiver_too_broad``), and audits nothing."""
+    w = world
+    run_id = w.start()
+    port = _port(w, _repo(tmp_path, PROBE * 21))
+    granted = _grant(w, "ap")
+    with pytest.raises(StepRefusal) as exc:
+        port.prepare(run_id, {}, _Fence())
+    assert (
+        exc.value.error_class is ErrorClass.NEEDS_HUMAN
+        and exc.value.reason == "lint_waiver_too_broad"
+    )
+    assert exc.value.detail["waivers"] == [{"id": granted["id"], "rule": "check_mode_forced",
+                                           "path_glob": "roles/probe/*", "files_matched": 2,
+                                           "findings_matched": 21}]  # fmt: skip
+    assert not w.q("SELECT 1 FROM audit_event WHERE action = 'automation.lint_waiver.applied'")
+    small = _port(w, _repo(tmp_path / "small", PROBE * 20))
+    assert small.prepare(run_id, {}, _Fence())["lint_waivers"][0]["findings_matched"] == 20

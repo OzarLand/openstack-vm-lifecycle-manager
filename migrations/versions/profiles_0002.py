@@ -14,6 +14,9 @@ waiver granted or revoked after an approval voids it.
 * ``rule`` is limited to the rules a waiver may cover. The data-safety rules (``formatting``, ``quiesce_state``,
   ``ssh_override``, ``hosts_pattern``) and ``parse_error`` can never be waived, whoever writes the row.
 * ``stepup_id`` is unique: one step-up, one waiver.
+* ``path_glob`` keeps at least one literal path segment (review SFR-2): ``*``, ``**``, ``*/*``, ``**/*``, ``*/**`` or
+  ``[a-z]*`` would waive the rule for the whole repository (``fnmatch``'s ``*`` matches ``/``). The api checks the same
+  regex (``ovlm.profiles.waivers.LITERAL_SEGMENT``).
 
 Linear after ``connections_0003`` so the schema keeps a single head (``check_schema_at_head``).
 """
@@ -35,7 +38,8 @@ def upgrade() -> None:
           rule               text NOT NULL CHECK (rule IN
                                ('no_log_secret', 'check_mode_forced', 'delegate_to', 'ignore_errors')),
           path_glob          text NOT NULL CHECK (path_glob ~ '^[A-Za-z0-9_.*?/\[\]-]{1,200}$'
-                               AND path_glob !~ '^/' AND path_glob !~ '(^|/)\.\.(/|$)'),
+                               AND path_glob !~ '^/' AND path_glob !~ '(^|/)\.\.(/|$)'
+                               AND path_glob ~ '(^|/)[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*(/|$)'),
           reason             text NOT NULL CHECK (length(btrim(reason)) BETWEEN 10 AND 1000),
           granted_by         uuid NOT NULL REFERENCES app_user (id),
           granted_at         timestamptz NOT NULL DEFAULT now(),

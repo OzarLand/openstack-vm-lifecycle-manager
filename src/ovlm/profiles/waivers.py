@@ -50,6 +50,19 @@ WAIVABLE_RULES = ("no_log_secret", "check_mode_forced", "delegate_to", "ignore_e
 #: Repository-relative fnmatch glob: no absolute path, no ``..`` component (also a CHECK constraint).
 PATH_GLOB = re.compile(r"^[A-Za-z0-9_.*?/\[\]-]{1,200}$")
 _DOTDOT = re.compile(r"(^|/)\.\.(/|$)")
+#: At least one **literal path segment** (review SFR-2): a segment with no ``*``, ``?`` or bracket expression and at
+#: least one letter, digit, ``_`` or ``-``. ``fnmatch``'s ``*`` matches ``/``, so ``*``, ``**``, ``*/*``, ``**/*``,
+#: ``*/**``, ``[a-z]*`` or ``*.yml`` would waive the rule for the whole repository. Same regex in the ``CHECK`` of
+#: ``profiles_0002`` (PostgreSQL ARE and Python agree on it; a unit test ties the two).
+LITERAL_SEGMENT = re.compile(r"(^|/)[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*(/|$)")
+#: B6 refuses (``needs_human``) a waiver that covered more findings than this in one run (review SFR-2).
+MAX_WAIVED_FINDINGS = 20
+
+
+def glob_is_specific(path_glob: str) -> bool:
+    """The glob keeps at least one literal path segment (not a catch-all)."""
+    return LITERAL_SEGMENT.search(path_glob) is not None
+
 
 audit.register_entity(
     "lint_waiver",
@@ -142,6 +155,11 @@ def _check_input(rule: str, path_glob: str, reason: str) -> None:
     if not PATH_GLOB.match(path_glob) or path_glob.startswith("/") or _DOTDOT.search(path_glob):
         errors.append(
             "path_glob: a repository-relative glob (letters, digits, _ . * ? / [ ] -), no '..'"
+        )
+    elif not glob_is_specific(path_glob):
+        errors.append(
+            "path_glob: keep at least one literal path segment (e.g. roles/probe/*, */tasks/main.yml); "
+            "a catch-all such as * or **/* would waive the rule for the whole repository"
         )
     if not 10 <= len(reason.strip()) <= 1000:
         errors.append("reason: 10 to 1000 characters")
