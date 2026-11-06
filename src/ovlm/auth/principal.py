@@ -54,5 +54,13 @@ class Principal:
     def is_human(self) -> bool:
         return self.principal_type == "human"
 
+    def signed_in_as(self) -> str:
+        """``Signed in as approver-a (approver).`` for refusals: names the account so a wrong login is obvious."""
+        names = ", ".join(sorted(self.roles())) or "no roles"
+        return f"Signed in as {self.username} ({names})."
+
+    def needs_role_message(self, role: str) -> str:
+        return f"{self.signed_in_as()} This action needs the {role} role."
+
     def roles(self) -> frozenset[str]:
         return frozenset(role for role, _ in self.grants)

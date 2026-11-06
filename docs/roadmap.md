@@ -114,8 +114,8 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | SF-8 | One address rule for the host-key scan and the renewal | IS-3 (Low) | Fixed and verified |
 | SF-9 | Fixed reason codes for sync failures shown to viewers | IS-4 (Low) | Fixed and verified |
 | SF-13 | Lint waiver API (approver, step-up, audited, per profile version) | automation-contract §9 | Fixed (`claude/ovlm-security-followups`): grant/list/revoke, B6 uses the version's waivers, plan hash binds them, `profiles_0002` |
-| AU-1 | Audit `run=` also returns the plan's approvals (G1) and the engine's step events (`step.claim`, `step.outcome`), which today go only to the log stream | Felcloud lab, 2026-11-06 | To do |
-| UI-1 | Show the signed-in user and their roles in every page header (the maintainer was on a run page as approver-a without noticing) | Felcloud lab, 2026-11-06 | To do |
+| AU-1 | Audit `run=` also returns the plan's approvals (G1) and the engine's step events (`step.claim`, `step.outcome`), which today go only to the log stream | Felcloud lab, 2026-11-06 | Fixed (`claude/ovlm-ui1-au1`): `run=` adds the plan's events and every approval of the plan; the worker's `DbAuditSink` writes the engine's events (one row per claim, outcome, park, run transition, signal) into `audit_event`, allowlisted, without the fencing token |
+| UI-1 | Show the signed-in user and their roles in every page header (the maintainer was on a run page as approver-a without noticing) | Felcloud lab, 2026-11-06 | Fixed (`claude/ovlm-ui1-au1`): header `approver-a · approver (global)` with "Sign out / switch account"; a role refusal says "Signed in as approver-a (approver). This action needs the operator role." |
 | SF-10 | Host-key confirm hardening (paste, not prefill; optional step-up); `--reissue` audit names the OS user; TOTP key backup in the install guide | IS-2, IS-6, IS-7 | Fixed (`claude/ovlm-security-followups`): UI confirm form (paste, source recorded), `os_user` + `hostname` in the audit, install guide §3a. The optional step-up was not added |
 
 ### Later (V1, not in the MVP)

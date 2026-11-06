@@ -255,7 +255,7 @@ def require_role(
                     f"The {role} role needs TOTP. Enrol TOTP in your session first.",
                 )
             else:
-                problem = forbidden("forbidden", f"The {role} role is required for this action.")
+                problem = forbidden("forbidden", principal.needs_role_message(role))
         if problem is None:
             return principal
         _audit_denial(request, db, principal, requested)

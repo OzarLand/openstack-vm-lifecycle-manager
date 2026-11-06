@@ -170,7 +170,11 @@ _RUN_TRAIL = """(
     OR (target_type = 'workflow_step'
         AND target_id IN (SELECT CAST(id AS text) FROM workflow_step WHERE run_id = :trail_run))
     OR (target_type = 'approval'
-        AND target_id IN (SELECT CAST(id AS text) FROM approval WHERE run_id = :trail_run))
+        AND target_id IN (SELECT CAST(a.id AS text) FROM approval a
+                          WHERE a.run_id = :trail_run
+                             OR a.plan_id = (SELECT renewal_plan_id FROM workflow_run WHERE id = :trail_run)))
+    OR (target_type = 'renewal_plan'
+        AND target_id = (SELECT CAST(renewal_plan_id AS text) FROM workflow_run WHERE id = :trail_run))
 )"""
 
 # Rows the worker writes carry a run id but no project scope; the run's plan says which project they belong to.
@@ -200,8 +204,8 @@ def list_events(
 ) -> list[AuditRow]:
     """Newest first. Which roles see which actions is decided by the caller (``ovlm.audit.view``), which passes:
 
-    * ``run_trail``: a run's whole trail: rows of the run, of its steps, and of the objects that are its steps'
-      targets or its approvals (see ``_RUN_TRAIL``).
+    * ``run_trail``: a run's whole trail: rows of the run, of its steps, of its plan and of every approval of that
+      plan (G1 belongs to the plan, not the run), and of the objects that are its steps' targets (see ``_RUN_TRAIL``).
     * ``scopes``: ``None`` = every row; otherwise only rows whose ``project_scope`` is in ``scopes``, plus rows
       without a scope that belong to a run whose plan is in one of ``scopes`` (the worker records those).
     * ``exclude_action_prefixes``: actions starting with any of these are left out.

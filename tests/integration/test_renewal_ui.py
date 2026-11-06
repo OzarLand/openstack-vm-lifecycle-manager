@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime, timedelta
+from html import unescape
 from typing import Any
 from uuid import uuid4
 
@@ -418,7 +419,7 @@ def test_run_timeline_for_a_parked_run_explains_what_to_do(env: Env) -> None:
     assert (
         v.status_code == 200
         and "Current truth" in v.text
-        and "You need the operator role in this project." in v.text
+        and "Signed in as viewer1 (viewer). This action needs the operator role." in v.text
     )
     assert "/actions/rollback" not in v.text and "Roll back…" not in v.text
     assert w.other.get(f"/renewals/runs/{run}").status_code == 404
@@ -825,3 +826,45 @@ def test_pages_need_a_session_and_every_page_is_free_of_inline_styles_and_cdn(en
         assert "style=" not in t and not re.search(
             r'(src|href)="https?://(?!github\.com/OzarLand)', t
         ), path
+
+
+# --- UI-1: the header names the account, and a refusal names it too ---------------------------------------------------------
+
+
+def test_every_page_header_shows_the_account_and_a_sign_out_or_switch_link(env: Env) -> None:
+    w = World(env)
+    plan = w.approved_plan()
+    run = w.seed_run(plan, state="needs_human", needs_human_reason="api_unreachable", phase="window",
+                     steps=[{"key": "stop_old", "state": "needs_human", "error_class": "needs_human"}])  # fmt: skip
+    scope = w.ids["scope"].removeprefix("project:")[:8]
+    for url in ("/", f"/renewals/runs/{run}", "/renewals", "/audit", "/renewals/runs/not-a-uuid"):
+        r = w.ap.get(url)
+        header = re.search(r'<div class="who"[^>]*>(.*?)</div>', r.text, re.S)
+        assert header, (url, r.status_code)
+        compact = " ".join(re.sub(r"<[^>]+>", " ", header.group(1)).split())
+        assert compact.startswith(f"ap1 · approver (project {scope})"), (url, compact)
+        assert "Sign out / switch account" in header.group(
+            1
+        ) and 'action="/logout"' in header.group(1)
+
+
+def test_a_refusal_names_the_signed_in_account_and_the_missing_role(env: Env) -> None:
+    w = World(env)
+    plan = w.approved_plan()
+    run = w.seed_run(plan, state="needs_human", needs_human_reason="api_unreachable", phase="window",
+                     steps=[{"key": "stop_old", "state": "needs_human", "error_class": "needs_human"}])  # fmt: skip
+    expected = "Signed in as ap1 (approver). This action needs the operator role."
+    # the REST API
+    r = w.ap.post(
+        f"/api/v1/runs/{run}/actions/probe", headers=w.h(w.ap, **{"Idempotency-Key": "k" * 12})
+    )
+    assert r.status_code == 403 and expected in r.json()["detail"], r.text
+    # the web form
+    r = w.post(w.ap, f"/renewals/runs/{run}/actions/probe", {"idempotency_key": "k" * 12})
+    assert r.status_code == 403 and expected in unescape(r.text), r.text
+    # the run page explains the disabled actions the same way
+    page = w.ap.get(f"/renewals/runs/{run}")
+    assert expected in unescape(page.text)
+    # a plain role guard (viewer-only API call needing the operator role) says the same
+    r = w.ap.post("/api/v1/plans", json={"managed_vm_id": w.ids["vm"]}, headers=w.h(w.ap))
+    assert r.status_code == 403 and expected in r.json()["detail"], r.text

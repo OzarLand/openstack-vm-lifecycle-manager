@@ -2,7 +2,7 @@
 
 Viewer role; an API token with the ``read`` scope may call it. What the caller sees is decided by
 ``ovlm.audit.view.visible_events`` (project scope, SEC-R-31 admin-only actions); an invisible project is never
-leaked. ``run=`` returns a run's whole trail (the run, its steps' targets and its approvals).
+leaked. ``run=`` returns a run's whole trail (the run, its steps and their engine events, its plan and all the plan's approvals).
 """
 
 from __future__ import annotations

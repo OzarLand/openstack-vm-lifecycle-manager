@@ -581,9 +581,9 @@ def _run_context(db: Session, who: Principal, run_id: UUID) -> dict[str, Any]:
         why = None
         if not usable:
             why = (
-                "You need the operator role in this project."
+                who.needs_role_message("operator")
                 if name != "mark-resolved"
-                else "You need the operator or approver role."
+                else who.needs_role_message("operator or approver")
             )
         elif confirmed and not who.is_human:
             why = "API tokens cannot confirm this; use a human session in the web interface."
