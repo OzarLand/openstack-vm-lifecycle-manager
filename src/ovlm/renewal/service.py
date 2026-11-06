@@ -22,10 +22,12 @@ from sqlalchemy.orm import Session
 
 from ovlm import audit
 from ovlm.auth.authz import authorize
+from ovlm.auth.errors import ProblemError
 from ovlm.auth.principal import Principal
 from ovlm.auth.sod import Gate, account_provenance, check_approval_eligibility
 from ovlm.auth.stepup import consume_stepup
 from ovlm.policies.service import effective_policy
+from ovlm.profiles.waivers import active_waivers, for_display, hash_binding
 from ovlm.registry.errors import DomainError
 from ovlm.renewal.config import RenewalConfig
 from ovlm.renewal.evidence import APPROVAL_STEPUP_ACTION, CUTOVER_STEPUP_ACTION
@@ -172,7 +174,8 @@ def create_plan(
         text("SELECT automation_sha FROM profile_version WHERE id = :i"), {"i": pv["id"]}
     ).scalar()
     phash = compute_plan_hash(resolved=resolved, profile_version_id=pv["id"], spec_hash=pv["spec_hash"],
-                              automation_sha=sha, policy=policy_binding(prow))  # fmt: skip
+                              automation_sha=sha, policy=policy_binding(prow),
+                              lint_waivers=hash_binding(active_waivers(conn, pv["id"])))  # fmt: skip
     prev = s.execute(
         text("SELECT pl.resolved -> 'automation' ->> 'sha' FROM renewal_plan pl WHERE pl.service_id = :s "
              "AND pl.state IN ('approved', 'started') ORDER BY pl.created_at DESC LIMIT 1"),
@@ -208,7 +211,17 @@ def request_approval(
         starter = s.execute(
             text("SELECT started_by FROM workflow_run WHERE id = :r"), {"r": run_id}
         ).scalar()
-    rs = facts.requester_set(run_starter=starter, approval_requester=who.user_id)
+    rs = facts.requester_set(run_starter=starter, approval_requester=who.user_id, gate=gate)
+    conflicts = rs.waiver_granter_conflicts()
+    if conflicts:  # review SFR-3: whoever waived the lint does not also ask for the work it eases
+        _audit(s, who, "approval.request.refused", "renewal_plan", plan_id, scope, subject_type=gate.value,
+               reason="sod-waiver-granter: " + ", ".join(conflicts))  # fmt: skip
+        s.commit()
+        raise ProblemError(403, "sod-violation", "Separation of duties",
+                           f"A lint waiver on this plan's profile version was granted by its {', '.join(conflicts)}: "
+                           "whoever waives the lint must not also ask for the work it eases.",
+                           next_action="Ask someone who granted no waiver on this version to create the plan and "
+                           "request the approval, or revoke the waiver.")  # fmt: skip
     aid = new_id()
     subject = plan_id if gate is Gate.PLAN else run_id
     try:
@@ -220,7 +233,10 @@ def request_approval(
                 {"i": aid, "t": gate.value, "s": subject, "p": plan_id, "r": run_id, "scope": scope,
                  "h": facts.recomputed_hash, "u": who.user_id,
                  "hi": json.dumps({"resolved": facts.resolved, "policy": facts.policy,
-                                   "automation_diff": facts.plan.get("automation_diff")}, default=str),
+                                   "automation_diff": facts.plan.get("automation_diff"),
+                                   "lint_waivers": for_display(
+                                       active_waivers(s.connection(), facts.plan["profile_version_id"]),
+                                       facts.lint_waivers)}, default=str),
                  "rs": "{" + ",".join(str(u) for u in rs.members()) + "}"},
             )  # fmt: skip
     except Exception:  # unique index: one open request per subject
@@ -299,7 +315,7 @@ def decide(
                 prior.add(d)
     elig = check_approval_eligibility(
         s, who, gate=gate, scope=row["scope"],
-        requester_set=facts.requester_set(run_starter=starter, approval_requester=row["requested_by"]),
+        requester_set=facts.requester_set(run_starter=starter, approval_requester=row["requested_by"], gate=gate),
         prior_gate_deciders=prior,
         require_distinct_approvers=bool((facts.policy or {}).get("require_distinct_approvers")),
     )  # fmt: skip

@@ -26,9 +26,12 @@ from uuid import UUID
 from sqlalchemy import Connection, text
 from sqlalchemy.orm import Session
 
-from ovlm.secrets.envelope import SealContext, Sealed
+from ovlm.secrets.envelope import LEGACY_ALGS, SealContext, Sealed
 
 CREDENTIAL_CONTEXT_TABLE = "credential_ref"
+#: Retired formats (``ovlm-env-v1``, review N-3): never decrypted by the worker, so they are neither re-wrapped nor
+#: counted as "in use" by a key; otherwise ``ovlm kek status`` could never reach 0 after a rotation.
+_LEGACY = sorted(LEGACY_ALGS)
 
 
 def endpoint_digest(
@@ -105,9 +108,10 @@ def rows_wrapped_to_other_keys(
             "SELECT r.id AS cred_id, r.project_connection_id, r.kind, r.cloud_id, r.endpoint_sha256, "
             "s.id AS secret_id, s.alg, s.kek_id, s.wrapped_dek, s.nonce, s.ciphertext "
             "FROM sealed_secret s JOIN credential_ref r ON r.secret_id = s.id "
-            "WHERE s.kek_id <> :k ORDER BY s.created_at, s.id LIMIT :l FOR UPDATE OF s SKIP LOCKED"
+            "WHERE s.kek_id <> :k AND NOT (s.alg = ANY(:legacy)) "
+            "ORDER BY s.created_at, s.id LIMIT :l FOR UPDATE OF s SKIP LOCKED"
         ),
-        {"k": current_kek_id, "l": limit},
+        {"k": current_kek_id, "l": limit, "legacy": _LEGACY},
     ).all()
     return [
         (
@@ -136,16 +140,29 @@ def store_rewrap(
 
 def kek_usage(db: Session | Connection) -> dict[str, int]:
     """Number of sealed secrets **in use** (referenced by a credential) per key id: tells when an old key may be
-    removed. Orphans (review CS-9) are counted by :func:`orphan_count` and removed by :func:`delete_orphans`."""
+    removed. Orphans (review CS-9) are counted by :func:`orphan_count` and removed by :func:`delete_orphans`.
+    Secrets in a retired format (review N-3) are not in use by any key: :func:`legacy_count` reports them."""
     return {
         r.kek_id: int(r.n)
         for r in db.execute(
             text(
                 "SELECT s.kek_id, count(*) AS n FROM sealed_secret s "
-                "WHERE EXISTS (SELECT 1 FROM credential_ref r WHERE r.secret_id = s.id) GROUP BY s.kek_id"
-            )
+                "WHERE EXISTS (SELECT 1 FROM credential_ref r WHERE r.secret_id = s.id) "
+                "AND NOT (s.alg = ANY(:legacy)) GROUP BY s.kek_id"
+            ),
+            {"legacy": _LEGACY},
         )
     }
+
+
+def legacy_count(db: Session | Connection) -> int:
+    """Sealed secrets in a retired format (``ovlm-env-v1``): unusable, kept only as metadata of their rejected
+    credential until an admin deletes it (review N-3). They never hold a key "in use"."""
+    return int(
+        db.execute(
+            text("SELECT count(*) FROM sealed_secret WHERE alg = ANY(:legacy)"), {"legacy": _LEGACY}
+        ).scalar_one()
+    )
 
 
 _ORPHANS = (

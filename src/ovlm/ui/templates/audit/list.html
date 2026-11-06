@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Audit{% endblock %}
+{% block content %}
+<h1>Audit</h1>
+<p class="muted">Append-only record of changes and decisions, newest first. You see the projects you may view; sign-in, token and user-management events are for administrators only.</p>
+{% for p in problems %}<p role="alert" class="banner error">{{ p }}</p>{% endfor %}
+<form method="get" action="/audit" class="filters" role="search" aria-label="Filter audit events"
+      hx-get="/audit" hx-target="#results" hx-select="#results" hx-push-url="true" hx-trigger="submit">
+  <label>Actor <input name="actor" value="{{ filters.actor }}" placeholder="user id" size="38" spellcheck="false"></label>
+  <label>Target <input name="target" value="{{ filters.target }}" placeholder="target id" size="38" spellcheck="false"></label>
+  <label>Run <input name="run" value="{{ filters.run }}" placeholder="run id (the whole trail)" size="38" spellcheck="false"></label>
+  <label>From <input name="from" value="{{ filters["from"] }}" placeholder="2026-11-06T09:00" size="18"></label>
+  <label>To <input name="to" value="{{ filters.to }}" placeholder="2026-11-07" size="18"></label>
+  <button type="submit">Filter</button>
+  <a href="/audit">Reset</a>
+</form>
+<div id="results">
+  {% if events %}
+  <table>
+    <caption class="sr">Audit events</caption>
+    <thead><tr><th scope="col">Time</th><th scope="col">Action</th><th scope="col">Result</th><th scope="col">Actor</th><th scope="col">Target</th><th scope="col">Scope</th><th scope="col">Run</th><th scope="col">Detail</th></tr></thead>
+    <tbody>
+    {% for e in events %}
+    <tr>
+      <td>{{ e.ts | timestamp }}</td>
+      <th scope="row" class="mono">{{ e.action }}</th>
+      <td>{% if e.result == "success" %}<span class="badge ok">success</span>{% else %}<span class="badge warn">{{ e.result }}</span>{% endif %}</td>
+      <td><span class="mono">{{ (e.actor_id or "") | short_id }}</span> <span class="muted">{{ e.principal_type }} / {{ e.auth_method }}</span></td>
+      <td><span class="muted">{{ e.target_type }}</span> <span class="mono">{{ e.target_id or "" }}</span></td>
+      <td class="mono">{{ (e.project_scope or "global") | replace("project:", "project ") }}</td>
+      <td>{% if e.run_id %}<a class="mono" href="/audit?run={{ e.run_id }}">{{ e.run_id | short_id }}</a>{% endif %}</td>
+      <td>{% if e.before or e.after %}<details><summary>show</summary><pre class="mono">{% if e.before %}before: {{ e.before | tojson(indent=1) }}
+{% endif %}{% if e.after %}after: {{ e.after | tojson(indent=1) }}{% endif %}</pre></details>{% else %}<span class="muted">none</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="pager">
+    {% if next_query %}<a rel="next" href="/audit?{{ next_query }}">Next page</a>{% endif %}
+  </p>
+  {% elif not problems %}
+  <p class="empty">No audit events match your filters in the projects you may view.</p>
+  {% endif %}
+</div>
+{% endblock %}

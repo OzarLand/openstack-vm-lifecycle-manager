@@ -255,6 +255,13 @@ def _evaluate_record(
             f"(HTTP {facts.record_status if facts.record_status is not None else '?'}), so its real expiry cannot "
             "be verified (the credential's user must be allowed to read its own application credentials)"
         )
+    if facts.record_unrestricted is None:
+        # Fail closed (review N-2): a record without a boolean ``unrestricted`` cannot show the credential is
+        # restricted, and the token's ``restricted`` flag alone may be missing too.
+        return False, (
+            "Keystone's record of the application credential does not say whether it is unrestricted "
+            "(the 'unrestricted' field is missing), so it is refused"
+        )
     ks = facts.record_expires_at
     if ks is None:
         return (

@@ -190,7 +190,7 @@ class AutomationRunner:
         return dest.parent / "_checkout.sha"
 
     def reverify_checkout(
-        self, spec: AutomationSpec, workflow_id: str
+        self, spec: AutomationSpec, workflow_id: str, *, waivers: WaiverProvider | None = None
     ) -> PreparedAutomation | None:
         """Re-verify, locally, the run-level checkout that :meth:`prepare_automation` left on disk (no git host
         contact). Returns ``None`` when there is no checkout for ``workflow_id``. Refuses (``NEEDS_HUMAN``) when
@@ -210,7 +210,8 @@ class AutomationRunner:
             raise AutomationError(
                 "the checkout on disk is not at the pinned SHA", Classification.NEEDS_HUMAN
             )
-        return self._verify(spec, workflow_id, dest, head, None, None)
+        # the same waivers as B6 (SF-13), not audited again: B6 recorded every finding they covered
+        return self._verify(spec, workflow_id, dest, head, waivers, None)
 
     def _verify(
         self,

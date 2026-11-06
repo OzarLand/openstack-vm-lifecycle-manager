@@ -547,6 +547,11 @@ class WorkflowEngine:
             with self.db.begin() as c:
                 timeout_ms = int(max(self.config.heartbeat_interval, 1.0) * 1000)
                 c.execute(text(f"SET LOCAL statement_timeout = {timeout_ms}"))
+                if fence.revoked is not None:
+                    # A heartbeat that was stuck on the connection while the attempt fenced itself (local deadline
+                    # passed) must not extend the lease once the DB is back: the attempt has stopped, and a late
+                    # extension would only delay the takeover by one lease (lab flake in WF-07).
+                    return False
                 row = c.execute(
                     text(
                         "UPDATE workflow_step s SET lease_expires_at = now() + make_interval(secs => :lease), "

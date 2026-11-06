@@ -178,11 +178,15 @@ class RunnerDouble:
     def __init__(self, guest: FakeGuest, keys: GuestKeys, root: Path) -> None:
         self.guest, self.keys, self.root = guest, keys, root
         self.prepared: list[str] = []
+        self.waivers: list[Any] = []
         self.adopted: list[str] = []
         self.requests: list[PhaseRequest] = []
 
-    def prepare_automation(self, spec: AutomationSpec, workflow_id: str) -> PreparedAutomation:
+    def prepare_automation(
+        self, spec: AutomationSpec, workflow_id: str, *, waivers: Any = None, on_waiver: Any = None
+    ) -> PreparedAutomation:
         self.prepared.append(workflow_id)
+        self.waivers.append(waivers)
         checkout = self.root / workflow_id / "_checkout"
         (checkout / spec.playbook_dir).mkdir(parents=True, exist_ok=True)
         optional = {Phase.PREFLIGHT, Phase.ROLLBACK_HOOKS}
@@ -193,7 +197,9 @@ class RunnerDouble:
             spec, workflow_id, checkout, spec.ref, "none", "2.19.4", LintResult()
         )
 
-    def adopt_checkout(self, spec: AutomationSpec, workflow_id: str) -> PreparedAutomation | None:
+    def adopt_checkout(
+        self, spec: AutomationSpec, workflow_id: str, *, waivers: Any = None
+    ) -> PreparedAutomation | None:
         checkout = self.root / workflow_id / "_checkout"
         if not checkout.is_dir():
             return None

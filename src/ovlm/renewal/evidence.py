@@ -32,9 +32,11 @@ from ovlm.auth.sod import (
     EvidenceResult,
     Gate,
     RecomputedFacts,
+    check_waivers,
     revalidate_approval_evidence,
     role_held_at,
 )
+from ovlm.profiles.waivers import plan_requesters
 from ovlm.renewal.plans import PlanFacts, tc_of
 
 APPROVAL_STEPUP_ACTION = "approval.decide"
@@ -157,7 +159,7 @@ def check_gate(
         recomputed = RecomputedFacts(
             plan_hash=facts.recomputed_hash,
             requester_set=facts.requester_set(
-                run_starter=run_starter, approval_requester=row["requested_by"]
+                run_starter=run_starter, approval_requester=row["requested_by"], gate=gate
             ),
             stepup_action=APPROVAL_STEPUP_ACTION,
             stepup_target=aid,
@@ -166,6 +168,8 @@ def check_gate(
             require_distinct_approvers=bool((facts.policy or {}).get("require_distinct_approvers")),
             revert_after_approval=False,  # derived above (_voided_by_run)
             now=now,
+            lint_waivers=facts.waiver_records,
+            waiver_requesters=plan_requesters(conn, UUID(str(facts.plan["profile_version_id"]))),
         )
         with Session(bind=conn) as session:
             result = revalidate_approval_evidence(session, record, recomputed)
@@ -226,6 +230,14 @@ def _operator_cutover(
     checks.append(CheckOutcome(4, "stepup", ok4))
     typed = " ".join((row["typed_confirmation"] or "").split())
     checks.append(CheckOutcome(5, "typed_confirmation", hmac.compare_digest(typed, expected_tc)))
+    with Session(
+        bind=conn
+    ) as session:  # review SFR-1: the waivers the hash binds were really granted
+        bad_waivers = check_waivers(
+            session, facts.waiver_records, scope=row["scope"], author=facts.profile_author,
+            requesters=plan_requesters(conn, UUID(str(facts.plan["profile_version_id"]))),
+        )  # fmt: skip
+    checks.append(CheckOutcome(8, "lint_waivers", not bad_waivers))
     ok = all(c.ok for c in checks)
     return EvidenceResult(
         ok,
@@ -237,5 +249,6 @@ def _operator_cutover(
             "decided_by": str(row["decided_by"]),
             "decided_at": at.isoformat(),
             "checks": {f"{c.number}:{c.name}": c.ok for c in checks},
+            "lint_waivers": bad_waivers,
         },
     )

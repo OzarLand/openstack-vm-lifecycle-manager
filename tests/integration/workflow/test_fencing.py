@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -297,6 +298,33 @@ def test_wf07_database_unreachable_self_fences_at_local_deadline(wf: WfDb) -> No
     wf.expire_leases()
     assert drive(wf.make_engine(), run_id, wf)["state"] == "completed"
     assert len(wf.effects("k")) == 1
+
+
+def test_wf07_late_heartbeat_after_the_local_fence_does_not_extend_the_lease(wf: WfDb) -> None:
+    """A heartbeat stuck on the connection while the attempt fenced itself must not extend the lease once the DB is
+    reachable again: the attempt has stopped, and a late extension only delays the takeover (WF-07 flake)."""
+    from ovlm.workflow.fence import Fence
+
+    run_id = wf.request([plan_step("block", res="k", value="K", name="wf07c")])
+    a = wf.make_engine(clock=SystemClock())
+    a.admit_pending()
+    (claim,) = a.claim(1)
+    fence = Fence(
+        clock=SystemClock(), lease_duration=60.0, fence_margin=1.0, t_send=time.monotonic()
+    )
+    wf.expire_leases()
+
+    def lease() -> Any:
+        with wf.admin.connect() as c:
+            q = "SELECT lease_expires_at FROM workflow_step WHERE id = :id"
+            return c.execute(text(q), {"id": claim.step.id}).scalar()
+
+    expired = lease()
+    fence.revoke("local fence deadline passed")
+    assert a.heartbeat(claim, fence) is False
+    after = lease()
+    assert after == expired, "a heartbeat after the local fence extended the lease"
+    assert wf.run(run_id)["state"] == "running"
 
 
 # ---- WF-09: connection loss mid-step, mid-wait and idle ----------------------------------------------------

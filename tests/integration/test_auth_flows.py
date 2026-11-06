@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import socket
 from typing import Any
 from uuid import uuid4
 
@@ -83,6 +84,7 @@ def test_cli_reissues_a_link_only_for_an_admin_who_never_enrolled(
         "OVLM_DB__PASSWORD_FILE": str(s.db.password_file), "OVLM_EXTERNAL_URL": ORIGIN,
     }.items():  # fmt: skip
         monkeypatch.setenv(k, v)
+    monkeypatch.setenv("SUDO_USER", "lab-operator")
     reissue = ["create", "--username", "root", "--enrol-link", "--reissue"]
     assert admin_main(reissue) == 2  # no such user yet
     assert "no such user" in capsys.readouterr().err
@@ -101,6 +103,8 @@ def test_cli_reissues_a_link_only_for_an_admin_who_never_enrolled(
     assert (row.principal_type, row.auth_method) == ("system", "cli") and row.after[
         "revoked_links"
     ] == 1
+    # review IS-6 (SF-10): the audit row names the OS user and the host the command ran on
+    assert row.after["os_user"] == "lab-operator" and row.after["hostname"] == socket.gethostname()
     assert (
         env.sql("SELECT count(*) FROM enrolment_link WHERE used_at IS NULL AND revoked_at IS NULL")[
             0

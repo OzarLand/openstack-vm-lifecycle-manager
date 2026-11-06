@@ -293,3 +293,27 @@ def test_scope_comparison_is_canonical() -> None:
     assert not scope_covers(upper, "project:0f0e0d0c-0b0a-4908-8706-050403020101")
     assert binding_conflicts([("approver", upper)], "operator", lower) == [upper]
     assert token_grants([("operator", upper)], ["operate"], lower) >= {("operator", lower)}
+
+
+def test_cli_invoker_names_the_os_user_and_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review IS-6 (SF-10): ``ovlm admin create --reissue`` records who ran it and where. ``SUDO_USER`` wins (the
+    human behind sudo); without any variable, the uid's passwd name, or ``uid:N`` when there is none."""
+    import os
+    import socket
+
+    from ovlm.auth import cli
+
+    for k in ("SUDO_USER", "USER", "LOGNAME"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("USER", "alice")
+    monkeypatch.setenv("SUDO_USER", "bob")
+    assert cli.invoker() == {"os_user": "bob", "hostname": socket.gethostname()}
+    monkeypatch.delenv("SUDO_USER")
+    assert cli.invoker()["os_user"] == "alice"
+    monkeypatch.delenv("USER")
+
+    def no_entry(uid: int) -> object:
+        raise KeyError(uid)
+
+    monkeypatch.setattr("pwd.getpwuid", no_entry)
+    assert cli.invoker()["os_user"] == f"uid:{os.getuid()}"

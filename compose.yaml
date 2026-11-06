@@ -80,13 +80,16 @@ services:
         NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1}
         no_proxy: ${NO_PROXY:-localhost,127.0.0.1,::1}
     command: ["worker"]
-    init: true                          # minimal init: signal forwarding and reaping
-    # Starts as container root with four capabilities; the entrypoint drops to uid ovlm and keeps only
+    # No `init: true` (review CS-6, SF-1): docker-init would stay PID 1 as root with every capability below for the
+    # container's life. The entrypoint runs tini as PID 1 only after dropping to uid ovlm (worker-entrypoint.sh).
+    # Starts as container root with five capabilities; the entrypoint drops to uid ovlm and keeps only
     # CAP_SETUID/SETGID/KILL (ambient) so the worker can run ansible-runner as `ovlm-ansible` and stop its tree.
-    # SETPCAP is needed once, by the launcher, to trim the bounding set. Nothing runs as root afterwards.
-    # (automation-contract.md section 11.) no-new-privileges stays on: no setuid binary, no sudo.
+    # SETPCAP is needed once, by the launcher, to trim the bounding set. Nothing runs as root afterwards
+    # (`make smoke` checks it). (automation-contract.md section 11.) no-new-privileges stays on: no setuid binary.
     # DAC_READ_SEARCH lets the launcher (root) read the 0400 KEK file once to copy it, as uid ovlm, into the worker's
     # private tmpfs; the launcher then drops it from every set before the worker starts (worker-entrypoint.sh).
+    # `docker compose exec` and the healthcheck start as the container user (root, with these capabilities): enter
+    # with `docker compose exec -u ovlm worker ...`; the healthcheck drops to ovlm before running anything.
     user: "0:0"
     cap_add: [SETUID, SETGID, SETPCAP, KILL, DAC_READ_SEARCH]
     environment:
@@ -112,7 +115,7 @@ services:
     depends_on:
       migrate: {condition: service_completed_successfully}
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/healthz', timeout=2).status == 200 else 1)"]
+      test: ["CMD", "setpriv", "--reuid=10001", "--regid=10001", "--clear-groups", "--inh-caps=-all", "--bounding-set=-all", "--no-new-privs", "--", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/healthz', timeout=2).status == 200 else 1)"]
       interval: 5s
       timeout: 3s
       retries: 12

@@ -64,7 +64,7 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 |---|---|---|---|---|---|---|
 | E3-1 | Auth: local users (argon2id), sessions, CSRF, API tokens, **TOTP for approver/admin**, step-up | 4 | Sonnet | E1 | Integration tested (PR #3) | Security tests from security-model §10 |
 | E3-2 | RBAC with project scope, requester sets, separation of duties, "self-approved" flag | 4 | Opus | E3-1 | Integration tested; security review fixes merged (PR #7) | Matrix tests; review by 8 |
-| E3-3 | Profiles + immutable versions; policies + bindings + exceptions; deadlines | 4 | Sonnet | E1 | Integration tested (PR #4); automation lint job, waivers and repo allowlist still to do | API + unit tests |
+| E3-3 | Profiles + immutable versions; policies + bindings + exceptions; deadlines | 4 | Sonnet | E1 | Integration tested (PR #4); lint waivers added by SF-13; automation lint job and repo allowlist still to do | API + unit tests |
 | E3-4 | Append-only audit (grants + trigger), mirror to the log stream | 4 | Sonnet | E1-3 | Integration tested (PR #3) | DB-level tests: UPDATE/DELETE refused |
 | E3-5 | Renewal planning: upcoming list, advisory quota check, same-service lock | 4 | Sonnet | E3-3, E2 | To do | Unit tests |
 
@@ -96,25 +96,25 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | E6-1 | Layout, auth pages, TOTP enrolment | 5 | Sonnet | E3-1 | Integration tested (PR #4) | UI tests (HTTP-level) |
 | E6-2 | Inventory list + VM details (observed vs desired) | 5 | Sonnet | E2 | Integration tested (PR #4) | |
 | E6-3 | Readiness view; renewal plan; approvals with hash inputs and diff | 5 | Sonnet | E4, E5-5 | Integration tested (PR #8) | |
-| E6-4 | Run timeline with step evidence, available actions, audit view | 5 | Sonnet | E5 | Integration tested (PR #8) | |
+| E6-4 | Run timeline with step evidence, available actions, audit view | 5 | Sonnet | E5 | Run timeline: integration tested (PR #8). **Audit view: PR #8 shipped only a placeholder page and no `GET /api/v1/audit` (404 in the Felcloud lab).** Both now exist on `claude/ovlm-audit-api`: integration tested locally, not yet merged | Audit view: scoping, admin-only actions, `run=` trail, pagination, token scope, HTTP-level page test |
 
 ### Security follow-ups (before production, not blocking the MVP lab)
 
 | ID | Task | Source | Status |
 |---|---|---|---|
-| SF-1 | Worker container: no root init holding `DAC_READ_SEARCH`; document `docker compose exec -u ovlm` | CS-6 (Low) | To do; verify with `make smoke` |
+| SF-1 | Worker container: no root init holding `DAC_READ_SEARCH`; document `docker compose exec -u ovlm` | CS-6 (Low) | Fixed (`claude/ovlm-security-followups`): tini as PID 1 started after the drop, no `init: true`, healthcheck drops to `ovlm`; entrypoint unit tested as root; the new `make smoke` check was **not run** in the author's sandbox (no Docker): CI runs it |
 | SF-2 | Bind `guest_access` (jump host) into the `ssh_key` binding when the jump host is wired into the runner | N-1 (Low) | To do |
-| SF-3 | Refuse an application credential when Keystone omits the `unrestricted` field | N-2 (Low) | To do |
-| SF-4 | Remove or exclude rejected `ovlm-env-v1` credentials so `ovlm kek status` can reach 0 after rotation | N-3 (Low) | To do |
-| SF-5 | Signal a direct endpoint rewrite immediately (trigger) or document the up-to-24 h delay | N-4 (Info) | To do |
+| SF-3 | Refuse an application credential when Keystone omits the `unrestricted` field | N-2 (Low) | Fixed (`claude/ovlm-security-followups`) |
+| SF-4 | Remove or exclude rejected `ovlm-env-v1` credentials so `ovlm kek status` can reach 0 after rotation | N-3 (Low) | Fixed (`claude/ovlm-security-followups`): excluded from usage and re-wrap, counted apart |
+| SF-5 | Signal a direct endpoint rewrite immediately (trigger) or document the up-to-24 h delay | N-4 (Info) | Fixed (`claude/ovlm-security-followups`): statement trigger, `connections_0003` |
 | SF-6 | `/readyz` reports an api/worker KEK mismatch | CS-10 (Low, control done) | Optional |
 | SF-7 | `managed_vm` insert guard and tombstone, confirmation cleared on fingerprint change, live re-check at the first SSH to blue | IS-1 (Medium) | Fixed (#21, #22) |
 | SF-11 | Bind the plan's `resolved.blue` to the `managed_vm` row (server, service, project connection, plan's managed_vm_id) in the live host-key check and at preflight | IS-11 (Medium) | Fixed (#22) |
 | SF-12 | Insert guard identifies the api by role membership, not by name | IS-12 (Info) | Fixed (#22) |
 | SF-8 | One address rule for the host-key scan and the renewal | IS-3 (Low) | Fixed and verified |
 | SF-9 | Fixed reason codes for sync failures shown to viewers | IS-4 (Low) | Fixed and verified |
-| SF-13 | Lint waiver API (approver, step-up, audited, per profile version) | automation-contract §9 | To do (the reference workload no longer needs one) |
-| SF-10 | Host-key confirm hardening (paste, not prefill; optional step-up); `--reissue` audit names the OS user; TOTP key backup in the install guide | IS-2, IS-6, IS-7 | To do |
+| SF-13 | Lint waiver API (approver, step-up, audited, per profile version) | automation-contract §9 | Fixed (`claude/ovlm-security-followups`): grant/list/revoke, B6 uses the version's waivers, plan hash binds them, `profiles_0002` |
+| SF-10 | Host-key confirm hardening (paste, not prefill; optional step-up); `--reissue` audit names the OS user; TOTP key backup in the install guide | IS-2, IS-6, IS-7 | Fixed (`claude/ovlm-security-followups`): UI confirm form (paste, source recorded), `os_user` + `hostname` in the audit, install guide §3a. The optional step-up was not added |
 
 ### Later (V1, not in the MVP)
 

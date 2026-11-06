@@ -174,3 +174,25 @@ def test_blockers_and_quota_from_an_assessment() -> None:
     assert (
         blockers(None) == [] and quota_check(None) is None and quota_check({"checks": []}) is None
     )
+
+
+def test_sfr7_the_approval_page_shows_who_granted_each_waiver_when_and_why() -> None:
+    """Review SFR-7: the approver sees the granter, the time and the reason of each active waiver (display data
+    stored with the approval, not hash input), and a link to the version's waiver list."""
+    from ovlm.ui.support import templates
+
+    waiver = {"id": "w-1", "rule": "check_mode_forced", "path_glob": "roles/probe/*", "granted_by": "u-1",
+              "granted_by_name": "alice", "granted_at": "2026-11-06T10:00:00+00:00",
+              "reason": "a read-only probe, reviewed by hand", "profile_id": "p-1", "profile_version": 3}  # fmt: skip
+    inputs = rv.hash_inputs({"bound_hash": "h", "hash_inputs": {"lint_waivers": [waiver]}})
+    html = templates.get_template("renewals/_hash_inputs.html").render(
+        inputs=inputs, policy_rows=[]
+    )
+    for text in (
+        "alice",
+        "2026-11-06T10:00:00+00:00",
+        "a read-only probe, reviewed by hand",
+        "roles/probe/*",
+    ):
+        assert text in html, text
+    assert 'href="/api/v1/profiles/p-1/versions/3/lint-waivers?include_revoked=true"' in html

@@ -3,9 +3,13 @@
 Reads need ``viewer``; writes need ``operator`` (API tokens: scope ``operate``). A version is only ever created, never
 changed (SEC-R-36). The profile's ETag is its row ``version``; ``POST /profiles/{id}/versions`` needs ``If-Match``.
 
+Lint waivers (SF-13, :mod:`ovlm.profiles.waivers`): ``POST /profiles/{id}/versions/{n}/lint-waivers`` (approver, human
+session, TOTP step-up bound to the version, never its author nor a plan requester), ``GET`` the same path (viewer), and
+``POST /lint-waivers/{id}/revoke`` (approver, TOTP step-up bound to the waiver). Audited.
+
 Not implemented here, on purpose: the worker ``automation_lint`` run a new version should start (E5-3; versions answer
-``lint_status: pending`` until it exists), the lint waiver endpoint (approver, step-up; needs ``lint_waiver``), the
-repository allowlist check and the ``secret_refs`` ownership check (SEC-R-27; both need tables that do not exist yet).
+``lint_status: pending`` until it exists), the repository allowlist check and the ``secret_refs`` ownership check
+(SEC-R-27; both need tables that do not exist yet).
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from ovlm.api.routes_common import IfMatch, ProblemRoute, audit_change, etag_of
 from ovlm.auth.deps import get_db, require_role
 from ovlm.auth.principal import Principal
 from ovlm.profiles import service as profiles
+from ovlm.profiles import waivers
 from ovlm.profiles.errors import ProfileError
 from ovlm.registry import service as registry
 from ovlm.registry.errors import DomainError
@@ -47,6 +52,20 @@ class ProfileCreate(BaseModel):
 class VersionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     spec: dict[str, Any]
+
+
+class WaiverGrant(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    rule: str = Field(min_length=1, max_length=64)
+    path_glob: str = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=1000)
+    stepup_id: UUID
+
+
+class WaiverRevoke(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=1, max_length=1000)
+    stepup_id: UUID
 
 
 def _scope_of_service(session: Session, service_id: UUID) -> str:
@@ -168,3 +187,47 @@ def get_version(
             404, "profile-version-not-found", "Profile version not found", "No such version."
         )
     return found
+
+
+# --- lint waivers (SF-13, automation-contract.md 9) ---------------------------------------------------------------
+
+
+@router.post("/profiles/{profile_id}/versions/{number}/lint-waivers", status_code=201)
+def grant_lint_waiver(
+    profile_id: UUID, number: int, body: WaiverGrant, response: Response, session: Session = DB,
+    who: Principal = VIEWER,
+) -> dict[str, Any]:  # fmt: skip
+    """An approver waives one blocking lint rule on the paths a glob matches, for this version only."""
+    waiver, scope, both = waivers.grant(
+        session, who, profile_id, number, rule=body.rule, path_glob=body.path_glob, reason=body.reason,
+        stepup_id=body.stepup_id,
+    )  # fmt: skip
+    audit_change(session, who, "lint_waiver.grant", "lint_waiver", waiver["id"], scope=scope,
+                 after={**waiver, "operator_and_approver": both})  # fmt: skip
+    session.commit()
+    response.headers["Location"] = f"/api/v1/profiles/{profile_id}/versions/{number}/lint-waivers"
+    return waiver
+
+
+@router.get("/profiles/{profile_id}/versions/{number}/lint-waivers")
+def list_lint_waivers(
+    profile_id: UUID, number: int, include_revoked: bool = False, session: Session = DB,
+    who: Principal = VIEWER,
+) -> dict[str, Any]:  # fmt: skip
+    items = waivers.list_for_version(
+        session, who, profile_id, number, include_revoked=include_revoked
+    )
+    return {"items": items, "next_cursor": None}
+
+
+@router.post("/lint-waivers/{waiver_id}/revoke")
+def revoke_lint_waiver(
+    waiver_id: UUID, body: WaiverRevoke, session: Session = DB, who: Principal = VIEWER
+) -> dict[str, Any]:
+    waiver, scope = waivers.revoke(
+        session, who, waiver_id, reason=body.reason, stepup_id=body.stepup_id
+    )
+    audit_change(session, who, "lint_waiver.revoke", "lint_waiver", waiver["id"], scope=scope,
+                 after={**waiver, "revoke_reason": waiver["revoke_reason"]})  # fmt: skip
+    session.commit()
+    return waiver

@@ -4,8 +4,8 @@
 # READ-ONLY, local (no cloud call). Compares two snapshots taken by snapshot.sh and proves that no resource
 # outside the lab's own set changed: this is the ADR-0007 guard.
 #   own = name starts with "ovlm-"; ports of ovlm-* servers; snapshots/backups of ovlm-* volumes;
-#         the set-aside floating IP given with --allow-fip (default: $OVLM_LAB_FIP), whose association is
-#         expected to change.
+#         the set-aside floating IP $OVLM_LAB_FIP (always) and any --allow-fip address, whose association and
+#         OVLM ownership tag (ovlm:managed) are expected to change.
 # Everything else that was added, removed or changed is a VIOLATION: exit 1, and the lab run is not valid.
 # --ignore-field NAME drops a noisy field (for example a server's power state while another team works in the
 #   project); every ignored field is printed, so a reviewer can see what was excused.
@@ -36,7 +36,10 @@ for f in "$before" "$after"; do
   [[ "$(jq -r .schema "$f")" == "ovlm.lab-snapshot/1" ]] || die "$f is not an ovlm.lab-snapshot/1 file"
 done
 [[ "$(jq -r .cloud "$before")" == "$(jq -r .cloud "$after")" ]] || die "snapshots come from different clouds"
-if [[ ${#allow[@]} -eq 0 && -n "${OVLM_LAB_FIP:-}" ]]; then allow=("$OVLM_LAB_FIP"); fi
+# The set-aside service floating IP is always part of the lab's own set (OVLM moves it and tags it ovlm:managed at
+# B2); extra --allow-fip addresses are added to it, never replace it (lab bug P: passing --allow-fip for other
+# addresses used to drop it and report OVLM's own ownership tag as a violation).
+if [[ -n "${OVLM_LAB_FIP:-}" ]]; then allow+=("$OVLM_LAB_FIP"); fi
 
 allow_json="$(printf '%s\n' "${allow[@]:-}" | jq -R . | jq -s 'map(select(length>0))')"
 ignore_json="$(printf '%s\n' "${ignore[@]:-}" | jq -R . | jq -s 'map(select(length>0))')"

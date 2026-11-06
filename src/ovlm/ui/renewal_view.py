@@ -148,6 +148,24 @@ NEEDS_HUMAN: Mapping[str, tuple[str, list[str]]] = {
             "Retry step re-checks; if it keeps failing, Rollback deletes the new VM.",
         ],
     ),
+    "lint_waiver_invalid": (
+        "A lint waiver of the profile version has no valid grant behind it (wrong or missing TOTP step-up, the "
+        "granter did not hold approver then, or the granter authored or requested this work), so OVLM did not "
+        "apply it and changed nothing. The row may have been written outside the API.",
+        [
+            "Read the step evidence: it lists each failing waiver and why. Treat it as a security event.",
+            "Have an approver revoke the waiver and, if it is still needed, grant it again through the API; then "
+            "start a new plan.",
+        ],
+    ),
+    "lint_waiver_too_broad": (
+        "A lint waiver of the profile version covered more than 20 findings in the automation, so OVLM stopped "
+        "before running it: the waiver's path glob is probably broader than intended.",
+        [
+            "Read the step evidence: it lists each waiver with the files and findings it matched.",
+            "Ask an approver to revoke the waiver and grant a narrower one, then start a new plan.",
+        ],
+    ),
     "compute_host_down": (
         "OpenStack refused the call because the VM's compute host is down.",
         [_ADMIN + " Fix the host or evacuate the VM.", _AFTER_FIX],
@@ -520,6 +538,7 @@ def hash_inputs(approval: Mapping[str, Any]) -> dict[str, Any]:
         "data_volume": res.get("data_volume"),
         "service": res.get("service") or {},
         "policy": policy,
+        "lint_waivers": hi.get("lint_waivers") or [],
     }  # fmt: skip
 
 

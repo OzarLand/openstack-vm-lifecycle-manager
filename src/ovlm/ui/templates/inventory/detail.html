@@ -20,8 +20,28 @@
         <dt>Role</dt><dd>{{ managed.role }}</dd>
         <dt>Profile</dt><dd>{% if desired and desired.profile_id %}<span class="mono">{{ desired.profile_id | short_id }}</span>{% if desired.profile_version %} v{{ desired.profile_version }}{% endif %}{% else %}<span class="muted">no profile assigned</span>{% endif %}</dd>
         <dt>Registered</dt><dd>{{ managed.registered_at | timestamp }}</dd>
-        <dt>SSH host key</dt><dd>{% if managed.ssh_host_key_fingerprint %}<code>{{ managed.ssh_host_key_fingerprint }}</code> {% endif %}{% if managed.host_key_confirmed_at %}confirmed {{ managed.host_key_confirmed_at | timestamp }}{% elif managed.ssh_host_key_fingerprint %}<span class="muted">scanned, not confirmed (compare with the VM's console, then confirm: POST /api/v1/managed-vms/{{ managed.id }}/host-key/confirm)</span>{% else %}<span class="muted">not scanned yet</span>{% endif %}</dd>
+        <dt>SSH host key</dt><dd>{% if managed.host_key_confirmed_at %}<code>{{ managed.ssh_host_key_fingerprint }}</code> confirmed {{ managed.host_key_confirmed_at | timestamp }}{% elif managed.ssh_host_key_fingerprint %}<span class="muted">scanned, not confirmed yet</span>{% else %}<span class="muted">not scanned yet</span>{% endif %}</dd>
       </dl>
+      {% if managed.ssh_host_key_fingerprint and not managed.host_key_confirmed_at and who.roles() and ("operator" in who.roles()) %}
+      <h3 id="host-key-h">Confirm the SSH host key</h3>
+      <p>Read the fingerprint <strong>on the VM itself</strong>: its console (cloud-init prints the host keys) or
+        <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> run there. Paste it below. OVLM compares it with
+        the key the worker scanned and refuses a mismatch. Do not confirm a key you did not read on the VM: something
+        else may answer at its address.</p>
+      <form method="post" action="/inventory/servers/{{ server.id }}/host-key/confirm" aria-labelledby="host-key-h">
+        <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+        <label>Fingerprint read on the VM
+          <input type="text" name="fingerprint" required autocomplete="off" spellcheck="false" placeholder="SHA256:..." maxlength="100">
+        </label>
+        <label>Where you read it
+          <select name="source" required>
+            <option value="">choose</option>
+            {% for key, label in host_key_sources.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+          </select>
+        </label>
+        <button type="submit">Confirm host key</button>
+      </form>
+      {% endif %}
       <p class="muted">Profile contents and drift against the observed state arrive with the profiles module.</p>
     {% else %}
       <p class="empty"><strong>Not managed.</strong> OVLM only observes this server; there is no desired state to compare.</p>

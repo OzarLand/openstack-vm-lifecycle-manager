@@ -1,0 +1,98 @@
+"""Lint waivers (SF-13): the api's copy of the rule names matches the lint, the data-safety rules are never waivable,
+and the plan hash changes only when a waiver exists."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Any
+
+from ovlm.automation import lint
+from ovlm.profiles.waivers import (
+    LITERAL_SEGMENT,
+    PATH_GLOB,
+    WAIVABLE_RULES,
+    glob_is_specific,
+    hash_binding,
+)
+from ovlm.renewal.plans import compute_plan_hash
+
+LINT_SRC = Path(lint.__file__).read_text()
+NEVER = {"formatting", "quiesce_state", "ssh_override", "hosts_pattern", "parse_error"}
+
+
+def test_waivable_rules_are_blocking_lint_rules_and_exclude_the_data_safety_ones() -> None:
+    documented = set(re.findall(r"^\* ``([a-z_]+)``", lint.__doc__ or "", re.M))
+    for rule in (*WAIVABLE_RULES, *NEVER):
+        assert rule in documented, rule
+        assert (
+            re.search(rf'"{rule}",?\s*\n?\s*"error"', LINT_SRC) or f'"{rule}", "error"' in LINT_SRC
+        ), rule
+    assert not NEVER & set(WAIVABLE_RULES)
+    assert "templated_task_name" not in WAIVABLE_RULES  # warnings never need one
+
+
+def test_path_glob_shape() -> None:
+    assert PATH_GLOB.match("roles/*/tasks/*.yml") and PATH_GLOB.match("*")
+    assert not PATH_GLOB.match("roles/x y") and not PATH_GLOB.match("")
+
+
+def test_plan_hash_binds_waivers_only_when_there_are_some() -> None:
+    base: dict[str, Any] = {"resolved": {"blue": {"server_id": "s"}}, "profile_version_id": "pv", "spec_hash": "h",
+            "automation_sha": "a" * 40, "policy": {"id": "p", "version": 1}}  # fmt: skip
+    plain = compute_plan_hash(**base)
+    assert compute_plan_hash(**base, lint_waivers=[]) == plain  # existing plans keep their hash
+    w = {
+        "id": "w1",
+        "rule": "check_mode_forced",
+        "path_glob": "*",
+        "granted_by": "u",
+        "reason": "r" * 10,
+    }
+    one = compute_plan_hash(**base, lint_waivers=hash_binding([w]))
+    assert one != plain
+    other = compute_plan_hash(**base, lint_waivers=hash_binding([{**w, "path_glob": "roles/*"}]))
+    assert other not in (plain, one)
+
+
+CATCH_ALL = (
+    "*",
+    "**",
+    "*/*",
+    "**/*",
+    "*/**",
+    "[a-z]*",
+    "*.yml",
+    "?",
+    "*/[a-z]*/*",
+    ".",
+    "./*",
+    "*.d/*",
+)
+SPECIFIC = (
+    "roles/probe/*",
+    "*/tasks/main.yml",
+    "playbooks/configure.yml",
+    "roles/*",
+    "roles/probe-1/tasks/*.yml",
+)
+
+
+def test_a_catch_all_glob_is_refused() -> None:
+    """Review SFR-2: ``fnmatch``'s ``*`` matches ``/``, so a glob without one literal path segment (no ``*``, ``?``
+    or bracket expression, at least one letter, digit, ``_`` or ``-``) waives the rule for the whole repository."""
+    for glob in CATCH_ALL:
+        assert not glob_is_specific(glob), glob
+    for glob in SPECIFIC:
+        assert glob_is_specific(glob), glob
+
+
+def test_the_database_check_uses_the_same_rule() -> None:
+    """The ``CHECK`` in ``profiles_0002`` mirrors :data:`LITERAL_SEGMENT` (PostgreSQL ARE), so a direct insert
+    cannot bypass the api's rule."""
+    migration = (
+        Path(__file__).parents[2] / "migrations" / "versions" / "profiles_0002.py"
+    ).read_text()
+    assert f"path_glob ~ '{LITERAL_SEGMENT.pattern}'" in migration
+    for glob in (*CATCH_ALL, *SPECIFIC):
+        assert bool(LITERAL_SEGMENT.search(glob)) == glob_is_specific(glob), glob
