@@ -13,18 +13,20 @@ from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy.orm import Session
 
 from ovlm.auth.errors import ProblemError
 from ovlm.auth.principal import Principal
+from ovlm.auth.sod import Gate
 from ovlm.automation.lint import lint_repo
 from ovlm.automation.types import AutomationError
 from ovlm.profiles import waivers
 from ovlm.renewal.base import StepRefusal
-from ovlm.renewal.plans import KIND, STRATEGY, STRATEGY_VERSION, load_facts
+from ovlm.renewal.evidence import check_gate
+from ovlm.renewal.plans import KIND, STRATEGY, STRATEGY_VERSION, load_facts, now_db
 from ovlm.renewal.production import RunnerGuestPort
 from ovlm.workflow.contract import ErrorClass
 from ovlm.workflow.requests import request_run
@@ -211,3 +213,107 @@ def test_sfr2_b6_stops_for_a_human_when_a_waiver_covers_more_than_20_findings(
     assert not w.q("SELECT 1 FROM audit_event WHERE action = 'automation.lint_waiver.applied'")
     small = _port(w, _repo(tmp_path / "small", PROBE * 20))
     assert small.prepare(run_id, {}, _Fence())["lint_waivers"][0]["findings_matched"] == 20
+
+
+def _forge(w: World, granter: str, stepup: str) -> str:
+    """A waiver row written past the api and its guard (the admin fixture; the guard covers ``ovlm_api`` only)."""
+    wid = str(uuid4())
+    w.x(
+        "INSERT INTO lint_waiver (id, profile_version_id, rule, path_glob, reason, granted_by, stepup_id) "
+        "VALUES (:i, :v, 'check_mode_forced', 'roles/probe/*', :why, :u, :s)",
+        i=wid, v=w.ids["profile_version"], why=REASON, u=w.users[granter], s=stepup,
+    )  # fmt: skip
+    return wid
+
+
+def _g1(w: World) -> Any:
+    with w.worker.connect() as c:
+        facts = load_facts(c, w.ids["plan"])
+        return check_gate(c, Gate.PLAN, facts, run_id=w.run_id or "", run_starter=None,
+                          now=now_db(c), check_expiry=True)  # fmt: skip
+
+
+def _approve_g1_on_the_live_hash(w: World) -> None:
+    with w.worker.connect() as c:
+        live = load_facts(c, w.ids["plan"]).recomputed_hash
+    w.approve("plan", decider="ap3", bound_hash=live)
+
+
+@pytest.mark.parametrize(
+    ("granter", "stepup", "problems"),
+    [
+        ("ap", "other_action", ["stepup_invalid"]),
+        ("ap", "other_user", ["stepup_invalid"]),
+        ("ap", "unconsumed", ["stepup_invalid"]),
+        ("op", "own", ["granter_not_approver", "granter_is_author", "granter_is_requester"]),
+        ("ap2", "own", ["granter_is_requester"]),
+    ],
+)
+def test_sfr1_the_worker_refuses_a_waiver_whose_provenance_does_not_hold(
+    world: World, tmp_path: Path, granter: str, stepup: str, problems: list[str]
+) -> None:
+    """Review SFR-1 (2): the worker re-checks every active waiver before B6 applies it and when it re-validates an
+    approval: the granter's consumed password+TOTP step-up for ``lint_waiver.grant`` on the version, the approver
+    role in the scope at ``granted_at``, and a granter who is neither the author nor a requester on the version.
+    ``op`` authored the version and created the plan; ``ap2`` starts the run here."""
+    w = world
+    pv = w.ids["profile_version"]
+    with w.api.begin() as c:
+        request_run(c, kind=KIND, strategy=STRATEGY, strategy_version=STRATEGY_VERSION,
+                    service_id=w.ids["service"], renewal_plan_id=w.ids["plan"], started_by=w.users["ap2"])  # fmt: skip
+    run_id = str(w.q("SELECT id FROM workflow_run ORDER BY created_at DESC LIMIT 1")[0]["id"])
+    sid = {
+        "other_action": lambda: w.stepup(granter, "approval.decide", pv),
+        "other_user": lambda: w.stepup("ap3", "lint_waiver.grant", pv),
+        "unconsumed": lambda: w.stepup(granter, "lint_waiver.grant", pv, consumed=False),
+        "own": lambda: w.stepup(granter, "lint_waiver.grant", pv),
+    }[stepup]()
+    wid = _forge(w, granter, sid)
+    port = _port(w, _repo(tmp_path))
+    with pytest.raises(StepRefusal) as exc:
+        port.prepare(run_id, {}, _Fence())
+    assert (
+        exc.value.error_class is ErrorClass.NEEDS_HUMAN
+        and exc.value.reason == "lint_waiver_invalid"
+    )
+    assert exc.value.detail["waivers"] == [{"id": wid, "problems": problems}]
+    assert not w.q("SELECT 1 FROM audit_event WHERE action = 'automation.lint_waiver.applied'")
+
+    _approve_g1_on_the_live_hash(w)  # an approver approved the plan with the waiver on it
+    res = _g1(w)
+    assert not res.ok and res.reason == "approval_evidence_invalid"
+    assert "8:lint_waivers" in res.evidence["failures"]
+    assert res.evidence["lint_waivers"] == [{"id": wid, "problems": problems}]
+
+
+def test_sfr1_a_waiver_granted_through_the_api_passes_the_worker_checks(
+    world: World, tmp_path: Path
+) -> None:
+    w = world
+    run_id = w.start()
+    granted = _grant(w, "ap")
+    assert port_prepare_ok(w, tmp_path, run_id)["lint_waivers"][0]["id"] == granted["id"]
+    _approve_g1_on_the_live_hash(w)
+    res = _g1(w)
+    assert res.ok, res.evidence
+    assert res.evidence["checks"]["8:lint_waivers"] is True
+
+
+def test_sfr1_a_granter_who_lost_the_approver_role_before_granting_is_refused(
+    world: World, tmp_path: Path
+) -> None:
+    """The role is checked as of ``granted_at`` (role-binding history), not today."""
+    w = world
+    run_id = w.start()
+    w.x(
+        "UPDATE role_binding SET revoked_at = now() - interval '1 hour' WHERE user_id = :u",
+        u=w.users["ap3"],
+    )
+    wid = _forge(w, "ap3", w.stepup("ap3", "lint_waiver.grant", w.ids["profile_version"]))
+    with pytest.raises(StepRefusal) as exc:
+        _port(w, _repo(tmp_path)).prepare(run_id, {}, _Fence())
+    assert exc.value.detail["waivers"] == [{"id": wid, "problems": ["granter_not_approver"]}]
+
+
+def port_prepare_ok(w: World, tmp_path: Path, run_id: str) -> Any:
+    return _port(w, _repo(tmp_path)).prepare(run_id, {}, _Fence())

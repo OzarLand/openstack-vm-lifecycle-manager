@@ -331,6 +331,89 @@ class ApprovalRecord:
     void_reason: str | None = None
 
 
+#: The step-up a lint waiver grant consumes (``ovlm.profiles.waivers`` grants; the worker and the database re-check).
+WAIVER_GRANT_STEPUP = "lint_waiver.grant"
+
+
+@dataclass(frozen=True)
+class WaiverRecord:
+    """An active ``lint_waiver`` row, as the worker re-checks its provenance (review SFR-1)."""
+
+    id: UUID
+    profile_version_id: UUID
+    granted_by: UUID
+    granted_at: datetime
+    stepup_id: UUID
+
+
+def waiver_provenance_problems(
+    db: Session,
+    waiver: WaiverRecord,
+    *,
+    scope: str,
+    author: UUID | None,
+    requesters: Collection[UUID],
+) -> list[str]:
+    """Why an active lint waiver cannot be trusted (empty: it can). Review SFR-1: the database guard covers the api
+    role only, so the worker re-derives, as of ``granted_at``, what the api checked at grant time:
+
+    * ``stepup_invalid``: no consumed password+TOTP step-up of the granter for ``lint_waiver.grant`` on the version;
+    * ``granter_not_active``: no such user, or disabled before ``granted_at``;
+    * ``granter_not_approver``: no ``approver`` binding covering ``scope`` at ``granted_at``;
+    * ``granter_is_author``: the granter authored the profile version;
+    * ``granter_is_requester``: the granter created, requested or started something on the version (``requesters``,
+      computed by the caller over every plan of the version).
+    """
+    at = waiver.granted_at
+    problems: list[str] = []
+    step = db.execute(
+        text(
+            "SELECT user_id, action, target_id, auth_method, consumed_at FROM stepup WHERE id = :i"
+        ),
+        {"i": waiver.stepup_id},
+    ).first()
+    if not (
+        step is not None
+        and step.user_id == waiver.granted_by
+        and step.action == WAIVER_GRANT_STEPUP
+        and step.target_id == str(waiver.profile_version_id)
+        and step.auth_method == INTERACTIVE_AUTH
+        and step.consumed_at is not None
+    ):
+        problems.append("stepup_invalid")
+    user = db.execute(
+        text("SELECT disabled_at FROM app_user WHERE id = :u"), {"u": waiver.granted_by}
+    ).first()
+    if user is None or (user.disabled_at is not None and user.disabled_at <= at):
+        problems.append("granter_not_active")
+    if not role_held_at(db, waiver.granted_by, "approver", scope, at):
+        problems.append("granter_not_approver")
+    if author is not None and waiver.granted_by == author:
+        problems.append("granter_is_author")
+    if waiver.granted_by in set(requesters):
+        problems.append("granter_is_requester")
+    return problems
+
+
+def check_waivers(
+    db: Session,
+    waivers: Collection[WaiverRecord],
+    *,
+    scope: str,
+    author: UUID | None,
+    requesters: Collection[UUID],
+) -> list[dict[str, Any]]:
+    """:func:`waiver_provenance_problems` of every waiver; returns only the waivers that fail, with their codes."""
+    out = []
+    for w in waivers:
+        problems = waiver_provenance_problems(
+            db, w, scope=scope, author=author, requesters=requesters
+        )
+        if problems:
+            out.append({"id": str(w.id), "problems": problems})
+    return out
+
+
 @dataclass(frozen=True)
 class RecomputedFacts:
     """What the worker derives from its own tables (planning, profiles, policies, workflow), never from the row."""
@@ -350,6 +433,10 @@ class RecomputedFacts:
     revert_after_approval: bool = False
     #: The worker's clock, for G3 expiry.
     now: datetime | None = None
+    #: Active lint waivers of the plan's profile version (bound by the plan hash), re-checked by check 8 (SFR-1).
+    lint_waivers: tuple[WaiverRecord, ...] = ()
+    #: Everyone who created, requested or started something on the version (a granter must be none of them).
+    waiver_requesters: frozenset[UUID] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -400,7 +487,8 @@ def _confirmation_equal(typed: str | None, expected: str) -> bool:
 def revalidate_approval_evidence(
     db: Session, approval: ApprovalRecord, facts: RecomputedFacts
 ) -> EvidenceResult:
-    """The seven checks of renewal-workflow.md 3.1, evaluated as of ``approval.decided_at``.
+    """The seven checks of renewal-workflow.md 3.1, evaluated as of ``approval.decided_at``, and check 8: the
+    provenance of every active lint waiver the plan hash binds (review SFR-1, :func:`check_waivers`).
 
     Any failed check means: ``needs_human(reason=approval_evidence_invalid)``, a security audit event, never
     proceed forward (the caller does that). Store ``result.evidence`` in the step evidence.
@@ -532,6 +620,15 @@ def revalidate_approval_evidence(
             "flagged self_approved but self-approval was not allowed then",
         )
 
+    # 8. lint waivers (review SFR-1): every active waiver the plan hash binds has a trustworthy provenance
+    bad_waivers = check_waivers(
+        db, facts.lint_waivers, scope=approval.scope,
+        author=facts.requester_set.profile_version_author, requesters=facts.waiver_requesters,
+    )  # fmt: skip
+    add(8, "lint_waivers", not bad_waivers,
+        "a lint waiver bound by the plan hash lacks a valid grant: "
+        + "; ".join(f"{b['id']}: {', '.join(b['problems'])}" for b in bad_waivers))  # fmt: skip
+
     result_checks = tuple(checks)
     evidence = {
         "approval_id": str(approval.id),
@@ -546,5 +643,6 @@ def revalidate_approval_evidence(
         "self_approved": approval.self_approved,
         "stepup_id": str(approval.stepup_id) if approval.stepup_id else None,
         "checks": {f"{c.number}:{c.name}": c.ok for c in result_checks},
+        "lint_waivers": bad_waivers,
     }
     return EvidenceResult(all(c.ok for c in result_checks), result_checks, evidence)

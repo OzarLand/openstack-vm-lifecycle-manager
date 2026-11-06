@@ -224,3 +224,85 @@ def test_sfr2_a_catch_all_glob_is_refused_by_the_api_and_the_database(env: Env) 
                 i=str(uuid4()), v=version, g=glob, why=REASON, u=str(ap.user_id),
                 s=_stepup_row(env, ap.user_id, "lint_waiver.grant", version),
             )  # fmt: skip
+
+
+def _insert(engine: Any, **row: Any) -> None:
+    with engine.begin() as c:
+        c.execute(
+            text("INSERT INTO lint_waiver (id, profile_version_id, rule, path_glob, reason, granted_by, stepup_id) "
+                 "VALUES (:i, :v, :r, :g, :why, :u, :s)"),
+            {"i": str(uuid4()), "r": "no_log_secret", "g": "roles/probe/*", "why": REASON, **row},
+        )  # fmt: skip
+
+
+def test_sfr1_the_api_role_cannot_forge_a_waiver_or_a_revocation(env: Env) -> None:
+    """Review SFR-1: ``ovlm_api`` held INSERT on every column, so a compromised api could write a waiver in anyone's
+    name with any step-up. The guard (``lint_waiver_api_guard``) now asks, for every member of ``ovlm_api``, the
+    granter's own consumed password+TOTP step-up for ``lint_waiver.grant`` on that version, and a granter other than
+    the author; the same for a revocation (``lint_waiver.revoke`` on the waiver id)."""
+    profile, version = _version(env)
+    author = str(
+        env.auth.sql("SELECT created_by FROM profile_version WHERE id = :v", v=version)[0][0]
+    )
+    ap, _ = _user(env, "approver5", [("approver", "global")])
+    other, _ = _user(env, "approver6", [("approver", "global")])
+    me = str(ap.user_id)
+    api = env.auth.role_engine("ovlm_api", API_PW)
+    try:
+        # the reviewer's probe: the author as granter, an unconsumed step-up bound to another action and target
+        unrelated = _stepup_row(env, author, "approval.decide", str(uuid4()), consumed=False)
+        with pytest.raises(DBAPIError, match="lint waiver"):
+            _insert(api, v=version, u=author, s=unrelated)
+        # each defect alone is refused
+        defects = {
+            "another user's step-up": (
+                me,
+                _stepup_row(env, other.user_id, "lint_waiver.grant", version),
+            ),
+            "another action": (me, _stepup_row(env, me, "lint_waiver.revoke", version)),
+            "another target": (me, _stepup_row(env, me, "lint_waiver.grant", str(uuid4()))),
+            "password alone": (
+                me,
+                _stepup_row(env, me, "lint_waiver.grant", version, method="password"),
+            ),
+            "not consumed": (
+                me,
+                _stepup_row(env, me, "lint_waiver.grant", version, consumed=False),
+            ),
+            "the author": (author, _stepup_row(env, author, "lint_waiver.grant", version)),
+        }
+        for name, (granter, sid) in defects.items():
+            with pytest.raises(DBAPIError, match="lint waiver"):
+                _insert(api, v=version, u=granter, s=sid)
+            assert not env.auth.sql("SELECT 1 FROM lint_waiver"), name
+        # what the api writes after consuming the right step-up passes
+        _insert(api, v=version, u=me, s=_stepup_row(env, me, "lint_waiver.grant", version))
+        [wid] = [str(r[0]) for r in env.auth.sql("SELECT id FROM lint_waiver")]
+
+        revoke = (
+            "UPDATE lint_waiver SET revoked_by = :u, revoked_at = now(), revoke_stepup_id = :s, "
+            "revoke_reason = 'no longer needed here' WHERE id = :i"
+        )
+        for granter, sid in (
+            (
+                author,
+                _stepup_row(env, author, "lint_waiver.grant", version),
+            ),  # the reviewer's probe
+            (
+                me,
+                _stepup_row(env, me, "lint_waiver.revoke", version),
+            ),  # bound to the version, not the waiver
+            (me, _stepup_row(env, me, "lint_waiver.revoke", wid, consumed=False)),
+            (me, _stepup_row(env, other.user_id, "lint_waiver.revoke", wid)),
+            (me, _stepup_row(env, me, "lint_waiver.revoke", wid, method="password")),
+        ):
+            with pytest.raises(DBAPIError, match="lint waiver"), api.begin() as c:
+                c.execute(text(revoke), {"u": granter, "s": sid, "i": wid})
+        with api.begin() as c:
+            c.execute(
+                text(revoke),
+                {"u": me, "s": _stepup_row(env, me, "lint_waiver.revoke", wid), "i": wid},
+            )
+    finally:
+        api.dispose()
+    assert env.auth.sql("SELECT revoked_by FROM lint_waiver")[0][0] == ap.user_id

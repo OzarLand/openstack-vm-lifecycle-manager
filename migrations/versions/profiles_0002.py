@@ -14,6 +14,13 @@ waiver granted or revoked after an approval voids it.
 * ``rule`` is limited to the rules a waiver may cover. The data-safety rules (``formatting``, ``quiesce_state``,
   ``ssh_override``, ``hosts_pattern``) and ``parse_error`` can never be waived, whoever writes the row.
 * ``stepup_id`` is unique: one step-up, one waiver.
+* **Api guard** (review SFR-1, ``lint_waiver_api_guard``, for every non-superuser member of ``ovlm_api``): an insert
+  needs the granter's own **consumed** password+TOTP step-up for ``lint_waiver.grant`` on that profile version, and
+  a granter other than the version's author; a revocation needs the revoker's own consumed password+TOTP step-up for
+  ``lint_waiver.revoke`` on the waiver id. The api consumes the step-up before the write, in the same transaction,
+  so the trigger sees it. A compromised api can no longer write a waiver in someone else's name, nor reuse an
+  unrelated step-up. What needs history (the approver role at ``granted_at``, the requester set) is re-checked by
+  the worker before B6 applies a waiver and at every approval re-validation.
 * ``path_glob`` keeps at least one literal path segment (review SFR-2): ``*``, ``**``, ``*/*``, ``**/*``, ``*/**`` or
   ``[a-z]*`` would waive the rule for the whole repository (``fnmatch``'s ``*`` matches ``/``). The api checks the same
   regex (``ovlm.profiles.waivers.LITERAL_SEGMENT``).
@@ -27,6 +34,15 @@ revision = "profiles_0002"
 down_revision = "connections_0003"
 branch_labels = ("lint_waiver",)
 depends_on = None
+
+
+#: Every non-superuser member of ``ovlm_api`` (as ``managed_vm_api_insert_guard`` since ``registry_0003``): a
+#: deployment giving the api another login role must not switch the guard off. Superusers are left out
+#: (``pg_has_role`` is always true for them, and they can disable any trigger anyway).
+_API_MEMBER = (
+    "(pg_has_role(current_user, 'ovlm_api', 'MEMBER') "
+    "AND NOT (SELECT r.rolsuper FROM pg_roles r WHERE r.rolname = current_user))"
+)
 
 
 def upgrade() -> None:
@@ -88,6 +104,46 @@ def upgrade() -> None:
         "CREATE TRIGGER lint_waiver_append_only BEFORE INSERT OR UPDATE OR DELETE ON lint_waiver "
         "FOR EACH ROW EXECUTE FUNCTION lint_waiver_append_only()"
     )
+    op.execute(
+        f"""
+        CREATE FUNCTION lint_waiver_api_guard() RETURNS trigger
+        LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
+        BEGIN
+          IF NOT {_API_MEMBER} THEN
+            RETURN NEW;
+          END IF;
+          IF TG_OP = 'INSERT' THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM public.stepup s
+                WHERE s.id = NEW.stepup_id AND s.user_id = NEW.granted_by AND s.action = 'lint_waiver.grant'
+                  AND s.target_id = NEW.profile_version_id::text AND s.auth_method = 'password+totp'
+                  AND s.consumed_at IS NOT NULL) THEN
+              RAISE EXCEPTION 'lint waiver %: the step-up is not the granter''s consumed password+TOTP step-up '
+                'for lint_waiver.grant on this profile version', NEW.id
+                USING ERRCODE = 'insufficient_privilege';
+            END IF;
+            IF EXISTS (SELECT 1 FROM public.profile_version pv
+                       WHERE pv.id = NEW.profile_version_id AND pv.created_by = NEW.granted_by) THEN
+              RAISE EXCEPTION 'lint waiver %: the author of a profile version cannot waive its lint findings', NEW.id
+                USING ERRCODE = 'insufficient_privilege';
+            END IF;
+          ELSIF NOT EXISTS (
+              SELECT 1 FROM public.stepup s
+              WHERE s.id = NEW.revoke_stepup_id AND s.user_id = NEW.revoked_by AND s.action = 'lint_waiver.revoke'
+                AND s.target_id = NEW.id::text AND s.auth_method = 'password+totp'
+                AND s.consumed_at IS NOT NULL) THEN
+            RAISE EXCEPTION 'lint waiver %: the step-up is not the revoker''s consumed password+TOTP step-up '
+              'for lint_waiver.revoke on this waiver', NEW.id
+              USING ERRCODE = 'insufficient_privilege';
+          END IF;
+          RETURN NEW;
+        END $$
+        """
+    )
+    op.execute(
+        "CREATE TRIGGER lint_waiver_api_guard BEFORE INSERT OR UPDATE ON lint_waiver "
+        "FOR EACH ROW EXECUTE FUNCTION lint_waiver_api_guard()"
+    )
     op.execute("GRANT SELECT, INSERT ON lint_waiver TO ovlm_api")
     op.execute(
         "GRANT UPDATE (revoked_by, revoked_at, revoke_stepup_id, revoke_reason) ON lint_waiver TO ovlm_api"
@@ -97,4 +153,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("DROP TABLE lint_waiver")
+    op.execute("DROP FUNCTION lint_waiver_api_guard()")
     op.execute("DROP FUNCTION lint_waiver_append_only()")

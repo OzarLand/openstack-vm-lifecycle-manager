@@ -24,8 +24,8 @@ from uuid import UUID
 from sqlalchemy import Connection, RowMapping, text
 
 from ovlm import audit  # noqa: E402
-from ovlm.auth.sod import RequesterSet
-from ovlm.profiles.waivers import active_waivers, hash_binding
+from ovlm.auth.sod import RequesterSet, WaiverRecord
+from ovlm.profiles.waivers import active_waivers, hash_binding, waiver_records
 from ovlm.registry.errors import DomainError
 from ovlm.renewal.config import RenewalConfig
 
@@ -120,6 +120,8 @@ class PlanFacts:
     policy_editor: UUID | None
     #: The active lint waivers of the plan's profile version, as bound into the hash (SF-13).
     lint_waivers: tuple[dict[str, str], ...] = ()
+    #: The same waivers as raw facts, for the worker's provenance checks (review SFR-1).
+    waiver_records: tuple[WaiverRecord, ...] = ()
 
     @property
     def scope(self) -> str:
@@ -184,6 +186,7 @@ def load_facts(conn: Connection, plan_id: str | UUID) -> PlanFacts:
         profile_author=pv["created_by"] if pv else None,
         policy_editor=pol["last_edited_by"] if pol else None,
         lint_waivers=tuple(waivers),
+        waiver_records=waiver_records(conn, plan["profile_version_id"]),
     )
 
 

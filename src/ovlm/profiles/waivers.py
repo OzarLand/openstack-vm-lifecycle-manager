@@ -38,7 +38,7 @@ from ovlm.auth.authz import Action, authorize, authorize_action, scope_covers
 from ovlm.auth.errors import ProblemError
 from ovlm.auth.events import record_independent
 from ovlm.auth.principal import Principal
-from ovlm.auth.sod import INTERACTIVE_AUTH
+from ovlm.auth.sod import INTERACTIVE_AUTH, WaiverRecord, check_waivers
 from ovlm.auth.stepup import consume_stepup
 from ovlm.profiles.errors import ProfileError
 
@@ -284,6 +284,44 @@ def active_waivers(
              "ORDER BY w.granted_at, w.id"), {"v": str(profile_version_id)},
     )  # fmt: skip
     return [waiver_dict(r) for r in rows]
+
+
+def waiver_records(
+    db: Session | Connection, profile_version_id: UUID | str
+) -> tuple[WaiverRecord, ...]:
+    """The active waivers of a version as raw facts, for the worker's provenance checks (review SFR-1)."""
+    rows = db.execute(
+        text("SELECT id, profile_version_id, granted_by, granted_at, stepup_id FROM lint_waiver "
+             "WHERE profile_version_id = :v AND revoked_at IS NULL ORDER BY granted_at, id"),
+        {"v": str(profile_version_id)},
+    )  # fmt: skip
+    return tuple(
+        WaiverRecord(id=r.id, profile_version_id=r.profile_version_id, granted_by=r.granted_by,
+                     granted_at=r.granted_at, stepup_id=r.stepup_id)
+        for r in rows
+    )  # fmt: skip
+
+
+def version_author(db: Session | Connection, profile_version_id: UUID | str) -> UUID | None:
+    author: UUID | None = db.execute(
+        text("SELECT created_by FROM profile_version WHERE id = :v"), {"v": str(profile_version_id)}
+    ).scalar()
+    return author
+
+
+def verify_active_waivers(
+    conn: Connection, profile_version_id: UUID | str, scope: str
+) -> list[dict[str, Any]]:
+    """The active waivers of a version whose provenance fails (empty: all hold). The worker calls it before B6
+    applies them (review SFR-1); :func:`ovlm.auth.sod.revalidate_approval_evidence` runs the same checks."""
+    records = waiver_records(conn, profile_version_id)
+    if not records:
+        return []
+    with Session(bind=conn) as session:
+        return check_waivers(
+            session, records, scope=scope, author=version_author(conn, profile_version_id),
+            requesters=plan_requesters(conn, UUID(str(profile_version_id))),
+        )  # fmt: skip
 
 
 def hash_binding(waivers: list[dict[str, Any]]) -> list[dict[str, str]]:

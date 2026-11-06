@@ -81,7 +81,7 @@ from ovlm.automation.types import AutomationError, Classification, Phase, Secret
 from ovlm.openstack.ownership import OwnershipRegistry
 from ovlm.openstack.sdk_write import WriteCredential
 from ovlm.openstack.write import GuardedWriteClient
-from ovlm.profiles.waivers import MAX_WAIVED_FINDINGS, active_waivers
+from ovlm.profiles.waivers import MAX_WAIVED_FINDINGS, active_waivers, verify_active_waivers
 from ovlm.renewal.base import StepRefusal
 from ovlm.renewal.ledger import plan_resolved
 from ovlm.renewal.ports import (
@@ -618,9 +618,17 @@ class RunnerGuestPort:
 
     def _waivers(self, resolved: Mapping[str, Any]) -> StaticWaivers:
         """The active lint waivers of the plan's profile version (SF-13), as the B6 lint applies them. The plan hash
-        binds the same set, so a waiver granted or revoked after the approval has already voided it."""
+        binds the same set, so a waiver granted or revoked after the approval has already voided it.
+
+        Review SFR-1: none is applied before its provenance is re-checked (the granter's consumed TOTP step-up for
+        this version, the approver role at ``granted_at``, neither author nor requester); a failure stops the run
+        for a human (``lint_waiver_invalid``) with the codes of each failing waiver."""
+        pv = resolved["profile_version"]["id"]
         with self.engine.connect() as c:
-            rows = active_waivers(c, resolved["profile_version"]["id"])
+            rows = active_waivers(c, pv)
+            bad = verify_active_waivers(c, pv, str(resolved["scope"])) if rows else []
+        if bad:
+            raise StepRefusal(ErrorClass.NEEDS_HUMAN, "lint_waiver_invalid", waivers=bad)
         return StaticWaivers(tuple(
             Waiver(id=w["id"], rule=w["rule"], path_glob=w["path_glob"],
                    approver=w["granted_by_name"] or w["granted_by"], reason=w["reason"])
