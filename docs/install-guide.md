@@ -70,6 +70,39 @@ make smoke     # assertions against the running stack; prints "smoke OK" at the 
 
 Back up `./secrets` with the same care as the database. Do not commit it or paste its content into an issue.
 
+### 3a. Back up the TOTP key together with the KEK
+
+Two files in `./secrets` cannot be regenerated without losing data:
+
+| File | What it protects | If it is lost |
+|---|---|---|
+| `worker_kek` | The worker's private key: every OpenStack application credential and guest SSH key in the database is wrapped to it | Every stored credential is unreadable: upload them all again |
+| `totp_key` | The Fernet key that encrypts every user's TOTP secret at rest | **Every admin and approver is locked out of TOTP**: no step-up, so no approval, no credential upload, no destructive confirmation. Each user must be reset and enrol again, and with no working admin that means the bootstrap CLI |
+
+Back them up **together**, at the same time as a database backup, to a place with the same protection as the
+database itself (an encrypted backup, an offline copy, a secret manager). A database backup restored without the
+`totp_key` and the `worker_kek` of the same date is of little use. Never put either file in a ticket, a chat or the
+repository.
+
+**File modes.** The key files are `0400` (read by the owner only):
+
+- `worker_kek` is `0400` and stays owned by your host user: the worker's launcher reads it once as root and copies it
+  into a tmpfs readable by uid `ovlm` only (security-model.md §5.1).
+- On a real installation, make `totp_key` `0400` **owned by the uid the api runs as** (`10001` in the image), so
+  that no other host user can read it:
+
+  ```bash
+  # ⚠️ State-changing: changes the owner and mode of the TOTP key file. Undo: chown back and chmod 0444.
+  sudo chown 10001:10001 secrets/totp_key && sudo chmod 0400 secrets/totp_key
+  ```
+
+  `make secrets` leaves the development key at `0444` so that the development stack works without `sudo`: Compose
+  mounts a file secret with its host owner and mode, and a `0400` file owned by your host user is unreadable by the
+  api's uid. Do not keep that mode outside a development machine.
+
+Restoring: put both files back at their paths with the same modes **before** `make up`, then restore the database.
+`ovlm kek status` (in the worker) shows whether every stored secret is wrapped to a key the worker holds.
+
 > [!NOTE]
 > `compose.yaml` is the **development and CI** file. It sets `OVLM_DEVELOPMENT_MODE: "true"` and publishes the api
 > on loopback. §5 shows how to switch the api to production-mode checks. Nothing in this guide makes the stack
@@ -106,7 +139,24 @@ It works only for an admin who **never finished enrolment** (no password set yet
 link of that user, prints a new single-use link, and is audited (`user.enrolment_link.reissue`). An admin who already
 enrolled and lost their credentials is reset by another admin instead.
 
-Every use of this command is audited with `principal_type=system`, `auth_method=cli`.
+Every use of this command is audited with `principal_type=system`, `auth_method=cli`. A `--reissue` also records the
+OS user who ran it (`SUDO_USER`, else `USER`) and the host name (in a container, the container id): **a shell in the
+api container is enough to bootstrap an admin who never enrolled**, so treat `docker compose exec api` access like
+OVLM admin access.
+
+### Shell access to the worker
+
+Enter the worker as its own user, never as root:
+
+```bash
+docker compose exec -u ovlm worker sh
+```
+
+The worker container starts as root only for its launcher, which copies the KEK and then drops to `ovlm`; no process
+runs as root after start-up (`make smoke` checks it). A plain `docker compose exec worker` would start a **root**
+shell holding the container's capabilities, including `CAP_DAC_READ_SEARCH`, which reads every file in the
+container, the original KEK included. Use `-u ovlm` for every command, for example
+`docker compose exec -u ovlm worker ovlm kek status`.
 
 ## 5. Put a TLS proxy in front (required)
 
