@@ -163,11 +163,22 @@ def test_the_api_role_cannot_delete_or_rewrite_a_waiver(env: Env) -> None:
         ):
             with pytest.raises(DBAPIError), api.begin() as c:
                 c.execute(text(stmt))
-        with pytest.raises(DBAPIError), api.begin() as c:  # never waivable, whoever writes the row
+        # never waivable, whoever writes the row (review SFR-5): a real, consumed step-up that passes the api guard
+        # and a specific glob, so only the rule CHECK can refuse it
+        valid = _stepup_row(env, ap.user_id, "lint_waiver.grant", version)
+        with pytest.raises(DBAPIError, match="lint_waiver_rule_check"), api.begin() as c:
             c.execute(
                 text("INSERT INTO lint_waiver (id, profile_version_id, rule, path_glob, reason, granted_by, stepup_id) "
-                     "SELECT :i, profile_version_id, 'formatting', '*', reason, granted_by, :s FROM lint_waiver"),
-                {"i": uuid4(), "s": uuid4()},
+                     "SELECT :i, profile_version_id, 'formatting', 'roles/probe/*', reason, granted_by, :s "
+                     "FROM lint_waiver"),
+                {"i": uuid4(), "s": valid},
+            )  # fmt: skip
+        with api.begin() as c:  # the same row with a waivable rule is accepted: the CHECK alone refused it
+            c.execute(
+                text("INSERT INTO lint_waiver (id, profile_version_id, rule, path_glob, reason, granted_by, stepup_id) "
+                     "SELECT :i, profile_version_id, 'no_log_secret', 'roles/probe/*', reason, granted_by, :s "
+                     "FROM lint_waiver"),
+                {"i": uuid4(), "s": valid},
             )  # fmt: skip
     finally:
         api.dispose()
@@ -175,6 +186,7 @@ def test_the_api_role_cannot_delete_or_rewrite_a_waiver(env: Env) -> None:
         env.auth.sql("SELECT path_glob FROM lint_waiver WHERE id = :i", i=wid)[0][0]
         == "roles/probe/*"
     )
+    assert not env.auth.sql("SELECT 1 FROM lint_waiver WHERE rule = 'formatting'")
 
 
 def _stepup_row(
