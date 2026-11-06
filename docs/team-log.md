@@ -1017,3 +1017,17 @@ The maintainer asked about disabling TOTP to simplify logins until the end of th
 turning it off would mean the MVP report cannot call the TOTP approval control lab validated. **Decision (popup):
 keep TOTP.** The maintainer stores the three lab accounts (admin, approver-a, approver-b) and their TOTP entries in a
 password manager that also generates TOTP codes. No code change.
+
+## Human steps postponed; direct lab access; work continues without the maintainer — 2026-11-06 09:00 UTC
+
+- Bug N fixed and merged ([#26](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/26)):
+  `Referrer-Policy: no-referrer` made browsers send `Origin: null`, so the CSRF check refused every browser form. The
+  security model already said `same-origin`. `ozar-dev` verified the fix on the lab (the form POST passes CSRF, and the
+  `Origin: null` control is still refused).
+- The maintainer postponed the approver reset, the rollback and G1–G3: SSH tunnels cost him too much time.
+  **Decision (popup):** the lab UI becomes reachable directly over HTTPS on a lab floating IP, with TCP 443 open to his
+  public IP /32 only and a self-signed lab certificate. This exposure is removed at teardown.
+- Meanwhile `ozar-dev` turns what already passed on Felcloud into stored evidence (inventory sync, readiness with the
+  negative control, policy and deadline, B1–B8 of run `01a1ac5d`) and runs the guard diff. A security follow-up round
+  (CS-6, SF-3/4/5/10/13, including the lint waiver API) started:
+  https://claude.ai/code/session_016ti9w4MiAVLkz5aVxth6t7
