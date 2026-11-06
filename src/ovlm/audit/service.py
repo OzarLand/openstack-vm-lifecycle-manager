@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -163,6 +163,25 @@ def _drop_on_rollback(session: Session) -> None:
     session.info.pop(_PENDING, None)
 
 
+_RUN_TRAIL = """(
+    run_id = :trail_run
+    OR step_id IN (SELECT id FROM workflow_step WHERE run_id = :trail_run)
+    OR (target_type IN ('renewal_run', 'workflow_run') AND target_id = :trail_run_text)
+    OR (target_type = 'workflow_step'
+        AND target_id IN (SELECT CAST(id AS text) FROM workflow_step WHERE run_id = :trail_run))
+    OR (target_type = 'approval'
+        AND target_id IN (SELECT CAST(id AS text) FROM approval WHERE run_id = :trail_run))
+)"""
+
+# Rows the worker writes carry a run id but no project scope; the run's plan says which project they belong to.
+_IN_SCOPES = """(
+    project_scope = ANY(CAST(:scopes AS text[]))
+    OR (project_scope IS NULL AND run_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM workflow_run r JOIN renewal_plan p ON p.id = r.renewal_plan_id
+        WHERE r.id = audit_event.run_id AND p.resolved ->> 'scope' = ANY(CAST(:scopes AS text[]))))
+)"""
+
+
 def list_events(
     session: Session,
     *,
@@ -175,8 +194,18 @@ def list_events(
     actions: Sequence[str] | None = None,
     before_id: int | None = None,
     limit: int = 100,
+    run_trail: UUID | None = None,
+    scopes: Collection[str] | None = None,
+    exclude_action_prefixes: Sequence[str] = (),
 ) -> list[AuditRow]:
-    """Newest first. Visibility rules (which roles see which actions) belong to the API layer."""
+    """Newest first. Which roles see which actions is decided by the caller (``ovlm.audit.view``), which passes:
+
+    * ``run_trail``: a run's whole trail: rows of the run, of its steps, and of the objects that are its steps'
+      targets or its approvals (see ``_RUN_TRAIL``).
+    * ``scopes``: ``None`` = every row; otherwise only rows whose ``project_scope`` is in ``scopes``, plus rows
+      without a scope that belong to a run whose plan is in one of ``scopes`` (the worker records those).
+    * ``exclude_action_prefixes``: actions starting with any of these are left out.
+    """
     clauses = ["TRUE"]
     params: dict[str, Any] = {"limit": max(1, min(limit, 1000))}
     for col, val in (
@@ -200,6 +229,19 @@ def list_events(
     if before_id is not None:
         clauses.append("id < :before_id")
         params["before_id"] = before_id
+    if run_trail is not None:
+        clauses.append(_RUN_TRAIL)
+        params["trail_run"] = run_trail
+        params["trail_run_text"] = str(run_trail)
+    if scopes is not None:
+        clauses.append(_IN_SCOPES)
+        params["scopes"] = list(scopes)
+    if exclude_action_prefixes:
+        clauses.append(
+            "NOT EXISTS (SELECT 1 FROM unnest(CAST(:xprefixes AS text[])) AS p(v) "
+            "WHERE starts_with(audit_event.action, p.v))"
+        )
+        params["xprefixes"] = list(exclude_action_prefixes)
     rows = session.execute(
         text(
             f"SELECT {_COLUMNS} FROM audit_event WHERE {' AND '.join(clauses)} "  # noqa: S608

@@ -96,7 +96,7 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | E6-1 | Layout, auth pages, TOTP enrolment | 5 | Sonnet | E3-1 | Integration tested (PR #4) | UI tests (HTTP-level) |
 | E6-2 | Inventory list + VM details (observed vs desired) | 5 | Sonnet | E2 | Integration tested (PR #4) | |
 | E6-3 | Readiness view; renewal plan; approvals with hash inputs and diff | 5 | Sonnet | E4, E5-5 | Integration tested (PR #8) | |
-| E6-4 | Run timeline with step evidence, available actions, audit view | 5 | Sonnet | E5 | Integration tested (PR #8) | |
+| E6-4 | Run timeline with step evidence, available actions, audit view | 5 | Sonnet | E5 | Run timeline: integration tested (PR #8). **Audit view: PR #8 shipped only a placeholder page and no `GET /api/v1/audit` (404 in the Felcloud lab).** Both now exist on `claude/ovlm-audit-api`: integration tested locally, not yet merged | Audit view: scoping, admin-only actions, `run=` trail, pagination, token scope, HTTP-level page test |
 
 ### Security follow-ups (before production, not blocking the MVP lab)
 
