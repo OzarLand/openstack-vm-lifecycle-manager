@@ -664,9 +664,8 @@ def action(
         kind == "mark_resolved" and authorize(who, "approver", scope)
     )
     if not role_ok:
-        raise DomainError(
-            403, "forbidden", "Forbidden", "The operator role in this project is required."
-        )
+        raise DomainError(403, "forbidden", "Forbidden", who.needs_role_message("operator"),
+                          "Sign out and sign in as an account that holds it.")  # fmt: skip
     if not who.is_human and "operate" not in who.token_scopes:
         raise DomainError(
             403, "token-scope", "Forbidden", "The API token's scope does not allow this action."

@@ -79,9 +79,10 @@ templates.env.filters["short_id"] = short_id
 
 
 def describe_roles(who: Principal) -> list[tuple[str, str]]:
-    """``[(role, scope)]`` for the header: the effective grants, global scope shown as 'all projects'."""
+    """``[(role, scope)]`` for the header: the effective grants, e.g. ``("approver", "global")`` or
+    ``("operator", "project 1a2b3c4d")``."""
     return [
-        (r, "all projects" if s == "global" else s.removeprefix("project:"))
+        (r, "global" if s == "global" else f"project {s.removeprefix('project:')[:8]}")
         for r, s in sorted(who.grants)
     ]
 
