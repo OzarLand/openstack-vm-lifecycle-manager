@@ -67,7 +67,7 @@ def glob_is_specific(path_glob: str) -> bool:
 audit.register_entity(
     "lint_waiver",
     ["profile_id", "profile_version_id", "profile_version", "rule", "path_glob", "reason", "stepup_id",
-     "operator_and_approver", "revoke_reason", "revoked_at"],
+     "operator_and_approver", "revoke_reason", "revoked_at", "refusal"],
 )  # fmt: skip
 
 _COLS = (
@@ -134,10 +134,13 @@ def _refuse(
     record_independent(
         db, action="lint_waiver.grant.refused", target_type="lint_waiver", target_id=target, result="denied",
         actor_id=who.user_id, principal_type=who.principal_type, auth_method=who.auth_method,
-        source_ip=who.source_ip, project_scope=scope, after={"profile_version_id": target},
+        source_ip=who.source_ip, project_scope=scope, after={"profile_version_id": target, "refusal": code},
     )  # fmt: skip
     if code == "human-session-required":
         return ProblemError(403, code, "Forbidden", detail)
+    if code == "totp-required":
+        return ProblemError(403, code, "TOTP step-up required", detail,
+                            next_action="Enrol TOTP, then step up again with your password and a TOTP code.")  # fmt: skip
     return ProblemError(403, code, "Separation of duties", detail,
                         next_action="Ask another person holding the approver role in this scope.")  # fmt: skip
 
@@ -167,16 +170,28 @@ def _check_input(rule: str, path_glob: str, reason: str) -> None:
         raise ProfileError(422, "invalid-lint-waiver", "Invalid lint waiver", "; ".join(errors))
 
 
+_TOTP_DETAIL = "A lint waiver needs a step-up confirmed with a TOTP code, not a password alone."
+
+
 def _stepup_with_totp(
-    db: Session, who: Principal, stepup_id: UUID, *, action: str, target: str
+    db: Session,
+    who: Principal,
+    stepup_id: UUID,
+    *,
+    action: str,
+    target: str,
+    scope: str | None = None,
 ) -> None:
+    """Consume the step-up; refuse one reached with a password alone. With ``scope`` (grant), the refusal is audited
+    as ``lint_waiver.grant.refused`` (review SFR-6); the transaction then rolls back, so the step-up is not burnt."""
     consume_stepup(db, who, stepup_id, action=action, target_id=target)
     method = db.execute(
         text("SELECT auth_method FROM stepup WHERE id = :i"), {"i": stepup_id}
     ).scalar()
     if method != INTERACTIVE_AUTH:
-        raise ProblemError(403, "totp-required", "TOTP step-up required",
-                           "A lint waiver needs a step-up confirmed with a TOTP code, not a password alone.",
+        if scope is not None:
+            raise _refuse(db, who, target, "totp-required", _TOTP_DETAIL, scope)
+        raise ProblemError(403, "totp-required", "TOTP step-up required", _TOTP_DETAIL,
                            next_action="Enrol TOTP, then step up again with your password and a TOTP code.")  # fmt: skip
 
 
@@ -189,12 +204,18 @@ def grant(
     if pv is None or not authorize(who, "viewer", scope_of(pv)):
         raise _not_found()
     scope = scope_of(pv)
+    target = str(pv.id)
+    if (
+        not who.is_human
+    ):  # an API token, whatever its roles (review SFR-6: audited like the other refusals)
+        raise _refuse(db, who, target, "human-session-required",
+                      "A lint waiver needs an interactive human session with password and TOTP, never an API "
+                      "token.", scope)  # fmt: skip
     if not authorize_action(who, Action.LINT_WAIVER_GRANT, scope):
         raise ProblemError(
             403, "forbidden", "Forbidden", "The approver role in this scope is required."
         )
     _check_input(rule, path_glob, reason)
-    target = str(pv.id)
     if not (who.is_human and who.auth_method == INTERACTIVE_AUTH):
         raise _refuse(db, who, target, "human-session-required",
                       "A lint waiver needs an interactive human session with password and TOTP.", scope)  # fmt: skip
@@ -208,7 +229,7 @@ def grant(
     if both and not installation.allow_operator_approver(db):
         raise _refuse(db, who, target, "sod-violation",
                       "You hold operator and approver in this scope (operator_and_approver).", scope)  # fmt: skip
-    _stepup_with_totp(db, who, stepup_id, action=GRANT_STEPUP_ACTION, target=target)
+    _stepup_with_totp(db, who, stepup_id, action=GRANT_STEPUP_ACTION, target=target, scope=scope)
     wid = uuid4()
     db.execute(
         text("INSERT INTO lint_waiver (id, profile_version_id, rule, path_glob, reason, granted_by, stepup_id) "

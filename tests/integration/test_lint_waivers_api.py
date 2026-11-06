@@ -120,6 +120,21 @@ def test_rbac_operators_viewers_and_tokens_cannot_waive(env: Env) -> None:
         json={"rule": "check_mode_forced", "path_glob": "*", "reason": REASON, "stepup_id": sid},
     )  # fmt: skip
     assert as_token.status_code == 403
+    # review SFR-6: a step-up reached with a password alone is refused and audited (the step-up is not burnt)
+    ap, secret = _user(env, "approver-pw", [("approver", "global")])
+    pw_only = _stepup(env, ap, secret, "lint_waiver.grant", version)
+    env.auth.sql("UPDATE stepup SET auth_method = 'password' WHERE id = :i", i=pw_only)
+    refused = _grant(ap, profile, pw_only)
+    assert refused.status_code == 403 and refused.json()["code"] == "totp-required"
+    assert env.auth.sql("SELECT consumed_at FROM stepup WHERE id = :i", i=pw_only)[0][0] is None
+    rows = env.auth.sql(
+        "SELECT actor_id, principal_type, after FROM audit_event WHERE action = 'lint_waiver.grant.refused' "
+        "AND result = 'denied' ORDER BY id"
+    )
+    assert [(r.principal_type, r.after["refusal"]) for r in rows] == [
+        ("token", "human-session-required"), ("human", "totp-required"),
+    ]  # fmt: skip
+    assert str(rows[0].actor_id) == str(op.user_id) and str(rows[1].actor_id) == str(ap.user_id)
     # an approver of another project neither sees nor waives this version
     other, secret = _user(env, "approver-other", [("approver", f"project:{uuid4()}")])
     elsewhere = _grant(other, profile, _stepup(env, other, secret, "lint_waiver.grant", version))
@@ -173,7 +188,9 @@ def test_the_api_role_cannot_delete_or_rewrite_a_waiver(env: Env) -> None:
                      "FROM lint_waiver"),
                 {"i": uuid4(), "s": valid},
             )  # fmt: skip
-        with api.begin() as c:  # the same row with a waivable rule is accepted: the CHECK alone refused it
+        with (
+            api.begin() as c
+        ):  # the same row with a waivable rule is accepted: the CHECK alone refused it
             c.execute(
                 text("INSERT INTO lint_waiver (id, profile_version_id, rule, path_glob, reason, granted_by, stepup_id) "
                      "SELECT :i, profile_version_id, 'no_log_secret', 'roles/probe/*', reason, granted_by, :s "
