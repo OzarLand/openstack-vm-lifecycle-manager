@@ -103,7 +103,11 @@ def create_app(
             response.headers["X-Request-ID"] = request_id
             response.headers["Content-Security-Policy"] = _CSP
             response.headers["X-Content-Type-Options"] = "nosniff"
-            response.headers["Referrer-Policy"] = "no-referrer"
+            # same-origin, not no-referrer: with no-referrer browsers send "Origin: null" and no Referer on form
+            # POSTs, so the CSRF Origin check refused every login and enrolment form (lab bug N). same-origin keeps
+            # the Origin/Referer for OVLM's own requests and sends nothing to other sites (enrolment links carry a
+            # secret in their path).
+            response.headers["Referrer-Policy"] = "same-origin"
             HTTP_REQUESTS.labels(request.method, str(response.status_code)).inc()
             log.info(
                 "request",

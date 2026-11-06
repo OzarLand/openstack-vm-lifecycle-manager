@@ -49,6 +49,8 @@ def test_request_id_propagation_and_security_headers() -> None:
     assert r.headers["x-request-id"] == "abc-12345678"
     assert "script-src 'self'" in r.headers["content-security-policy"]
     assert r.headers["x-content-type-options"] == "nosniff"
+    # lab bug N: "no-referrer" made browsers send "Origin: null" on form POSTs, which the CSRF check refuses.
+    assert r.headers["referrer-policy"] == "same-origin"
     generated = c.get("/healthz", headers={"X-Request-ID": "bad id\n"}).headers["x-request-id"]
     assert len(generated) == 32
 
