@@ -13,6 +13,9 @@ A statement-level trigger on ``cloud`` now compares the old and new rows (transi
 whoever wrote the row. The worker then re-validates at once, finds the binding changed and marks them invalid without
 decrypting anything. ``SECURITY DEFINER`` (owner) with a fixed ``search_path``, so a role without ``UPDATE`` on
 ``credential_ref`` still raises the signal; the function only ever touches that one column (and ``updated_at``).
+The ``search_path`` ends with ``pg_temp`` (review SFR-4, the ``registry_0002`` convention): otherwise PostgreSQL
+searches the session's temporary schema first, and a temporary table named ``credential_ref`` or
+``project_connection`` would capture the ``UPDATE``.
 
 Linear after ``registry_0003`` so the schema keeps a single head (``check_schema_at_head``).
 """
@@ -29,7 +32,7 @@ def upgrade() -> None:
     op.execute(
         """
         CREATE FUNCTION cloud_endpoint_change_signal() RETURNS trigger
-        LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
         BEGIN
           UPDATE credential_ref r SET validation_requested_at = now(), updated_at = now()
           WHERE r.state IN ('pending', 'active')
