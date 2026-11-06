@@ -26,8 +26,9 @@ from ovlm.connections.credentials import CredentialStore, CredentialUnavailableE
 from ovlm.connections.validation import CredentialValidator, TokenFacts, rewrap_all
 from ovlm.openstack.sdk_write import WriteCredential
 from ovlm.renewal.production import SdkCloudPort, StoreCredentialSource
+from ovlm.secrets.cli import kek_status_code
 from ovlm.secrets.keyring import Keyring, generate_private_pem, public_pem_of
-from ovlm.secrets.store import announce_keys, kek_usage
+from ovlm.secrets.store import announce_keys, kek_usage, legacy_count
 from tests.integration.auth_support import PASSWORD, Env, env, log_lines  # noqa: F401
 from tests.integration.conftest import API_PW, WORKER_PW
 
@@ -447,6 +448,34 @@ def test_kek_rotation_rewraps_every_secret(st: Store) -> None:
     st.store.keyring = Keyring(new_key)  # old key removed after the verified pass
     assert _write(st, pc).application_credential_secret == CANARY
     assert st.env.sql("SELECT 1 FROM audit_event WHERE action = 'kek.rewrap'")
+
+
+def test_sf4_rejected_legacy_credentials_do_not_block_kek_retirement(st: Store) -> None:
+    """Review N-3 (SF-4): a rejected ``ovlm-env-v1`` credential keeps its sealed row as metadata. The worker never
+    decrypts that format, so a KEK rotation must neither try to re-wrap it nor count it as "in use": otherwise
+    ``ovlm kek status`` stays at 3 and the old key can never be retired."""
+    pc = st.connection()
+    _ready(st, pc)
+    # what connections_0002 leaves behind for a credential sealed before the binding: rejected, format v1
+    st.env.sql(
+        "UPDATE sealed_secret SET alg = 'ovlm-env-v1' FROM credential_ref r "
+        "WHERE r.secret_id = sealed_secret.id AND r.kind = 'ssh_key'"
+    )
+    st.env.sql("UPDATE credential_ref SET state = 'rejected' WHERE kind = 'ssh_key'")
+    old_id = st.keyring.current_kek_id
+    new_key = X25519PrivateKey.generate()
+    st.store.keyring = Keyring(new_key, [st.key])  # type: ignore[list-item]
+    assert rewrap_all(st.store) == {"rewrapped": 1, "unknown_key": 0}
+    with st.worker_engine.connect() as c:
+        usage = kek_usage(c)
+        assert legacy_count(c) == 1
+    current = st.store.keyring.current_kek_id
+    assert usage == {current: 1} and old_id not in usage
+    assert kek_status_code(usage, current, frozenset({current})) == 0  # the old key may go
+    # the rejected row is still there (an admin deletes it), and still refused
+    assert (
+        st.env.sql("SELECT state FROM credential_ref WHERE kind = 'ssh_key'")[0].state == "rejected"
+    )
 
 
 def test_delete_credential_needs_stepup_and_removes_the_ciphertext(st: Store) -> None:

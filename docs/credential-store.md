@@ -123,7 +123,10 @@ Monitoring (worker metrics port): `ovlm_credentials_expiring{within="30d"|"7d"|"
    `0` only when every secret in use is wrapped to the current key; `3` while some are still wrapped to a previous
    key (re-wrap not finished: keep it); `2` while some are wrapped to a key the worker does not hold. Orphan sealed
    secrets (left by a database actor) are deleted by the validation job after 10 minutes, audited as
-   `kek.orphans_deleted`.
+   `kek.orphans_deleted`. Secrets in the retired format `ovlm-env-v1` (credentials rejected by migration
+   `connections_0002`) are never decrypted, so they are not counted per key and not re-wrapped: they do not keep the
+   old key "in use" (review N-3). `kek status` prints their count; delete those credentials when convenient.
+   Run it as the worker user: `docker compose exec -u ovlm worker ovlm kek status`.
 5. Remove the old private key from the worker configuration and destroy it (and its offline backup) after the
    verified pass.
 
