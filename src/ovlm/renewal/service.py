@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from ovlm import audit
 from ovlm.auth.authz import authorize
+from ovlm.auth.errors import ProblemError
 from ovlm.auth.principal import Principal
 from ovlm.auth.sod import Gate, account_provenance, check_approval_eligibility
 from ovlm.auth.stepup import consume_stepup
@@ -210,7 +211,17 @@ def request_approval(
         starter = s.execute(
             text("SELECT started_by FROM workflow_run WHERE id = :r"), {"r": run_id}
         ).scalar()
-    rs = facts.requester_set(run_starter=starter, approval_requester=who.user_id)
+    rs = facts.requester_set(run_starter=starter, approval_requester=who.user_id, gate=gate)
+    conflicts = rs.waiver_granter_conflicts()
+    if conflicts:  # review SFR-3: whoever waived the lint does not also ask for the work it eases
+        _audit(s, who, "approval.request.refused", "renewal_plan", plan_id, scope, subject_type=gate.value,
+               reason="sod-waiver-granter: " + ", ".join(conflicts))  # fmt: skip
+        s.commit()
+        raise ProblemError(403, "sod-violation", "Separation of duties",
+                           f"A lint waiver on this plan's profile version was granted by its {', '.join(conflicts)}: "
+                           "whoever waives the lint must not also ask for the work it eases.",
+                           next_action="Ask someone who granted no waiver on this version to create the plan and "
+                           "request the approval, or revoke the waiver.")  # fmt: skip
     aid = new_id()
     subject = plan_id if gate is Gate.PLAN else run_id
     try:
@@ -302,7 +313,7 @@ def decide(
                 prior.add(d)
     elig = check_approval_eligibility(
         s, who, gate=gate, scope=row["scope"],
-        requester_set=facts.requester_set(run_starter=starter, approval_requester=row["requested_by"]),
+        requester_set=facts.requester_set(run_starter=starter, approval_requester=row["requested_by"], gate=gate),
         prior_gate_deciders=prior,
         require_distinct_approvers=bool((facts.policy or {}).get("require_distinct_approvers")),
     )  # fmt: skip

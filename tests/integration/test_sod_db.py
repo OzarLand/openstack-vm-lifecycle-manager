@@ -368,7 +368,8 @@ def test_profile_author_approving_is_refused(world: World) -> None:
 @pytest.mark.parametrize("role", ["profile_version_author", "plan_creator", "run_starter", "policy_editor",
                                   "approval_requester"])  # fmt: skip
 def test_every_requester_set_member_is_refused(world: World, role: str) -> None:
-    facts = world.facts(requester_set=RequesterSet(**{role: world.alice}))
+    who: dict[str, Any] = {role: world.alice}
+    facts = world.facts(requester_set=RequesterSet(**who))
     assert world.check(world.approval(world.alice), facts) == {2}
 
 

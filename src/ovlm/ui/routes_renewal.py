@@ -328,7 +328,7 @@ def _eligibility(
     return check_approval_eligibility(
         db, who, gate=Gate(gate), scope=scope,
         requester_set=facts.requester_set(
-            run_starter=starter, approval_requester=UUID(approval["requested_by"])
+            run_starter=starter, approval_requester=UUID(approval["requested_by"]), gate=Gate(gate)
         ),
         prior_gate_deciders=prior,
         require_distinct_approvers=bool((facts.policy or {}).get("require_distinct_approvers")),

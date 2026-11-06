@@ -24,13 +24,14 @@ from ovlm.auth.sod import Gate
 from ovlm.automation.lint import lint_repo
 from ovlm.automation.types import AutomationError
 from ovlm.profiles import waivers
+from ovlm.renewal import service as svc
 from ovlm.renewal.base import StepRefusal
 from ovlm.renewal.evidence import check_gate
 from ovlm.renewal.plans import KIND, STRATEGY, STRATEGY_VERSION, load_facts, now_db
 from ovlm.renewal.production import RunnerGuestPort
 from ovlm.workflow.contract import ErrorClass
 from ovlm.workflow.requests import request_run
-from tests.integration.renewal.conftest import World
+from tests.integration.renewal.conftest import CFG, World
 
 REASON = "a read-only probe outside the lint allowlist, reviewed by hand"
 PROBE = "- ansible.builtin.command: id\n  check_mode: false\n"
@@ -317,3 +318,95 @@ def test_sfr1_a_granter_who_lost_the_approver_role_before_granting_is_refused(
 
 def port_prepare_ok(w: World, tmp_path: Path, run_id: str) -> Any:
     return _port(w, _repo(tmp_path)).prepare(run_id, {}, _Fence())
+
+
+# --- SFR-3: a waiver granter is a requester of G1 and G2 ------------------------------------------------------------
+
+
+def _replan(w: World, *, created_by: str = "op") -> str:
+    """The plan as if created after the waiver (its stored hash binds the waiver), by ``created_by``."""
+    with w.worker.connect() as c:
+        live = load_facts(c, w.ids["plan"]).recomputed_hash
+    w.x("UPDATE renewal_plan SET plan_hash = :h, created_by = :u WHERE id = :p",
+        h=live, u=w.users[created_by], p=w.ids["plan"])  # fmt: skip
+    return str(live)
+
+
+def _request(w: World, user: str) -> Any:
+    with Session(w.api) as s:
+        out = svc.request_approval(s, _who(w, user, roles=("operator", "approver")), gate=Gate.PLAN,
+                                   plan_id=w.ids["plan"], run_id=None, scope=w.ids["scope"])  # fmt: skip
+        s.commit()
+    return out
+
+
+def _decide(w: World, user: str, aid: str) -> Any:
+    sid = w.stepup(user, "approval.decide", aid, consumed=False)
+    with Session(w.api) as s:
+        out = svc.decide(s, _who(w, user), CFG, UUID(aid), decision="approved", typed=None, comment=None,
+                         stepup_id=UUID(sid))  # fmt: skip
+        s.commit()
+    return out
+
+
+def test_sfr3_a_waiver_granter_cannot_request_or_create_the_plan_it_eases(world: World) -> None:
+    """Review SFR-3: ``grant`` refused a granter who already requested a plan on the version, not the reverse order
+    (grant first, then create the plan or request its approval). security-model.md 3.2: never, whatever
+    ``allow_operator_approver`` says."""
+    w = world
+    _grant(w, "ap2")
+    _replan(w)
+    with pytest.raises(
+        ProblemError
+    ) as exc:  # the granter asks for the approval of a plan its waiver eases
+        _request(w, "ap2")
+    assert exc.value.status_code == 403 and exc.value.code == "sod-violation"
+    assert "lint waiver" in str(exc.value.detail)
+    _replan(w, created_by="ap2")  # the granter created the plan; another operator asks
+    with pytest.raises(ProblemError) as exc:
+        _request(w, "op")
+    assert exc.value.code == "sod-violation"
+    assert len(w.q("SELECT 1 FROM audit_event WHERE action = 'approval.request.refused'")) == 2
+    assert not w.q("SELECT 1 FROM approval WHERE decision IS NULL")
+    _replan(w)
+    assert _request(w, "op")["requested_by"] == w.users["op"]  # nobody plays both parts
+
+
+def test_sfr3_decide_refuses_a_gate_whose_requester_granted_a_waiver_and_the_granter_as_decider(
+    world: World,
+) -> None:
+    w = world
+    _grant(w, "ap2")
+    live = _replan(w)
+    aid = str(uuid4())  # a request recorded before this check existed: the granter asked for it
+    w.x("INSERT INTO approval (id, subject_type, subject_id, plan_id, scope, bound_hash, requester_set, requested_by) "
+        "VALUES (:i, 'plan', :p, :p, :s, :h, CAST(:rs AS uuid[]), :u)",
+        i=aid, p=w.ids["plan"], s=w.ids["scope"], h=live, rs="{" + w.users["ap2"] + "}", u=w.users["ap2"])  # fmt: skip
+    with pytest.raises(ProblemError) as exc:
+        _decide(w, "ap3", aid)
+    assert exc.value.code == "sod-violation" and "lint waiver" in str(exc.value.detail)
+    assert w.q("SELECT 1 FROM audit_event WHERE action = 'approval.decide.refused'")
+    w.x("DELETE FROM approval WHERE id = :i", i=aid)
+    ok = _request(w, "op")
+    with pytest.raises(
+        ProblemError
+    ) as exc:  # the granter is a requester: it does not approve the plan either
+        _decide(w, "ap2", ok["id"])
+    assert exc.value.code == "sod-violation" and "lint_waiver_granter" in str(exc.value.detail)
+    assert _decide(w, "ap3", ok["id"])["decision"] == "approved"
+
+
+def test_sfr3_revalidation_refuses_a_waiver_granter_in_the_requester_set(world: World) -> None:
+    w = world
+    _grant(w, "ap2")
+    live = _replan(w)
+    w.approve("plan", decider="ap3", bound_hash=live)
+    assert _g1(w).ok
+    w.x("UPDATE approval SET requested_by = :u", u=w.users["ap2"])  # the granter asked for it
+    res = _g1(w)
+    assert not res.ok and "2:waiver_granter" in res.evidence["failures"]
+    w.x("DELETE FROM approval")
+    w.approve("plan", decider="ap2", bound_hash=live)  # the granter decided it
+    res = _g1(w)
+    assert not res.ok and "2:requester_set" in res.evidence["failures"]
+    assert res.evidence["requester_set"]["lint_waiver_granters"] == [w.users["ap2"]]

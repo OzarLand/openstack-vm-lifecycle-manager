@@ -68,6 +68,11 @@ class RequesterSet:
 
     ``None`` means "no such person" (e.g. no run yet at G1). The policy editor is the last editor of the policy
     version in effect.
+
+    ``lint_waiver_granters`` (G1 and G2 only, review SFR-3): the granters of the active lint waivers the plan hash
+    binds. They shaped what the gate approves, so they are requesters: the usual rule applies to them as deciders,
+    and none of them may also be the author, the plan creator, the run starter or the approval requester, whatever
+    ``allow_operator_approver`` says (:meth:`waiver_granter_conflicts`).
     """
 
     profile_version_author: UUID | None = None
@@ -75,13 +80,33 @@ class RequesterSet:
     run_starter: UUID | None = None
     policy_editor: UUID | None = None
     approval_requester: UUID | None = None
+    lint_waiver_granters: frozenset[UUID] = frozenset()
 
     def members(self) -> frozenset[UUID]:
-        return frozenset(u for u in self._pairs().values() if u is not None)
+        return (
+            frozenset(u for u in self._pairs().values() if u is not None)
+            | self.lint_waiver_granters
+        )
 
     def roles_of(self, user_id: UUID) -> tuple[str, ...]:
         """Which requester roles ``user_id`` plays (for error messages and the approval's evidence)."""
-        return tuple(name for name, u in self._pairs().items() if u == user_id)
+        roles = tuple(name for name, u in self._pairs().items() if u == user_id)
+        return (*roles, "lint_waiver_granter") if user_id in self.lint_waiver_granters else roles
+
+    def waiver_granter_conflicts(self) -> tuple[str, ...]:
+        """The requester roles played by a waiver granter (review SFR-3): a waiver lowers the bar on the automation
+        the gate approves, so whoever granted it must not also have asked for that work."""
+        asking = ("profile_version_author", "plan_creator", "run_starter", "approval_requester")
+        pairs = self._pairs()
+        return tuple(
+            sorted(
+                {
+                    r
+                    for r in asking
+                    if pairs[r] is not None and pairs[r] in self.lint_waiver_granters
+                }
+            )
+        )
 
     def _pairs(self) -> dict[str, UUID | None]:
         return {
@@ -92,8 +117,10 @@ class RequesterSet:
             "approval_requester": self.approval_requester,
         }
 
-    def as_evidence(self) -> dict[str, str | None]:
-        return {k: str(v) if v else None for k, v in self._pairs().items()}
+    def as_evidence(self) -> dict[str, Any]:
+        out: dict[str, Any] = {k: str(v) if v else None for k, v in self._pairs().items()}
+        out["lint_waiver_granters"] = sorted(str(u) for u in self.lint_waiver_granters)
+        return out
 
 
 @dataclass(frozen=True)
@@ -190,6 +217,15 @@ def evaluate_eligibility(
         else:
             self_approved = True
 
+    conflicts = requester_set.waiver_granter_conflicts()
+    if conflicts:
+        violations.append(
+            Violation(
+                "sod-waiver-granter",
+                f"A lint waiver on this work was granted by its {', '.join(conflicts)}: whoever waives the lint "
+                "must not also ask for the work it eases.",
+            )
+        )
     if decider.user_id in set(prior_gate_deciders) and (
         gate is Gate.RETIREMENT or require_distinct_approvers
     ):
@@ -547,6 +583,9 @@ def revalidate_approval_evidence(
     add(2, "requester_set", ok2 and "sod-retirement-self-approval" not in codes,
         f"decider is {', '.join(requester_roles) or 'not in the requester set'}; self_approved="
         f"{approval.self_approved}, setting at decided_at={allowed_then}")  # fmt: skip
+    # 2b. no lint waiver granter is also a requester of this gate (review SFR-3), whatever the setting
+    add(2, "waiver_granter", "sod-waiver-granter" not in codes,
+        "a lint waiver granter is also " + ", ".join(facts.requester_set.waiver_granter_conflicts()))  # fmt: skip
 
     # 3. approver in this scope at decided_at, human interactive principal
     add(3, "approver_human", held_approver and decider.human_interactive,

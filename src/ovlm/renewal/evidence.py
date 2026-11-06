@@ -159,7 +159,7 @@ def check_gate(
         recomputed = RecomputedFacts(
             plan_hash=facts.recomputed_hash,
             requester_set=facts.requester_set(
-                run_starter=run_starter, approval_requester=row["requested_by"]
+                run_starter=run_starter, approval_requester=row["requested_by"], gate=gate
             ),
             stepup_action=APPROVAL_STEPUP_ACTION,
             stepup_target=aid,
