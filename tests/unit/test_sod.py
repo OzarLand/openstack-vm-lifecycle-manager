@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -31,7 +32,7 @@ def decider(
 
 
 def rset(role: str | None = None, user: UUID = ME) -> RequesterSet:
-    others = {r: uuid4() for r in REQUESTER_ROLES}
+    others: dict[str, Any] = {r: uuid4() for r in REQUESTER_ROLES}
     if role:
         others[role] = user
     return RequesterSet(**others)
@@ -131,3 +132,31 @@ def test_binding_conflicts(
     existing: list[tuple[str, str]], role: str, scope: str, conflicts: list[str]
 ) -> None:
     assert binding_conflicts(existing, role, scope) == conflicts
+
+
+@pytest.mark.parametrize(
+    "role", ["profile_version_author", "plan_creator", "run_starter", "approval_requester"]
+)
+@pytest.mark.parametrize("allow", [False, True])
+def test_sfr3_a_waiver_granter_who_also_asks_for_the_work_voids_the_gate_whatever_the_setting(
+    role: str, allow: bool
+) -> None:
+    """Review SFR-3: a lint waiver granter is a requester of G1/G2; one who also asked for the work (author, plan
+    creator, run starter, approval requester) makes the gate undecidable by anyone, setting on or off."""
+    granter = uuid4()
+    rs = RequesterSet(**{**{r: uuid4() for r in REQUESTER_ROLES}, role: granter},
+                      lint_waiver_granters=frozenset({granter}))  # fmt: skip
+    assert rs.waiver_granter_conflicts() == (role,)
+    e = evaluate_eligibility(Gate.PLAN, decider(allow=allow), rs)
+    assert not e.allowed and "sod-waiver-granter" in [v.code for v in e.violations]
+    assert e.problem().code == "sod-violation"
+
+
+@pytest.mark.parametrize("allow", [False, True])
+def test_sfr3_a_waiver_granter_deciding_is_a_requester(allow: bool) -> None:
+    rs = RequesterSet(**{r: uuid4() for r in REQUESTER_ROLES}, lint_waiver_granters=frozenset({ME}))
+    assert rs.roles_of(ME) == ("lint_waiver_granter",) and ME in rs.members()
+    assert rs.waiver_granter_conflicts() == ()
+    e = evaluate_eligibility(Gate.PLAN, decider(allow=allow), rs)
+    assert e.allowed is allow and e.self_approved is allow  # the usual rule for a requester
+    assert not evaluate_eligibility(Gate.RETIREMENT, decider(allow=True), rs).allowed

@@ -68,7 +68,7 @@ from ovlm.automation.hostkeys import (
     validate_host,
     validate_port,
 )
-from ovlm.automation.lint import Finding, StaticWaivers, Waiver
+from ovlm.automation.lint import Finding, StaticWaivers, Waiver, waiver_reach
 from ovlm.automation.model import (
     AutomationSpec,
     DataVolume,
@@ -81,7 +81,8 @@ from ovlm.automation.types import AutomationError, Classification, Phase, Secret
 from ovlm.openstack.ownership import OwnershipRegistry
 from ovlm.openstack.sdk_write import WriteCredential
 from ovlm.openstack.write import GuardedWriteClient
-from ovlm.profiles.waivers import active_waivers
+from ovlm.profiles.waivers import MAX_WAIVED_FINDINGS, active_waivers, verify_active_waivers
+from ovlm.renewal.base import StepRefusal
 from ovlm.renewal.ledger import plan_resolved
 from ovlm.renewal.ports import (
     Bootstrap,
@@ -93,6 +94,7 @@ from ovlm.renewal.ports import (
     HostKeyResult,
     PhaseResult,
 )
+from ovlm.workflow.contract import ErrorClass
 
 log = logging.getLogger("ovlm.renewal.production")
 
@@ -598,7 +600,8 @@ class RunnerGuestPort:
             return prepared
         resolved = self._resolved(run_id)
         spec = self._spec(run_id, resolved)
-        prepared = self.runner.adopt_checkout(spec, run_id, waivers=self._waivers(resolved))
+        waivers = self._waivers(resolved)
+        prepared = self.runner.adopt_checkout(spec, run_id, waivers=waivers)
         if prepared is None:
             if self._in_outage(run_id):
                 raise AutomationError(
@@ -606,32 +609,59 @@ class RunnerGuestPort:
                     "the git host inside the downtime window",
                     Classification.NEEDS_HUMAN,
                 )
-            prepared = self._prepare_with_waivers(run_id, resolved, spec)
+            prepared, _reach = self._prepare_with_waivers(run_id, resolved, spec)
+        else:
+            self._waiver_reach(prepared, waivers)
         with self._lock:
             self._prepared[run_id] = prepared
         return prepared
 
     def _waivers(self, resolved: Mapping[str, Any]) -> StaticWaivers:
         """The active lint waivers of the plan's profile version (SF-13), as the B6 lint applies them. The plan hash
-        binds the same set, so a waiver granted or revoked after the approval has already voided it."""
+        binds the same set, so a waiver granted or revoked after the approval has already voided it.
+
+        Review SFR-1: none is applied before its provenance is re-checked (the granter's consumed TOTP step-up for
+        this version, the approver role at ``granted_at``, neither author nor requester); a failure stops the run
+        for a human (``lint_waiver_invalid``) with the codes of each failing waiver."""
+        pv = resolved["profile_version"]["id"]
         with self.engine.connect() as c:
-            rows = active_waivers(c, resolved["profile_version"]["id"])
+            rows = active_waivers(c, pv)
+            bad = verify_active_waivers(c, pv, str(resolved["scope"])) if rows else []
+        if bad:
+            raise StepRefusal(ErrorClass.NEEDS_HUMAN, "lint_waiver_invalid", waivers=bad)
         return StaticWaivers(tuple(
             Waiver(id=w["id"], rule=w["rule"], path_glob=w["path_glob"],
                    approver=w["granted_by_name"] or w["granted_by"], reason=w["reason"])
             for w in rows
         ))  # fmt: skip
 
+    @staticmethod
+    def _waiver_reach(prepared: PreparedAutomation, waivers: StaticWaivers) -> list[dict[str, Any]]:
+        """How many files and findings each waiver matched (review SFR-2). A waiver that covered more than
+        ``MAX_WAIVED_FINDINGS`` findings stops the run for a human (``lint_waiver_too_broad``): a glob broader than
+        intended is seen before the run, not after."""
+        if not waivers.waivers:
+            return []
+        reach = waiver_reach(prepared.checkout, waivers.waivers, prepared.lint.findings)
+        broad = [r for r in reach if r["findings_matched"] > MAX_WAIVED_FINDINGS]
+        if broad:
+            raise StepRefusal(ErrorClass.NEEDS_HUMAN, "lint_waiver_too_broad", waivers=broad,
+                              max_findings=MAX_WAIVED_FINDINGS)  # fmt: skip
+        return reach
+
     def _prepare_with_waivers(
         self, run_id: str, resolved: Mapping[str, Any], spec: AutomationSpec
-    ) -> PreparedAutomation:
+    ) -> tuple[PreparedAutomation, list[dict[str, Any]]]:
         """B6's clone and blocking lint with the version's waivers; every finding a waiver covered is audited
-        (``automation.lint_waiver.applied``) once the lint passed."""
+        (``automation.lint_waiver.applied``) once the lint passed and no waiver matched too much. Returns the
+        prepared checkout and what each waiver matched (step evidence)."""
         applied: list[tuple[Finding, Waiver]] = []
+        waivers = self._waivers(resolved)
         prepared = self.runner.prepare_automation(
-            spec, run_id, waivers=self._waivers(resolved),
+            spec, run_id, waivers=waivers,
             on_waiver=lambda finding, waiver: applied.append((finding, waiver)),
         )  # fmt: skip
+        reach = self._waiver_reach(prepared, waivers)
         if applied:
             pv = resolved["profile_version"]
             with Session(self.engine) as s, s.begin():
@@ -641,7 +671,7 @@ class RunnerGuestPort:
                 )  # fmt: skip
                 for finding, waiver in applied:
                     hook(finding, waiver)
-        return prepared
+        return prepared, reach
 
     def _in_outage(self, run_id: str) -> bool:
         with self.engine.connect() as c:
@@ -658,10 +688,13 @@ class RunnerGuestPort:
     ) -> Mapping[str, Any]:
         resolved = self._resolved(run_id)
         fence.check("automation:prepare")
-        prepared = self._prepare_with_waivers(run_id, resolved, self._spec(run_id, resolved))
+        prepared, reach = self._prepare_with_waivers(run_id, resolved, self._spec(run_id, resolved))
         with self._lock:
             self._prepared[run_id] = prepared
-        return prepared.evidence()
+        evidence = dict(prepared.evidence())
+        if reach:
+            evidence["lint_waivers"] = reach
+        return evidence
 
     def has_phase(self, run_id: str, phase: str) -> bool:
         prepared = self._prepared_for(run_id)

@@ -190,6 +190,39 @@ def test_sf5_direct_endpoint_rewrite_requests_revalidation_at_once(spy: Spy) -> 
     assert spy.env.sql(due)[0].n == 2
 
 
+def test_sf5_a_temporary_table_cannot_silence_the_endpoint_signal(spy: Spy) -> None:
+    """Review SFR-4: ``cloud_endpoint_change_signal`` is ``SECURITY DEFINER``. Without ``pg_temp`` **last** in its
+    ``search_path``, PostgreSQL searches the session's temporary schema first, so a role allowed to create temporary
+    tables could shadow ``credential_ref`` and swallow the signal of a direct endpoint rewrite. ``0001_baseline``
+    revokes ``TEMP`` from ``PUBLIC``; the probe grants it to ``ovlm_api`` to show the function no longer depends on
+    that grant."""
+    pc = spy.connection()
+    _ready(spy, pc)
+    [cfg] = spy.env.sql(
+        "SELECT prosecdef, proconfig FROM pg_proc WHERE proname = 'cloud_endpoint_change_signal'"
+    )
+    assert cfg.prosecdef and cfg.proconfig == ["search_path=pg_catalog, public, pg_temp"]
+    db = spy.env.owner.url.database
+    spy.env.sql(f'GRANT TEMP ON DATABASE "{db}" TO ovlm_api')
+    due = (
+        "SELECT count(*) AS n FROM credential_ref WHERE validation_requested_at > last_validated_at"
+    )
+    api = spy.env.role_engine("ovlm_api", API_PW)
+    try:
+        with api.begin() as c:
+            c.execute(
+                text(
+                    "CREATE TEMP TABLE credential_ref (state text, project_connection_id uuid, "
+                    "validation_requested_at timestamptz, updated_at timestamptz) ON COMMIT DROP"
+                )
+            )
+            c.execute(text("UPDATE cloud SET region = 'R-shadow'"))
+    finally:
+        api.dispose()
+        spy.env.sql(f'REVOKE TEMP ON DATABASE "{db}" FROM ovlm_api')
+    assert spy.env.sql(due)[0].n == 2
+
+
 def test_cs1_guest_access_change_needs_stepup(spy: Spy) -> None:
     pc = spy.connection()
     got = spy.admin.get(f"/api/v1/project-connections/{pc}").json()

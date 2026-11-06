@@ -120,6 +120,21 @@ def test_rbac_operators_viewers_and_tokens_cannot_waive(env: Env) -> None:
         json={"rule": "check_mode_forced", "path_glob": "*", "reason": REASON, "stepup_id": sid},
     )  # fmt: skip
     assert as_token.status_code == 403
+    # review SFR-6: a step-up reached with a password alone is refused and audited (the step-up is not burnt)
+    ap, secret = _user(env, "approver-pw", [("approver", "global")])
+    pw_only = _stepup(env, ap, secret, "lint_waiver.grant", version)
+    env.auth.sql("UPDATE stepup SET auth_method = 'password' WHERE id = :i", i=pw_only)
+    refused = _grant(ap, profile, pw_only)
+    assert refused.status_code == 403 and refused.json()["code"] == "totp-required"
+    assert env.auth.sql("SELECT consumed_at FROM stepup WHERE id = :i", i=pw_only)[0][0] is None
+    rows = env.auth.sql(
+        "SELECT actor_id, principal_type, after FROM audit_event WHERE action = 'lint_waiver.grant.refused' "
+        "AND result = 'denied' ORDER BY id"
+    )
+    assert [(r.principal_type, r.after["refusal"]) for r in rows] == [
+        ("token", "human-session-required"), ("human", "totp-required"),
+    ]  # fmt: skip
+    assert str(rows[0].actor_id) == str(op.user_id) and str(rows[1].actor_id) == str(ap.user_id)
     # an approver of another project neither sees nor waives this version
     other, secret = _user(env, "approver-other", [("approver", f"project:{uuid4()}")])
     elsewhere = _grant(other, profile, _stepup(env, other, secret, "lint_waiver.grant", version))
@@ -163,11 +178,24 @@ def test_the_api_role_cannot_delete_or_rewrite_a_waiver(env: Env) -> None:
         ):
             with pytest.raises(DBAPIError), api.begin() as c:
                 c.execute(text(stmt))
-        with pytest.raises(DBAPIError), api.begin() as c:  # never waivable, whoever writes the row
+        # never waivable, whoever writes the row (review SFR-5): a real, consumed step-up that passes the api guard
+        # and a specific glob, so only the rule CHECK can refuse it
+        valid = _stepup_row(env, ap.user_id, "lint_waiver.grant", version)
+        with pytest.raises(DBAPIError, match="lint_waiver_rule_check"), api.begin() as c:
             c.execute(
                 text("INSERT INTO lint_waiver (id, profile_version_id, rule, path_glob, reason, granted_by, stepup_id) "
-                     "SELECT :i, profile_version_id, 'formatting', '*', reason, granted_by, :s FROM lint_waiver"),
-                {"i": uuid4(), "s": uuid4()},
+                     "SELECT :i, profile_version_id, 'formatting', 'roles/probe/*', reason, granted_by, :s "
+                     "FROM lint_waiver"),
+                {"i": uuid4(), "s": valid},
+            )  # fmt: skip
+        with (
+            api.begin() as c
+        ):  # the same row with a waivable rule is accepted: the CHECK alone refused it
+            c.execute(
+                text("INSERT INTO lint_waiver (id, profile_version_id, rule, path_glob, reason, granted_by, stepup_id) "
+                     "SELECT :i, profile_version_id, 'no_log_secret', 'roles/probe/*', reason, granted_by, :s "
+                     "FROM lint_waiver"),
+                {"i": uuid4(), "s": valid},
             )  # fmt: skip
     finally:
         api.dispose()
@@ -175,3 +203,135 @@ def test_the_api_role_cannot_delete_or_rewrite_a_waiver(env: Env) -> None:
         env.auth.sql("SELECT path_glob FROM lint_waiver WHERE id = :i", i=wid)[0][0]
         == "roles/probe/*"
     )
+    assert not env.auth.sql("SELECT 1 FROM lint_waiver WHERE rule = 'formatting'")
+
+
+def _stepup_row(
+    env: Env,
+    user: UUID | str,
+    action: str,
+    target: str,
+    *,
+    method: str = "password+totp",
+    consumed: bool = True,
+) -> str:
+    """A step-up row written as the owner (what the api would have stored), consumed or not."""
+    sid = str(uuid4())
+    env.auth.sql(
+        "INSERT INTO stepup (id, user_id, session_id_hash, action, target_id, auth_method, created_at, expires_at, "
+        "consumed_at) VALUES (:i, :u, 'sess', :a, :t, :m, now() - interval '1 minute', now() + interval '4 minutes', "
+        "CASE WHEN :c THEN now() END)",
+        i=sid, u=str(user), a=action, t=target, m=method, c=consumed,
+    )  # fmt: skip
+    return sid
+
+
+CATCH_ALL = ("*", "**", "*/*", "**/*", "*/**", "[a-z]*")
+
+
+def test_sfr2_a_catch_all_glob_is_refused_by_the_api_and_the_database(env: Env) -> None:
+    """Review SFR-2: a glob with no literal path segment waives the rule for the whole repository."""
+    profile, version = _version(env)
+    ap, secret = _user(env, "approver4", [("approver", "global")])
+    sid = _stepup(env, ap, secret, "lint_waiver.grant", version)
+    for glob in CATCH_ALL:
+        refused = _grant(ap, profile, sid, path_glob=glob)
+        assert refused.status_code == 422 and "literal path segment" in refused.json()["detail"], (
+            glob
+        )
+    for glob in ("roles/probe/*", "*/tasks/main.yml", "playbooks/configure.yml"):
+        ok = _grant(
+            ap, profile, _stepup(env, ap, secret, "lint_waiver.grant", version), path_glob=glob
+        )
+        assert ok.status_code == 201, (glob, ok.text)
+    # the CHECK holds whoever writes the row (the owner here, which the api guard does not cover)
+    for glob in CATCH_ALL:
+        with pytest.raises(DBAPIError, match="lint_waiver_path_glob_check"):
+            env.auth.sql(
+                "INSERT INTO lint_waiver (id, profile_version_id, rule, path_glob, reason, granted_by, stepup_id) "
+                "VALUES (:i, :v, 'no_log_secret', :g, :why, :u, :s)",
+                i=str(uuid4()), v=version, g=glob, why=REASON, u=str(ap.user_id),
+                s=_stepup_row(env, ap.user_id, "lint_waiver.grant", version),
+            )  # fmt: skip
+
+
+def _insert(engine: Any, **row: Any) -> None:
+    with engine.begin() as c:
+        c.execute(
+            text("INSERT INTO lint_waiver (id, profile_version_id, rule, path_glob, reason, granted_by, stepup_id) "
+                 "VALUES (:i, :v, :r, :g, :why, :u, :s)"),
+            {"i": str(uuid4()), "r": "no_log_secret", "g": "roles/probe/*", "why": REASON, **row},
+        )  # fmt: skip
+
+
+def test_sfr1_the_api_role_cannot_forge_a_waiver_or_a_revocation(env: Env) -> None:
+    """Review SFR-1: ``ovlm_api`` held INSERT on every column, so a compromised api could write a waiver in anyone's
+    name with any step-up. The guard (``lint_waiver_api_guard``) now asks, for every member of ``ovlm_api``, the
+    granter's own consumed password+TOTP step-up for ``lint_waiver.grant`` on that version, and a granter other than
+    the author; the same for a revocation (``lint_waiver.revoke`` on the waiver id)."""
+    profile, version = _version(env)
+    author = str(
+        env.auth.sql("SELECT created_by FROM profile_version WHERE id = :v", v=version)[0][0]
+    )
+    ap, _ = _user(env, "approver5", [("approver", "global")])
+    other, _ = _user(env, "approver6", [("approver", "global")])
+    me = str(ap.user_id)
+    api = env.auth.role_engine("ovlm_api", API_PW)
+    try:
+        # the reviewer's probe: the author as granter, an unconsumed step-up bound to another action and target
+        unrelated = _stepup_row(env, author, "approval.decide", str(uuid4()), consumed=False)
+        with pytest.raises(DBAPIError, match="lint waiver"):
+            _insert(api, v=version, u=author, s=unrelated)
+        # each defect alone is refused
+        defects = {
+            "another user's step-up": (
+                me,
+                _stepup_row(env, other.user_id, "lint_waiver.grant", version),
+            ),
+            "another action": (me, _stepup_row(env, me, "lint_waiver.revoke", version)),
+            "another target": (me, _stepup_row(env, me, "lint_waiver.grant", str(uuid4()))),
+            "password alone": (
+                me,
+                _stepup_row(env, me, "lint_waiver.grant", version, method="password"),
+            ),
+            "not consumed": (
+                me,
+                _stepup_row(env, me, "lint_waiver.grant", version, consumed=False),
+            ),
+            "the author": (author, _stepup_row(env, author, "lint_waiver.grant", version)),
+        }
+        for name, (granter, sid) in defects.items():
+            with pytest.raises(DBAPIError, match="lint waiver"):
+                _insert(api, v=version, u=granter, s=sid)
+            assert not env.auth.sql("SELECT 1 FROM lint_waiver"), name
+        # what the api writes after consuming the right step-up passes
+        _insert(api, v=version, u=me, s=_stepup_row(env, me, "lint_waiver.grant", version))
+        [wid] = [str(r[0]) for r in env.auth.sql("SELECT id FROM lint_waiver")]
+
+        revoke = (
+            "UPDATE lint_waiver SET revoked_by = :u, revoked_at = now(), revoke_stepup_id = :s, "
+            "revoke_reason = 'no longer needed here' WHERE id = :i"
+        )
+        for granter, sid in (
+            (
+                author,
+                _stepup_row(env, author, "lint_waiver.grant", version),
+            ),  # the reviewer's probe
+            (
+                me,
+                _stepup_row(env, me, "lint_waiver.revoke", version),
+            ),  # bound to the version, not the waiver
+            (me, _stepup_row(env, me, "lint_waiver.revoke", wid, consumed=False)),
+            (me, _stepup_row(env, other.user_id, "lint_waiver.revoke", wid)),
+            (me, _stepup_row(env, me, "lint_waiver.revoke", wid, method="password")),
+        ):
+            with pytest.raises(DBAPIError, match="lint waiver"), api.begin() as c:
+                c.execute(text(revoke), {"u": granter, "s": sid, "i": wid})
+        with api.begin() as c:
+            c.execute(
+                text(revoke),
+                {"u": me, "s": _stepup_row(env, me, "lint_waiver.revoke", wid), "i": wid},
+            )
+    finally:
+        api.dispose()
+    assert env.auth.sql("SELECT revoked_by FROM lint_waiver")[0][0] == ap.user_id

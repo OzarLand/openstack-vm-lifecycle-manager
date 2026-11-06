@@ -24,8 +24,8 @@ from uuid import UUID
 from sqlalchemy import Connection, RowMapping, text
 
 from ovlm import audit  # noqa: E402
-from ovlm.auth.sod import RequesterSet
-from ovlm.profiles.waivers import active_waivers, hash_binding
+from ovlm.auth.sod import Gate, RequesterSet, WaiverRecord
+from ovlm.profiles.waivers import active_waivers, hash_binding, waiver_records
 from ovlm.registry.errors import DomainError
 from ovlm.renewal.config import RenewalConfig
 
@@ -34,7 +34,9 @@ audit.register_entity(
     ["trigger", "step_key", "error_class", "reason", "outcome", "approval_id", "snapshot_id", "truth", "rule",
      "kind", "signal_id", "plan_id", "run_id"],
 )  # fmt: skip
-audit.register_entity("renewal_plan", ["managed_vm_id", "state", "policy_version", "run_id"])
+audit.register_entity(
+    "renewal_plan", ["managed_vm_id", "state", "policy_version", "run_id", "subject_type", "reason"]
+)
 audit.register_entity(
     "approval",
     ["subject_type", "subject_id", "decision", "self_approved", "operator_confirmed", "expires_at"],
@@ -120,20 +122,30 @@ class PlanFacts:
     policy_editor: UUID | None
     #: The active lint waivers of the plan's profile version, as bound into the hash (SF-13).
     lint_waivers: tuple[dict[str, str], ...] = ()
+    #: The same waivers as raw facts, for the worker's provenance checks (review SFR-1).
+    waiver_records: tuple[WaiverRecord, ...] = ()
 
     @property
     def scope(self) -> str:
         return str(self.resolved["scope"])
 
     def requester_set(
-        self, *, run_starter: UUID | None, approval_requester: UUID | None
+        self, *, run_starter: UUID | None, approval_requester: UUID | None, gate: Gate | None = None
     ) -> RequesterSet:
+        """The gate's requester set. For G1 and G2 the granters of the active lint waivers are requesters too
+        (review SFR-3): they shaped the automation those gates approve."""
+        granters = (
+            frozenset(UUID(str(w["granted_by"])) for w in self.lint_waivers)
+            if gate in (Gate.PLAN, Gate.CUTOVER)
+            else frozenset()
+        )
         return RequesterSet(
             profile_version_author=self.profile_author,
             plan_creator=self.plan.get("created_by"),
             run_starter=run_starter,
             policy_editor=self.policy_editor,
             approval_requester=approval_requester,
+            lint_waiver_granters=granters,
         )
 
 
@@ -184,6 +196,7 @@ def load_facts(conn: Connection, plan_id: str | UUID) -> PlanFacts:
         profile_author=pv["created_by"] if pv else None,
         policy_editor=pol["last_edited_by"] if pol else None,
         lint_waivers=tuple(waivers),
+        waiver_records=waiver_records(conn, plan["profile_version_id"]),
     )
 
 

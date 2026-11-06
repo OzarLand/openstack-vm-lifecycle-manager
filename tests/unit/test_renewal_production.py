@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from ovlm.automation.hostkeys import PublicKey, parse_public_key
+from ovlm.automation.lint import StaticWaivers
 from ovlm.automation.types import AutomationError, SecretBytes
 from ovlm.openstack.errors import ReadOnlyViolationError, WriteNotAllowedError
 from ovlm.openstack.ownership import InMemoryOwnershipRegistry
@@ -530,7 +531,7 @@ class _CheckoutPort(RunnerGuestPort):
         return object()
 
     def _waivers(self, resolved: Mapping[str, Any]) -> Any:
-        return None
+        return StaticWaivers()
 
     def _in_outage(self, run_id: str) -> bool:
         return self.outage

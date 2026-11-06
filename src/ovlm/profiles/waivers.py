@@ -25,6 +25,7 @@ names are repeated here, and a unit test checks them against the lint.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -38,7 +39,7 @@ from ovlm.auth.authz import Action, authorize, authorize_action, scope_covers
 from ovlm.auth.errors import ProblemError
 from ovlm.auth.events import record_independent
 from ovlm.auth.principal import Principal
-from ovlm.auth.sod import INTERACTIVE_AUTH
+from ovlm.auth.sod import INTERACTIVE_AUTH, WaiverRecord, check_waivers
 from ovlm.auth.stepup import consume_stepup
 from ovlm.profiles.errors import ProfileError
 
@@ -50,11 +51,24 @@ WAIVABLE_RULES = ("no_log_secret", "check_mode_forced", "delegate_to", "ignore_e
 #: Repository-relative fnmatch glob: no absolute path, no ``..`` component (also a CHECK constraint).
 PATH_GLOB = re.compile(r"^[A-Za-z0-9_.*?/\[\]-]{1,200}$")
 _DOTDOT = re.compile(r"(^|/)\.\.(/|$)")
+#: At least one **literal path segment** (review SFR-2): a segment with no ``*``, ``?`` or bracket expression and at
+#: least one letter, digit, ``_`` or ``-``. ``fnmatch``'s ``*`` matches ``/``, so ``*``, ``**``, ``*/*``, ``**/*``,
+#: ``*/**``, ``[a-z]*`` or ``*.yml`` would waive the rule for the whole repository. Same regex in the ``CHECK`` of
+#: ``profiles_0002`` (PostgreSQL ARE and Python agree on it; a unit test ties the two).
+LITERAL_SEGMENT = re.compile(r"(^|/)[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*(/|$)")
+#: B6 refuses (``needs_human``) a waiver that covered more findings than this in one run (review SFR-2).
+MAX_WAIVED_FINDINGS = 20
+
+
+def glob_is_specific(path_glob: str) -> bool:
+    """The glob keeps at least one literal path segment (not a catch-all)."""
+    return LITERAL_SEGMENT.search(path_glob) is not None
+
 
 audit.register_entity(
     "lint_waiver",
     ["profile_id", "profile_version_id", "profile_version", "rule", "path_glob", "reason", "stepup_id",
-     "operator_and_approver", "revoke_reason", "revoked_at"],
+     "operator_and_approver", "revoke_reason", "revoked_at", "refusal"],
 )  # fmt: skip
 
 _COLS = (
@@ -121,10 +135,13 @@ def _refuse(
     record_independent(
         db, action="lint_waiver.grant.refused", target_type="lint_waiver", target_id=target, result="denied",
         actor_id=who.user_id, principal_type=who.principal_type, auth_method=who.auth_method,
-        source_ip=who.source_ip, project_scope=scope, after={"profile_version_id": target},
+        source_ip=who.source_ip, project_scope=scope, after={"profile_version_id": target, "refusal": code},
     )  # fmt: skip
     if code == "human-session-required":
         return ProblemError(403, code, "Forbidden", detail)
+    if code == "totp-required":
+        return ProblemError(403, code, "TOTP step-up required", detail,
+                            next_action="Enrol TOTP, then step up again with your password and a TOTP code.")  # fmt: skip
     return ProblemError(403, code, "Separation of duties", detail,
                         next_action="Ask another person holding the approver role in this scope.")  # fmt: skip
 
@@ -143,22 +160,39 @@ def _check_input(rule: str, path_glob: str, reason: str) -> None:
         errors.append(
             "path_glob: a repository-relative glob (letters, digits, _ . * ? / [ ] -), no '..'"
         )
+    elif not glob_is_specific(path_glob):
+        errors.append(
+            "path_glob: keep at least one literal path segment (e.g. roles/probe/*, */tasks/main.yml); "
+            "a catch-all such as * or **/* would waive the rule for the whole repository"
+        )
     if not 10 <= len(reason.strip()) <= 1000:
         errors.append("reason: 10 to 1000 characters")
     if errors:
         raise ProfileError(422, "invalid-lint-waiver", "Invalid lint waiver", "; ".join(errors))
 
 
+_TOTP_DETAIL = "A lint waiver needs a step-up confirmed with a TOTP code, not a password alone."
+
+
 def _stepup_with_totp(
-    db: Session, who: Principal, stepup_id: UUID, *, action: str, target: str
+    db: Session,
+    who: Principal,
+    stepup_id: UUID,
+    *,
+    action: str,
+    target: str,
+    scope: str | None = None,
 ) -> None:
+    """Consume the step-up; refuse one reached with a password alone. With ``scope`` (grant), the refusal is audited
+    as ``lint_waiver.grant.refused`` (review SFR-6); the transaction then rolls back, so the step-up is not burnt."""
     consume_stepup(db, who, stepup_id, action=action, target_id=target)
     method = db.execute(
         text("SELECT auth_method FROM stepup WHERE id = :i"), {"i": stepup_id}
     ).scalar()
     if method != INTERACTIVE_AUTH:
-        raise ProblemError(403, "totp-required", "TOTP step-up required",
-                           "A lint waiver needs a step-up confirmed with a TOTP code, not a password alone.",
+        if scope is not None:
+            raise _refuse(db, who, target, "totp-required", _TOTP_DETAIL, scope)
+        raise ProblemError(403, "totp-required", "TOTP step-up required", _TOTP_DETAIL,
                            next_action="Enrol TOTP, then step up again with your password and a TOTP code.")  # fmt: skip
 
 
@@ -171,12 +205,18 @@ def grant(
     if pv is None or not authorize(who, "viewer", scope_of(pv)):
         raise _not_found()
     scope = scope_of(pv)
+    target = str(pv.id)
+    if (
+        not who.is_human
+    ):  # an API token, whatever its roles (review SFR-6: audited like the other refusals)
+        raise _refuse(db, who, target, "human-session-required",
+                      "A lint waiver needs an interactive human session with password and TOTP, never an API "
+                      "token.", scope)  # fmt: skip
     if not authorize_action(who, Action.LINT_WAIVER_GRANT, scope):
         raise ProblemError(
             403, "forbidden", "Forbidden", "The approver role in this scope is required."
         )
     _check_input(rule, path_glob, reason)
-    target = str(pv.id)
     if not (who.is_human and who.auth_method == INTERACTIVE_AUTH):
         raise _refuse(db, who, target, "human-session-required",
                       "A lint waiver needs an interactive human session with password and TOTP.", scope)  # fmt: skip
@@ -190,7 +230,7 @@ def grant(
     if both and not installation.allow_operator_approver(db):
         raise _refuse(db, who, target, "sod-violation",
                       "You hold operator and approver in this scope (operator_and_approver).", scope)  # fmt: skip
-    _stepup_with_totp(db, who, stepup_id, action=GRANT_STEPUP_ACTION, target=target)
+    _stepup_with_totp(db, who, stepup_id, action=GRANT_STEPUP_ACTION, target=target, scope=scope)
     wid = uuid4()
     db.execute(
         text("INSERT INTO lint_waiver (id, profile_version_id, rule, path_glob, reason, granted_by, stepup_id) "
@@ -266,6 +306,60 @@ def active_waivers(
              "ORDER BY w.granted_at, w.id"), {"v": str(profile_version_id)},
     )  # fmt: skip
     return [waiver_dict(r) for r in rows]
+
+
+def waiver_records(
+    db: Session | Connection, profile_version_id: UUID | str
+) -> tuple[WaiverRecord, ...]:
+    """The active waivers of a version as raw facts, for the worker's provenance checks (review SFR-1)."""
+    rows = db.execute(
+        text("SELECT id, profile_version_id, granted_by, granted_at, stepup_id FROM lint_waiver "
+             "WHERE profile_version_id = :v AND revoked_at IS NULL ORDER BY granted_at, id"),
+        {"v": str(profile_version_id)},
+    )  # fmt: skip
+    return tuple(
+        WaiverRecord(id=r.id, profile_version_id=r.profile_version_id, granted_by=r.granted_by,
+                     granted_at=r.granted_at, stepup_id=r.stepup_id)
+        for r in rows
+    )  # fmt: skip
+
+
+def version_author(db: Session | Connection, profile_version_id: UUID | str) -> UUID | None:
+    author: UUID | None = db.execute(
+        text("SELECT created_by FROM profile_version WHERE id = :v"), {"v": str(profile_version_id)}
+    ).scalar()
+    return author
+
+
+def verify_active_waivers(
+    conn: Connection, profile_version_id: UUID | str, scope: str
+) -> list[dict[str, Any]]:
+    """The active waivers of a version whose provenance fails (empty: all hold). The worker calls it before B6
+    applies them (review SFR-1); :func:`ovlm.auth.sod.revalidate_approval_evidence` runs the same checks."""
+    records = waiver_records(conn, profile_version_id)
+    if not records:
+        return []
+    with Session(bind=conn) as session:
+        return check_waivers(
+            session, records, scope=scope, author=version_author(conn, profile_version_id),
+            requesters=plan_requesters(conn, UUID(str(profile_version_id))),
+        )  # fmt: skip
+
+
+_SHOWN = ("id", "rule", "path_glob", "granted_by", "granted_by_name", "granted_at", "reason", "profile_id",
+          "profile_version")  # fmt: skip
+
+
+def for_display(
+    waivers: list[dict[str, Any]], bound: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """What the approval page shows of each waiver the plan hash binds (review SFR-7): the bound fields plus who
+    granted it, when and why. Display data only, stored in ``approval.hash_inputs``; the hash binds
+    :func:`hash_binding` alone."""
+    by_id = {w["id"]: w for w in waivers}
+    return [
+        {k: by_id[b["id"]].get(k) for k in _SHOWN} if b["id"] in by_id else dict(b) for b in bound
+    ]
 
 
 def hash_binding(waivers: list[dict[str, Any]]) -> list[dict[str, str]]:

@@ -163,9 +163,22 @@ Typed confirmation (TC) = FR-UI-2. ✓ = allowed, — = denied.
   (recorded `operator_and_approver`). The data-safety rules (`formatting`, `quiesce_state`, `ssh_override`,
   `hosts_pattern`) and `parse_error` are never waivable (CHECK constraint). Waivers are append-only rows; revoking one
   takes an approver and a TOTP step-up bound to the waiver. The plan hash binds the active waivers, so granting or
-  revoking one voids approvals bound to the old hash; the approval page lists them. B6 lints with exactly that set and
-  audits every finding a waiver covered (`automation.lint_waiver.applied`). Refusals are audited
-  (`lint_waiver.grant.refused`).
+  revoking one voids approvals bound to the old hash; the approval page lists them with the granter, the time and the
+  reason. B6 lints with exactly that set and audits every finding a waiver covered (`automation.lint_waiver.applied`).
+  Refusals are audited (`lint_waiver.grant.refused`, with the refusal code), API tokens and password-only step-ups
+  included. Hardening from review SFR-1 to SFR-3:
+  - **Glob**: it keeps at least one literal path segment (`*`, `**`, `*/*`, `**/*`, `*/**`, `[a-z]*` are refused, by
+    the api and by a CHECK). B6 records in its evidence how many files and findings each waiver matched, and stops for
+    a human (`lint_waiver_too_broad`) when one covered more than 20 findings.
+  - **Database guard** (`lint_waiver_api_guard`, every non-superuser member of `ovlm_api`): an insert needs the
+    granter's own consumed password+TOTP step-up for `lint_waiver.grant` on that version and a granter other than the
+    author; a revocation, the revoker's own consumed step-up for `lint_waiver.revoke` on the waiver.
+  - **Worker**: before B6 applies a waiver and at every approval re-validation (check 8), the step-up as above, the
+    `approver` role at `granted_at`, an active granter, neither author nor requester on the version. A failure stops
+    for a human (`lint_waiver_invalid` at B6, `approval_evidence_invalid` at a gate).
+  - **Order**: for G1 and G2 the waiver granters are requesters. A granter deciding follows the requester rule; a
+    granter who is also the author, the plan creator, the run starter or the approval requester makes the gate refused
+    at request, at decision and at re-validation, whatever `allow_operator_approver` says.
 
 ### 3.3 Project scoping — recommended for MVP
 Role bindings are `(user, role, scope)` with `scope = global | project:<id>`. MVP enforces scope on every query and

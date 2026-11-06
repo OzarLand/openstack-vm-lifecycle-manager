@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from ovlm.automation import lint
-from ovlm.profiles.waivers import PATH_GLOB, WAIVABLE_RULES, hash_binding
+from ovlm.profiles.waivers import (
+    LITERAL_SEGMENT,
+    PATH_GLOB,
+    WAIVABLE_RULES,
+    glob_is_specific,
+    hash_binding,
+)
 from ovlm.renewal.plans import compute_plan_hash
 
 LINT_SRC = Path(lint.__file__).read_text()
@@ -47,3 +53,46 @@ def test_plan_hash_binds_waivers_only_when_there_are_some() -> None:
     assert one != plain
     other = compute_plan_hash(**base, lint_waivers=hash_binding([{**w, "path_glob": "roles/*"}]))
     assert other not in (plain, one)
+
+
+CATCH_ALL = (
+    "*",
+    "**",
+    "*/*",
+    "**/*",
+    "*/**",
+    "[a-z]*",
+    "*.yml",
+    "?",
+    "*/[a-z]*/*",
+    ".",
+    "./*",
+    "*.d/*",
+)
+SPECIFIC = (
+    "roles/probe/*",
+    "*/tasks/main.yml",
+    "playbooks/configure.yml",
+    "roles/*",
+    "roles/probe-1/tasks/*.yml",
+)
+
+
+def test_a_catch_all_glob_is_refused() -> None:
+    """Review SFR-2: ``fnmatch``'s ``*`` matches ``/``, so a glob without one literal path segment (no ``*``, ``?``
+    or bracket expression, at least one letter, digit, ``_`` or ``-``) waives the rule for the whole repository."""
+    for glob in CATCH_ALL:
+        assert not glob_is_specific(glob), glob
+    for glob in SPECIFIC:
+        assert glob_is_specific(glob), glob
+
+
+def test_the_database_check_uses_the_same_rule() -> None:
+    """The ``CHECK`` in ``profiles_0002`` mirrors :data:`LITERAL_SEGMENT` (PostgreSQL ARE), so a direct insert
+    cannot bypass the api's rule."""
+    migration = (
+        Path(__file__).parents[2] / "migrations" / "versions" / "profiles_0002.py"
+    ).read_text()
+    assert f"path_glob ~ '{LITERAL_SEGMENT.pattern}'" in migration
+    for glob in (*CATCH_ALL, *SPECIFIC):
+        assert bool(LITERAL_SEGMENT.search(glob)) == glob_is_specific(glob), glob
