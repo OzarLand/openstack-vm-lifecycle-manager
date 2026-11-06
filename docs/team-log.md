@@ -1031,3 +1031,17 @@ password manager that also generates TOTP codes. No code change.
   negative control, policy and deadline, B1–B8 of run `01a1ac5d`) and runs the guard diff. A security follow-up round
   (CS-6, SF-3/4/5/10/13, including the lint waiver API) started:
   https://claude.ai/code/session_016ti9w4MiAVLkz5aVxth6t7
+
+## Security follow-ups, audit API and WF-07 fix merged — 2026-11-06 12:05 UTC
+
+[#27](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/27) merged, CI green including `make smoke` with
+the new "no root process in the worker" check:
+- SF-1 (CS-6), SF-3, SF-4, SF-5, SF-10 and SF-13 (lint waiver API). An independent review (Fable) found no critical or
+  high issue. SFR-1 (Medium: the api role could forge a waiver) and SFR-2 (Medium: catch-all globs accepted) are fixed,
+  with SFR-3..SFR-7, each with a test that failed before the fix.
+- The audit API `GET /api/v1/audit` and the real `/audit` page (lab bug O). The roadmap had wrongly listed the audit view
+  as done: it was a placeholder.
+- WF-07 race: a heartbeat stuck on the connection could extend the lease of an attempt that had already fenced itself,
+  delaying takeover by one lease. This was the intermittent integration failure seen since PR #18. Root-caused, fixed,
+  with a deterministic test.
+- Lab kit bug P: the guard diff now always counts the set-aside floating IP as the lab's own.
