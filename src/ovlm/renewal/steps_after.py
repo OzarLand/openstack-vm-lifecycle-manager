@@ -29,12 +29,18 @@ E = ErrorClass
 
 
 def _gone(fn: Any, *args: Any) -> Any:
+    """The resource, or ``None`` when it no longer exists: a 404, or a server Nova still lists with status DELETED
+    for a while after the delete (seen on Felcloud, lab bug S). Acting on such a tombstone is refused by the
+    ownership guard as "unverifiable", so it must count as gone, never as present."""
     try:
-        return fn(*args)
+        found = fn(*args)
     except NotFoundError as exc:
         if type(exc) is NotFoundError:
             return None
         raise
+    if getattr(found, "is_deleted", False):
+        return None
+    return found
 
 
 # --- retention / retirement ----------------------------------------------------------------------------------------

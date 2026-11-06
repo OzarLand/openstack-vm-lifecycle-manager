@@ -205,6 +205,9 @@ class FakeOpenStack:
         self.block_storage_max = block_storage_max
         self.now = now or _EPOCH
         self.keep_tombstones = True
+        #: Real Nova (Felcloud, lab bug S) can still answer GET /servers/{id} with status DELETED for a while after
+        #: a delete instead of 404. True: get_server returns such a tombstone instead of raising NotFound.
+        self.get_returns_deleted = False
         self.quota_instances: int | None = None
         self.default_volume_type: str | None = (
             None  # None: the cloud has no default type (LAB-OBSERVED)
@@ -593,6 +596,9 @@ class FakeOpenStack:
 
     def get_server(self, server_id: str) -> ServerInfo:
         with self._call("get_server"):
+            raw = self._server_raw(server_id)
+            if raw.deleted and self.get_returns_deleted:
+                return self._server_info(raw)
             return self._server_info(self._live_server(server_id))
 
     def list_server_volume_attachments(self, server_id: str) -> list[VolumeAttachmentInfo]:
