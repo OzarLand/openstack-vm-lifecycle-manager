@@ -121,7 +121,7 @@ class Store:
 
     def facts_for(self, app: str, *roles: str, project: str = PROJECT) -> None:
         self.facts[app] = TokenFacts(project, tuple(roles), "svc-user", app, True, None, record_status=200,
-                                     record_expires_at=datetime.now(UTC) + timedelta(days=30))  # fmt: skip
+                                     record_unrestricted=False, record_expires_at=datetime.now(UTC) + timedelta(days=30))  # fmt: skip
 
 
 def _write(st: Store, pc: str) -> WriteCredential:

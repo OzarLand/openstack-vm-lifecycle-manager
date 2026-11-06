@@ -289,7 +289,7 @@ def test_cs3_keystone_expiry_is_stored_and_enforced(spy: Spy) -> None:
     assert w["expires_in_days"] in (29, 30) and w["validation"]["state"] == "valid"
     # a never-expiring credential is rejected whatever the form said
     spy.facts[APP_R] = TokenFacts(PROJECT, ("reader",), "svc-user", APP_R, True, None, record_status=200,
-                                  record_expires_at=None)  # fmt: skip
+                                  record_unrestricted=False, record_expires_at=None)  # fmt: skip
     rid = spy.upload(pc, "os_read", "read-secret", APP_R).json()["id"]
     assert spy.validator.run_once() == {"rejected": 1}
     got = spy.admin.get(f"/api/v1/credentials/{rid}").json()

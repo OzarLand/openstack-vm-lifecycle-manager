@@ -77,6 +77,11 @@ def test_wrong_scope_roles_id_or_unrestricted_are_refused(
         ({"record_status": 403}, "HTTP 403"),
         ({"record_status": None}, "cannot be verified"),
         ({"record_unrestricted": True}, "unrestricted"),
+        ({"record_unrestricted": None}, "does not say whether it is unrestricted"),
+        (
+            {"record_unrestricted": None, "restricted": None},
+            "does not say whether it is unrestricted",
+        ),
         ({"record_roles": ("reader", "admin")}, "other roles"),
     ],
 )
