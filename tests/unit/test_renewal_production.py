@@ -509,11 +509,11 @@ class _Runner:
     def __init__(self, on_disk: bool) -> None:
         self.on_disk, self.cloned, self.adopted = on_disk, 0, 0
 
-    def prepare_automation(self, spec: Any, workflow_id: str) -> Any:
+    def prepare_automation(self, spec: Any, workflow_id: str, **_: Any) -> Any:
         self.cloned += 1
         return object()
 
-    def adopt_checkout(self, spec: Any, workflow_id: str) -> Any:
+    def adopt_checkout(self, spec: Any, workflow_id: str, **_: Any) -> Any:
         self.adopted += 1
         return object() if self.on_disk else None
 
@@ -528,6 +528,9 @@ class _CheckoutPort(RunnerGuestPort):
 
     def _spec(self, run_id: str, resolved: Mapping[str, Any]) -> Any:
         return object()
+
+    def _waivers(self, resolved: Mapping[str, Any]) -> Any:
+        return None
 
     def _in_outage(self, run_id: str) -> bool:
         return self.outage
@@ -560,7 +563,7 @@ def test_lazy_runner_adopts_the_checkout_through_the_public_reverify() -> None:
     prepared: Any = object()
 
     class _Automation:
-        def reverify_checkout(self, spec: Any, workflow_id: str) -> Any:
+        def reverify_checkout(self, spec: Any, workflow_id: str, **_: Any) -> Any:
             seen.append((spec, workflow_id))
             return None if workflow_id == "gone" else prepared
 

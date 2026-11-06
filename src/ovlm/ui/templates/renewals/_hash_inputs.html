@@ -15,6 +15,9 @@
       {% if d.changed_files %}<ul class="plain">{% for f in d.changed_files %}<li class="mono">{{ f }}</li>{% endfor %}</ul>
       {% else %}<br><span class="muted">File-level diff: not available in this release. Compare the two commits in the repository before you approve.</span>{% endif %}
     </dd>
+    <dt>Lint waivers</dt><dd>{% if inputs.lint_waivers %}<span class="badge warn">{{ inputs.lint_waivers | length }} active</span> These blocking lint findings are waived for this profile version:
+      <ul class="plain">{% for w in inputs.lint_waivers %}<li><span class="mono">{{ w.rule }}</span> on <span class="mono">{{ w.path_glob }}</span> <span class="muted">waiver {{ w.id }}</span></li>{% endfor %}</ul>
+      {% else %}none{% endif %}</dd>
     <dt>Old VM (blue)</dt><dd class="mono">{{ inputs.blue.name }} · {{ inputs.blue.server_id }}</dd>
     <dt>Floating IP</dt><dd class="mono">{{ inputs.floating_ip.address }} · {{ inputs.floating_ip.id }}</dd>
     <dt>Data volume</dt><dd>
