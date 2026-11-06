@@ -92,6 +92,8 @@ smoke:  ## Assertions on a running stack (`make up` first); used by CI
 		docker compose run --rm --no-deps --entrypoint id api ovlm-ansible | grep -q 'uid=10002'; \
 	echo "== worker image: has ssh, ssh-keyscan, git; ansible --version runs as ovlm-ansible; worker holds only setuid/setgid/kill"; \
 	docker compose exec -T worker /usr/local/bin/ovlm-worker-entrypoint -- python - < tests/smoke/worker_checks.py; \
+	echo "== worker: no process runs as root or holds DAC_READ_SEARCH after start-up; PID 1 is tini as ovlm (CS-6)"; \
+	docker compose exec -T -u ovlm worker python - < tests/smoke/worker_root_checks.py; \
 	echo "== api image: no ansible, ssh or git"; \
 	docker compose exec -T api python - < tests/smoke/api_checks.py; \
 	echo "== secret isolation: api/worker never see the owner secret"; \
