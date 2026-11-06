@@ -410,3 +410,22 @@ def test_sfr3_revalidation_refuses_a_waiver_granter_in_the_requester_set(world: 
     res = _g1(w)
     assert not res.ok and "2:requester_set" in res.evidence["failures"]
     assert res.evidence["requester_set"]["lint_waiver_granters"] == [w.users["ap2"]]
+
+
+def test_sfr7_the_approval_stores_who_granted_each_waiver_when_and_why(world: World) -> None:
+    """Review SFR-7: ``approval.hash_inputs.lint_waivers`` carries the granter's name, the time and the reason for the
+    approval page; the plan hash still binds only id, rule, glob and granter."""
+    w = world
+    granted = _grant(w, "ap")
+    _replan(w)
+    approval = _request(w, "op")
+    [shown] = w.q("SELECT hash_inputs FROM approval WHERE id = :i", i=approval["id"])[0][
+        "hash_inputs"
+    ]["lint_waivers"]
+    assert shown["id"] == granted["id"] and shown["granted_by"] == w.users["ap"]
+    assert (shown["granted_by_name"], shown["reason"]) == ("user-ap", REASON)
+    assert shown["granted_at"] == granted["granted_at"] and shown["profile_version"] == 1
+    with w.worker.connect() as c:
+        assert list(load_facts(c, w.ids["plan"]).lint_waivers) == [
+            {k: granted[k] for k in ("id", "rule", "path_glob", "granted_by")}
+        ]

@@ -27,7 +27,7 @@ from ovlm.auth.principal import Principal
 from ovlm.auth.sod import Gate, account_provenance, check_approval_eligibility
 from ovlm.auth.stepup import consume_stepup
 from ovlm.policies.service import effective_policy
-from ovlm.profiles.waivers import active_waivers, hash_binding
+from ovlm.profiles.waivers import active_waivers, for_display, hash_binding
 from ovlm.registry.errors import DomainError
 from ovlm.renewal.config import RenewalConfig
 from ovlm.renewal.evidence import APPROVAL_STEPUP_ACTION, CUTOVER_STEPUP_ACTION
@@ -234,7 +234,9 @@ def request_approval(
                  "h": facts.recomputed_hash, "u": who.user_id,
                  "hi": json.dumps({"resolved": facts.resolved, "policy": facts.policy,
                                    "automation_diff": facts.plan.get("automation_diff"),
-                                   "lint_waivers": list(facts.lint_waivers)}, default=str),
+                                   "lint_waivers": for_display(
+                                       active_waivers(s.connection(), facts.plan["profile_version_id"]),
+                                       facts.lint_waivers)}, default=str),
                  "rs": "{" + ",".join(str(u) for u in rs.members()) + "}"},
             )  # fmt: skip
     except Exception:  # unique index: one open request per subject

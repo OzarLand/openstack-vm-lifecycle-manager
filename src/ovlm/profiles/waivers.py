@@ -25,6 +25,7 @@ names are repeated here, and a unit test checks them against the lint.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -343,6 +344,22 @@ def verify_active_waivers(
             session, records, scope=scope, author=version_author(conn, profile_version_id),
             requesters=plan_requesters(conn, UUID(str(profile_version_id))),
         )  # fmt: skip
+
+
+_SHOWN = ("id", "rule", "path_glob", "granted_by", "granted_by_name", "granted_at", "reason", "profile_id",
+          "profile_version")  # fmt: skip
+
+
+def for_display(
+    waivers: list[dict[str, Any]], bound: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """What the approval page shows of each waiver the plan hash binds (review SFR-7): the bound fields plus who
+    granted it, when and why. Display data only, stored in ``approval.hash_inputs``; the hash binds
+    :func:`hash_binding` alone."""
+    by_id = {w["id"]: w for w in waivers}
+    return [
+        {k: by_id[b["id"]].get(k) for k in _SHOWN} if b["id"] in by_id else dict(b) for b in bound
+    ]
 
 
 def hash_binding(waivers: list[dict[str, Any]]) -> list[dict[str, str]]:

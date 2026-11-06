@@ -16,7 +16,11 @@
       {% else %}<br><span class="muted">File-level diff: not available in this release. Compare the two commits in the repository before you approve.</span>{% endif %}
     </dd>
     <dt>Lint waivers</dt><dd>{% if inputs.lint_waivers %}<span class="badge warn">{{ inputs.lint_waivers | length }} active</span> These blocking lint findings are waived for this profile version:
-      <ul class="plain">{% for w in inputs.lint_waivers %}<li><span class="mono">{{ w.rule }}</span> on <span class="mono">{{ w.path_glob }}</span> <span class="muted">waiver {{ w.id }}</span></li>{% endfor %}</ul>
+      <ul class="plain">{% for w in inputs.lint_waivers %}<li><span class="mono">{{ w.rule }}</span> on <span class="mono">{{ w.path_glob }}</span>,
+        granted by <strong>{{ w.granted_by_name or w.granted_by }}</strong>{% if w.granted_at %} at <span class="mono">{{ w.granted_at }}</span>{% endif %}
+        {% if w.reason %}<br><span class="muted">Reason:</span> {{ w.reason }}{% endif %}
+        <br><span class="muted">waiver {{ w.id }}</span></li>{% endfor %}</ul>
+      {% set first = inputs.lint_waivers[0] %}{% if first.profile_id %}<a href="/api/v1/profiles/{{ first.profile_id }}/versions/{{ first.profile_version }}/lint-waivers?include_revoked=true">Every waiver of this profile version, revoked ones included</a>{% endif %}
       {% else %}none{% endif %}</dd>
     <dt>Old VM (blue)</dt><dd class="mono">{{ inputs.blue.name }} · {{ inputs.blue.server_id }}</dd>
     <dt>Floating IP</dt><dd class="mono">{{ inputs.floating_ip.address }} · {{ inputs.floating_ip.id }}</dd>
