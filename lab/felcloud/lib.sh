@@ -140,6 +140,10 @@ redact() {
     my $protect = sub { my ($v) = @_; push @store, $v; return "\x01" . $#store . "\x01"; };
     if (length $ENV{OVLM_LAB_TARGET_FLAVOR}) { s/\Q$ENV{OVLM_LAB_TARGET_FLAVOR}\E/$protect->($&)/ge; }
     s/\b(?:ovlm|sqlalchemy|uvicorn|asyncio|alembic|ansible|openstack|psycopg|starlette|fastapi)(?:\.[A-Za-z_][A-Za-z0-9_-]*)+/$protect->($&)/ge;
+    # OVLM audit action names (approval.decide, run.retry_step.request, ...) are dotted like host names: keep them
+    # where they are an "action" value (lab bug Q). Only that JSON field, so a real host name elsewhere is still
+    # redacted.
+    s/("action"\s*:\s*")([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)(")/$1 . $protect->($2) . $3/ge;
     s/-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----/<private-key>/gs;
     s/\bssh-(?:ed25519|rsa|dss)\s+[A-Za-z0-9+\/=]{20,}(?:\s+\S+)?/<ssh-public-key>/g;
     s/\becdsa-sha2-\S+\s+[A-Za-z0-9+\/=]{20,}(?:\s+\S+)?/<ssh-public-key>/g;
