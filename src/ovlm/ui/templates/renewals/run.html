@@ -3,6 +3,7 @@
 {% block content %}
 <p class="crumbs"><a href="/renewals">Renewals</a> › <a href="/renewals/plans/{{ plan_id }}">Plan</a> › Run <span class="mono">{{ run.id | short_id }}</span></p>
 <h1>Renewal run <span class="mono">{{ run.id | short_id }}</span></h1>
+<p><a href="/audit?run={{ run.id }}">Audit trail of this run</a></p>
 {% if notice %}<p role="status" class="banner ok">{{ notice }}</p>{% endif %}
 {% if error %}<p role="alert" class="banner error"><strong>{{ error.title }}.</strong> {{ error.detail }}{% if error.next_action %} <em>{{ error.next_action }}</em>{% endif %}</p>{% endif %}
 

@@ -25,6 +25,7 @@ from ovlm.registry import service as registry
 from ovlm.registry.errors import DomainError
 from ovlm.ui.readiness_view import readiness_context
 from ovlm.ui.routes_account import router as account_router
+from ovlm.ui.routes_audit import router as audit_router
 from ovlm.ui.routes_readiness import router as readiness_router
 from ovlm.ui.routes_renewal import router as renewal_router
 from ovlm.ui.support import UiRoute, error_page, render
@@ -33,6 +34,7 @@ router = APIRouter(route_class=UiRoute, include_in_schema=False)
 router.include_router(
     account_router
 )  # step-up page; one include_router line in api/app.py serves the whole UI
+router.include_router(audit_router)  # GET /audit (E6-4)
 router.include_router(readiness_router)  # POST /inventory/servers/{id}/assess
 router.include_router(
     renewal_router
@@ -379,14 +381,3 @@ def services_create(
             notice=None, form=form, form_error=f"{exc.title}: {exc.detail}", **_services_context(db, None, None),
         )  # fmt: skip
     return RedirectResponse("/services?notice=service-created", status_code=303)
-
-
-# --- pages that arrive with later tasks -----------------------------------------------------------------------------
-
-
-@router.get("/audit", response_class=HTMLResponse)
-def audit_view(request: Request, who: Principal = VIEWER) -> HTMLResponse:
-    return render(
-        request, "placeholder.html", active="audit", title="Audit",
-        detail="The audit view arrives with backlog E6-4. Audit records are already written for every change.",
-    )  # fmt: skip

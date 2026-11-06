@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ovlm import __version__
 from ovlm.api.health import DbReadinessProbe, ReadinessProbe
+from ovlm.api.routes_audit import router as audit_router
 from ovlm.api.routes_auth import router as auth_router
 from ovlm.api.routes_automation import router as automation_router
 from ovlm.api.routes_inventory import router as inventory_router
@@ -144,4 +145,5 @@ def create_app(
     app.include_router(policies_router)
     app.include_router(automation_router)
     app.include_router(connections_router)
+    app.include_router(audit_router)
     return app
