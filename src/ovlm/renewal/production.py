@@ -56,7 +56,9 @@ from typing import Any, Protocol, cast
 
 import yaml
 from sqlalchemy import Engine, text
+from sqlalchemy.orm import Session
 
+from ovlm.automation.audit import waiver_audit_hook
 from ovlm.automation.hostkeys import (
     HostKeyPolicy,
     PublicKey,
@@ -66,6 +68,7 @@ from ovlm.automation.hostkeys import (
     validate_host,
     validate_port,
 )
+from ovlm.automation.lint import Finding, StaticWaivers, Waiver
 from ovlm.automation.model import (
     AutomationSpec,
     DataVolume,
@@ -78,6 +81,7 @@ from ovlm.automation.types import AutomationError, Classification, Phase, Secret
 from ovlm.openstack.ownership import OwnershipRegistry
 from ovlm.openstack.sdk_write import WriteCredential
 from ovlm.openstack.write import GuardedWriteClient
+from ovlm.profiles.waivers import active_waivers
 from ovlm.renewal.ledger import plan_resolved
 from ovlm.renewal.ports import (
     Bootstrap,
@@ -489,9 +493,14 @@ def identify(answer: HttpAnswer, candidates: Mapping[str, str | None]) -> str | 
 
 
 class RunnerLike(Protocol):
-    def prepare_automation(self, spec: AutomationSpec, workflow_id: str) -> PreparedAutomation: ...
+    def prepare_automation(
+        self, spec: AutomationSpec, workflow_id: str, *, waivers: StaticWaivers | None = None,
+        on_waiver: Callable[[Finding, Waiver], None] | None = None,
+    ) -> PreparedAutomation: ...  # fmt: skip
 
-    def adopt_checkout(self, spec: AutomationSpec, workflow_id: str) -> PreparedAutomation | None:
+    def adopt_checkout(
+        self, spec: AutomationSpec, workflow_id: str, *, waivers: StaticWaivers | None = None
+    ) -> PreparedAutomation | None:
         """The run-level checkout B6 left on disk (``automation.run_root``, tmpfs: it survives a worker *process*
         restart, not a container restart), re-verified locally (HEAD == SHA, lint, pins); ``None`` if absent.
         Never contacts the git host."""
@@ -589,7 +598,7 @@ class RunnerGuestPort:
             return prepared
         resolved = self._resolved(run_id)
         spec = self._spec(run_id, resolved)
-        prepared = self.runner.adopt_checkout(spec, run_id)
+        prepared = self.runner.adopt_checkout(spec, run_id, waivers=self._waivers(resolved))
         if prepared is None:
             if self._in_outage(run_id):
                 raise AutomationError(
@@ -597,9 +606,41 @@ class RunnerGuestPort:
                     "the git host inside the downtime window",
                     Classification.NEEDS_HUMAN,
                 )
-            prepared = self.runner.prepare_automation(spec, run_id)
+            prepared = self._prepare_with_waivers(run_id, resolved, spec)
         with self._lock:
             self._prepared[run_id] = prepared
+        return prepared
+
+    def _waivers(self, resolved: Mapping[str, Any]) -> StaticWaivers:
+        """The active lint waivers of the plan's profile version (SF-13), as the B6 lint applies them. The plan hash
+        binds the same set, so a waiver granted or revoked after the approval has already voided it."""
+        with self.engine.connect() as c:
+            rows = active_waivers(c, resolved["profile_version"]["id"])
+        return StaticWaivers(tuple(
+            Waiver(id=w["id"], rule=w["rule"], path_glob=w["path_glob"],
+                   approver=w["granted_by_name"] or w["granted_by"], reason=w["reason"])
+            for w in rows
+        ))  # fmt: skip
+
+    def _prepare_with_waivers(
+        self, run_id: str, resolved: Mapping[str, Any], spec: AutomationSpec
+    ) -> PreparedAutomation:
+        """B6's clone and blocking lint with the version's waivers; every finding a waiver covered is audited
+        (``automation.lint_waiver.applied``) once the lint passed."""
+        applied: list[tuple[Finding, Waiver]] = []
+        prepared = self.runner.prepare_automation(
+            spec, run_id, waivers=self._waivers(resolved),
+            on_waiver=lambda finding, waiver: applied.append((finding, waiver)),
+        )  # fmt: skip
+        if applied:
+            pv = resolved["profile_version"]
+            with Session(self.engine) as s, s.begin():
+                hook = waiver_audit_hook(
+                    s, run_id=uuid.UUID(run_id), project_scope=resolved.get("scope"),
+                    profile_ref=f"{pv['id']}#{pv.get('number')}",
+                )  # fmt: skip
+                for finding, waiver in applied:
+                    hook(finding, waiver)
         return prepared
 
     def _in_outage(self, run_id: str) -> bool:
@@ -617,7 +658,7 @@ class RunnerGuestPort:
     ) -> Mapping[str, Any]:
         resolved = self._resolved(run_id)
         fence.check("automation:prepare")
-        prepared = self.runner.prepare_automation(self._spec(run_id, resolved), run_id)
+        prepared = self._prepare_with_waivers(run_id, resolved, self._spec(run_id, resolved))
         with self._lock:
             self._prepared[run_id] = prepared
         return prepared.evidence()
@@ -970,14 +1011,23 @@ class _LazyRunner:
                 self._runner = self._factory()
             return self._runner
 
-    def prepare_automation(self, spec: AutomationSpec, workflow_id: str) -> PreparedAutomation:
-        prepared: PreparedAutomation = self._get().prepare_automation(spec, workflow_id)
+    def prepare_automation(
+        self, spec: AutomationSpec, workflow_id: str, *, waivers: StaticWaivers | None = None,
+        on_waiver: Callable[[Finding, Waiver], None] | None = None,
+    ) -> PreparedAutomation:  # fmt: skip
+        prepared: PreparedAutomation = self._get().prepare_automation(
+            spec, workflow_id, waivers=waivers, on_waiver=on_waiver
+        )
         return prepared
 
-    def adopt_checkout(self, spec: AutomationSpec, workflow_id: str) -> PreparedAutomation | None:
+    def adopt_checkout(
+        self, spec: AutomationSpec, workflow_id: str, *, waivers: StaticWaivers | None = None
+    ) -> PreparedAutomation | None:
         """Local re-verification of the run's checkout with the runner's own checks (the automation module's public
         :meth:`~ovlm.automation.runner.AutomationRunner.reverify_checkout`; never contacts the git host)."""
-        prepared: PreparedAutomation | None = self._get().reverify_checkout(spec, workflow_id)
+        prepared: PreparedAutomation | None = self._get().reverify_checkout(
+            spec, workflow_id, waivers=waivers
+        )
         return prepared
 
     def run_phase(

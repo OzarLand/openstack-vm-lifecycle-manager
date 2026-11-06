@@ -155,6 +155,17 @@ Typed confirmation (TC) = FR-UI-2. ✓ = allowed, — = denied.
   the relaxation is audited and shown on every affected run. Retirement (irreversible delete) never allows
   self-approval. Single-person installs must add a second approver account to retire VMs.
 - The OVLM system principal never approves. A gate set to "no approval" by policy is an admin decision, recorded.
+- **Lint waivers** (`lint_waiver.grant`, automation-contract.md §9, SF-13): an approver in the profile's scope, in an
+  interactive session, with a TOTP step-up bound to `lint_waiver.grant` and the profile version (a password-only step-up
+  is refused), grants a waiver of one blocking lint rule, on the paths a glob matches, for **one** profile version, with
+  a reason. Never the version's author nor a requester of a plan on that version (plan creator, approval requester, run
+  starter), **whatever `allow_operator_approver` says**; an operator+approver holder only when the setting allows it
+  (recorded `operator_and_approver`). The data-safety rules (`formatting`, `quiesce_state`, `ssh_override`,
+  `hosts_pattern`) and `parse_error` are never waivable (CHECK constraint). Waivers are append-only rows; revoking one
+  takes an approver and a TOTP step-up bound to the waiver. The plan hash binds the active waivers, so granting or
+  revoking one voids approvals bound to the old hash; the approval page lists them. B6 lints with exactly that set and
+  audits every finding a waiver covered (`automation.lint_waiver.applied`). Refusals are audited
+  (`lint_waiver.grant.refused`).
 
 ### 3.3 Project scoping — recommended for MVP
 Role bindings are `(user, role, scope)` with `scope = global | project:<id>`. MVP enforces scope on every query and
@@ -234,7 +245,8 @@ The ownership guard and the allowlist are independent: a call must pass both.
 ### 4.4 Application credentials and access rules
 - Use Keystone **application credentials**, one per project and purpose, owned by a dedicated Keystone service user
   created by the cloud admin (not a human's account). `unrestricted` must be false (then it cannot create other app
-  credentials or trusts — OSI §8, SV); roles limited to `reader` or `member` (subset of user roles, one project, SV);
+  credentials or trusts — OSI §8, SV); the worker reads it from Keystone's own record of the application credential
+  and refuses the credential when that record does not carry a boolean `unrestricted` (fail closed, review N-2, SF-3); roles limited to `reader` or `member` (subset of user roles, one project, SV);
   `expires_at` mandatory, ≤ 180 days. OVLM rejects a credential whose token shows other roles (it checks the token's
   role list at validation; ASSUMPTION: the SDK exposes it via `get_access()`).
 - Rotation (admin, audited) is **out of band**: the cloud admin creates the new app credential in Keystone; OVLM only
@@ -260,11 +272,12 @@ TLS verification to OpenStack is always on; a custom CA bundle is configurable; 
 | Secrets stored | OpenStack app credential secret, SSH private keys, vault passwords, other per-profile secrets. Public keys and fingerprints are not secret. |
 | Data key | Random 256-bit DEK per secret; AES-256-GCM; AAD = `table|row_id|column|kek_id` (ciphertext cannot be swapped between rows). |
 | Key wrapping | DEK wrapped with the **worker key pair** (X25519 sealed box or RSA-OAEP-3072). Public key in the DB/api config; private key (the KEK) in a file. |
-| KEK location | Docker secret / file mode 0400 owned by the worker user, mounted **only into the worker** container. Never an env var (leaks via `/proc`, `docker inspect`, child processes). |
+| KEK location | Docker secret / file mode 0400 owned by the worker user, mounted **only into the worker** container. Never an env var (leaks via `/proc`, `docker inspect`, child processes). In the Compose stack the secret keeps its host owner, so the worker's launcher reads it once as root with `CAP_DAC_READ_SEARCH` and copies it, as uid `ovlm`, into a 0700 tmpfs; it then drops to `ovlm` with only `CAP_SETUID/SETGID/KILL` and execs tini as PID 1. There is no `init: true` (whose docker-init stayed root with every capability): **no process runs as root and none holds `DAC_READ_SEARCH` after start-up**, which `make smoke` checks; the healthcheck drops to `ovlm` before running. Enter the container with `docker compose exec -u ovlm worker …`: a plain `exec` starts as root with the container's capabilities (review CS-6, SF-1). |
 | Write path | Admin submits secret over TLS → api seals it with the public key → stores ciphertext. api cannot decrypt. |
 | Read path | Worker unwraps in memory for one step; never written to disk except the run-dir files of automation-contract §5. |
-| Rotation (KEK) | Admin adds new key pair with new `kek_id` → worker job re-wraps all DEKs (secrets themselves unchanged) → old private key removed after a verified pass. Audited. Secret rotation (e.g. app credential) is separate (§4.4). |
-| Backup | DB backups contain ciphertext only; the KEK is backed up separately (offline, two custodians). Restore test must cover both (NFR-7). |
+| Rotation (KEK) | Admin adds new key pair with new `kek_id` → worker job re-wraps all DEKs (secrets themselves unchanged) → old private key removed after a verified pass (`ovlm kek status` exits 0). Audited. Secrets in the retired format `ovlm-env-v1` (rejected credentials kept as metadata) are never decrypted, so they are neither re-wrapped nor counted as "in use": they cannot keep an old key alive (review N-3, SF-4; `kek status` reports their count). Secret rotation (e.g. app credential) is separate (§4.4). |
+| Endpoint change | A secret is bound (AAD) to the cloud endpoint it was uploaded for; a changed `auth_url`, region, interface or CA bundle makes it fail closed. A change through the API asks for re-validation; a **direct** write of the `cloud` row (any role) does too, through a statement trigger that bumps `validation_requested_at` of the cloud's pending and active credentials, so the next validation pass records them invalid at once instead of up to the periodic re-validation interval later (review N-4, SF-5, migration `connections_0003`). |
+| Backup | DB backups contain ciphertext only; the KEK is backed up separately (offline, two custodians). The TOTP key (`auth.totp_key_file`, api only) is backed up **with** the KEK: losing it locks every admin and approver out of TOTP. Both files are 0400 on a real installation (install-guide.md §3a; review IS-7, SF-10). Restore test must cover both (NFR-7). |
 
 Later: Vault or Barbican behind a pluggable `SecretStore` (get/put/rotate by reference), designed now.
 **Process separation.** api: no KEK, no OpenStack calls (on-demand sync and "test credential" are worker jobs). worker: KEK, outbound to
@@ -349,6 +362,12 @@ The role cannot switch these off: `TRUNCATE` (which would skip the row trigger),
 `ovlm_api` (tested, as for the credential store in reviews/verification-credential-store-fixes.md). Residual: a
 compromised api can still confirm a **scanned** key in the name of a real active operator (it holds the column grant
 by design); the out-of-band comparison and the audit row are the controls (review IS-2).
+
+**The confirm form** (review IS-2, SF-10). The VM details page never shows or prefills the scanned fingerprint before
+it is confirmed: the operator pastes the fingerprint read **on the VM** (its console, or `ssh-keygen -lf` there) and
+says which source it came from; OVLM compares it with the scan and refuses a mismatch (409). The audit row
+`managed_vm.host_key_confirm` records the source (`console`, `ssh-keygen`) and `via: ui` (the API accepts the same
+optional `source`). No TOTP step-up is required for this confirmation (accepted for the lab, review IS-2).
 
 **Which address is scanned** (review IS-3). The scan and the renewal use one rule (`src/ovlm/registry/ssh_target.py`):
 `fixed_ips[0]` of the port the **service floating IP** is attached to. The scan finds that floating IP in the latest
@@ -467,3 +486,5 @@ destructive action needs a named human owner (OzarLand rule 6). Audit records `p
 29. W1 refuses blue before the outage when the live row's key is unconfirmed, differs from the plan's, or was confirmed by a disabled or unknown user (`tests/integration/renewal/test_blue_host_key_live_check.py`).
 30. The host-key scan targets `fixed_ips[0]` of the service floating IP's port, as the renewal does, and records the port id (`tests/integration/test_host_key_scan.py::test_is3_*`).
 31. Viewers see only reason codes for failed syncs (no Keystone URL, status line or exception text, also for records written before the codes); a client set-up error is a recorded failure (`tests/integration/test_inventory_sync_job.py`).
+32. No process in the worker container runs as uid 0 or holds `DAC_READ_SEARCH` after start-up, and PID 1 is tini as `ovlm` (`make smoke`, `tests/smoke/worker_root_checks.py`; the entrypoint is unit tested in `tests/unit/test_worker_container.py`).
+33. A lint waiver needs an approver in scope with a TOTP step-up; the version's author, a plan requester on that version, an operator, a viewer and an API token are refused; the data-safety rules cannot be waived by any role; the plan hash binds the active waivers and B6 applies exactly them (`tests/integration/test_lint_waivers_api.py`, `tests/integration/renewal/test_lint_waivers.py`).

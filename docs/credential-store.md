@@ -123,7 +123,10 @@ Monitoring (worker metrics port): `ovlm_credentials_expiring{within="30d"|"7d"|"
    `0` only when every secret in use is wrapped to the current key; `3` while some are still wrapped to a previous
    key (re-wrap not finished: keep it); `2` while some are wrapped to a key the worker does not hold. Orphan sealed
    secrets (left by a database actor) are deleted by the validation job after 10 minutes, audited as
-   `kek.orphans_deleted`.
+   `kek.orphans_deleted`. Secrets in the retired format `ovlm-env-v1` (credentials rejected by migration
+   `connections_0002`) are never decrypted, so they are not counted per key and not re-wrapped: they do not keep the
+   old key "in use" (review N-3). `kek status` prints their count; delete those credentials when convenient.
+   Run it as the worker user: `docker compose exec -u ovlm worker ovlm kek status`.
 5. Remove the old private key from the worker configuration and destroy it (and its offline backup) after the
    verified pass.
 
@@ -146,7 +149,8 @@ plain column.
   endpoint, moving a connection to another cloud, or deleting and re-inserting a credential under another connection
   yields secrets that do not decrypt. What it still can do is deny service: redirecting a cloud invalidates its
   credentials until they are uploaded again (the change is visible in `credential.validate` audit rows and the
-  `ovlm_credentials_failing_validation` metric).
+  `ovlm_credentials_failing_validation` metric). A direct write of the `cloud` row, bypassing the API, raises the same
+  signal at once: a statement trigger requests re-validation of the cloud's credentials (review N-4, `connections_0003`).
 * The database owner role (migrations) can disable triggers; it is not used by any running process.
 * Keystone's record of the application credential is read with the credential's own token (default policy: the
   owner may read its application credentials). If a cloud's policy forbids it, every validation fails with

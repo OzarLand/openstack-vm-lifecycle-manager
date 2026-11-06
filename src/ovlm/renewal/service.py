@@ -26,6 +26,7 @@ from ovlm.auth.principal import Principal
 from ovlm.auth.sod import Gate, account_provenance, check_approval_eligibility
 from ovlm.auth.stepup import consume_stepup
 from ovlm.policies.service import effective_policy
+from ovlm.profiles.waivers import active_waivers, hash_binding
 from ovlm.registry.errors import DomainError
 from ovlm.renewal.config import RenewalConfig
 from ovlm.renewal.evidence import APPROVAL_STEPUP_ACTION, CUTOVER_STEPUP_ACTION
@@ -172,7 +173,8 @@ def create_plan(
         text("SELECT automation_sha FROM profile_version WHERE id = :i"), {"i": pv["id"]}
     ).scalar()
     phash = compute_plan_hash(resolved=resolved, profile_version_id=pv["id"], spec_hash=pv["spec_hash"],
-                              automation_sha=sha, policy=policy_binding(prow))  # fmt: skip
+                              automation_sha=sha, policy=policy_binding(prow),
+                              lint_waivers=hash_binding(active_waivers(conn, pv["id"])))  # fmt: skip
     prev = s.execute(
         text("SELECT pl.resolved -> 'automation' ->> 'sha' FROM renewal_plan pl WHERE pl.service_id = :s "
              "AND pl.state IN ('approved', 'started') ORDER BY pl.created_at DESC LIMIT 1"),
@@ -220,7 +222,8 @@ def request_approval(
                 {"i": aid, "t": gate.value, "s": subject, "p": plan_id, "r": run_id, "scope": scope,
                  "h": facts.recomputed_hash, "u": who.user_id,
                  "hi": json.dumps({"resolved": facts.resolved, "policy": facts.policy,
-                                   "automation_diff": facts.plan.get("automation_diff")}, default=str),
+                                   "automation_diff": facts.plan.get("automation_diff"),
+                                   "lint_waivers": list(facts.lint_waivers)}, default=str),
                  "rs": "{" + ",".join(str(u) for u in rs.members()) + "}"},
             )  # fmt: skip
     except Exception:  # unique index: one open request per subject

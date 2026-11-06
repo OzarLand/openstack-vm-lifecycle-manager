@@ -89,11 +89,13 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
 # CAP_SETUID/SETGID/KILL as ambient capabilities so it can run ansible-runner as `ovlm-ansible` (automation-contract.md 11).
 FROM base AS worker
 # ssh/ssh-keyscan/ssh-keygen (host-key pinning, ansible's ssh connection) and git (the verified clone) belong to the
-# worker image ONLY: the api image gets neither (checked by `make smoke`). Pinned to the Debian release's upstream
+# worker image ONLY: the api image gets neither (checked by `make smoke`). tini is the worker's init (see below). Pinned to the Debian release's upstream
 # series (bookworm: openssh 9.2, git 2.39), not to the -deb12uN revision: that one disappears from the archive with
 # every security update and would break rebuilds. The base image digest above fixes the rest of the OS.
 ARG OPENSSH_CLIENT_VERSION=1:9.2p1-*
 ARG GIT_VERSION=1:2.39.*
+# tini: the worker's init, started by the entrypoint only after it dropped to uid ovlm (review CS-6, no root PID 1).
+ARG TINI_VERSION=0.19.*
 # apt over HTTPS by default: a build behind an HTTPS-only egress proxy (CONNECT 443; plain HTTP refused) works without a
 # hand-built base image. The proxy itself comes from the usual HTTPS_PROXY/https_proxy build args (compose.yaml passes
 # them from .env); a TLS-intercepting proxy's CA goes in the optional `pip_ca` build secret, as for pip. Set
@@ -109,7 +111,8 @@ RUN --mount=type=secret,id=pip_ca,required=false \
     if [ -s /run/secrets/pip_ca ]; then apt_opts="-o Acquire::https::CaInfo=/run/secrets/pip_ca"; fi; \
     apt-get $apt_opts update \
  && DEBIAN_FRONTEND=noninteractive apt-get $apt_opts install -y --no-install-recommends \
-      "openssh-client=${OPENSSH_CLIENT_VERSION}" "git=${GIT_VERSION}" \
+      "openssh-client=${OPENSSH_CLIENT_VERSION}" "git=${GIT_VERSION}" "tini=${TINI_VERSION}" \
+ && test -x /usr/bin/tini \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=venv-worker /opt/venv /opt/venv
 COPY --from=collections /opt/ovlm/collections /opt/ovlm/collections

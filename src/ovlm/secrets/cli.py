@@ -54,7 +54,7 @@ def _status(_: argparse.Namespace) -> int:
     from ovlm.config import Settings
     from ovlm.db.engine import make_engine
     from ovlm.secrets.keyring import load_keyring
-    from ovlm.secrets.store import kek_usage, orphan_count
+    from ovlm.secrets.store import kek_usage, legacy_count, orphan_count
 
     settings = Settings(process_role="worker")
     if settings.kek.private_key_file is None:
@@ -69,6 +69,7 @@ def _status(_: argparse.Namespace) -> int:
     with engine.connect() as c:
         usage = kek_usage(c)
         orphans = orphan_count(c)
+        legacy = legacy_count(c)
     sys.stdout.write(f"current kek_id {ring.current_kek_id}; held {sorted(ring.kek_ids)}\n")
     for kid, n in sorted(usage.items()):
         held = (
@@ -78,6 +79,9 @@ def _status(_: argparse.Namespace) -> int:
         )
         sys.stdout.write(f"{kid}\t{n}\t{held}\n")
     sys.stdout.write(f"orphan sealed secrets (deleted by the validation job): {orphans}\n")
+    sys.stdout.write(
+        f"retired-format (ovlm-env-v1) secrets, never usable, not counted above: {legacy}\n"
+    )
     return kek_status_code(usage, ring.current_kek_id, ring.kek_ids)
 
 

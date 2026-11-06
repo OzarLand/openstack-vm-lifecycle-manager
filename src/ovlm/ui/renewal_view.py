@@ -520,6 +520,7 @@ def hash_inputs(approval: Mapping[str, Any]) -> dict[str, Any]:
         "data_volume": res.get("data_volume"),
         "service": res.get("service") or {},
         "policy": policy,
+        "lint_waivers": hi.get("lint_waivers") or [],
     }  # fmt: skip
 
 

@@ -16,7 +16,9 @@ audit.register_entity("auth", ["kind", "reason", "second_factor"])
 audit.register_entity("user", ["username", "display_name", "state", "created_via", "roles"])
 audit.register_entity("role_binding", ["user_id", "role", "scope"])
 audit.register_entity("api_token", ["name", "scopes", "project_scope", "expires_at", "owner_id"])
-audit.register_entity("enrolment_link", ["purpose", "user_id", "expires_at", "revoked_links"])
+audit.register_entity(
+    "enrolment_link", ["purpose", "user_id", "expires_at", "revoked_links", "os_user", "hostname"]
+)
 audit.register_entity("totp", ["state"])
 audit.register_entity("stepup", ["action", "target_id", "expires_at"])
 audit.register_entity("session", ["auth_method", "reason"])

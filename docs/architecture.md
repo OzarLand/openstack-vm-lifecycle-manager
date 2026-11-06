@@ -189,7 +189,7 @@ a file key. EXP-01/EXP-01b lab times (renewal-workflow.md §10) are documentatio
 | `postgres` | `postgres:<major>` pinned by digest | volume `pgdata`; not published |
 | `migrate` | `ovlm:<version>` | `depends_on: postgres healthy`; exits 0 |
 | `api` | `ovlm:<version>` | `depends_on: migrate completed`; port bound to `127.0.0.1` or the proxy network; read-only rootfs |
-| `worker` | `ovlm:<version>` | KEK as Docker secret; `tmpfs` for `automation.run_root`; egress allowlist: OpenStack endpoints, guests or jump host, allowlisted git hosts (no Galaxy: collections vendored in the repo at the SHA or shipped in the image, SEC-R-12); `init: true` (minimal init) |
+| `worker` | `ovlm:<version>` | KEK as Docker secret; `tmpfs` for `automation.run_root`; egress allowlist: OpenStack endpoints, guests or jump host, allowlisted git hosts (no Galaxy: collections vendored in the repo at the SHA or shipped in the image, SEC-R-12); tini as PID 1, started by the entrypoint after it dropped to uid `ovlm` (no `init: true`, no root process after start-up; review CS-6) |
 
 TLS termination by an operator-provided reverse proxy (security-model.md §9). Backups: `pg_dump` (or base backup) plus
 the KEK backed up separately; documented restore test (NFR-7). Lab (ADR-0001): Compose runs on the quick-lab VM so the

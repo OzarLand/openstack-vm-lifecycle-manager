@@ -36,10 +36,20 @@ from ovlm.workflow.requests import request_run
 KIND = STRATEGY = "host_key_scan"
 STRATEGY_VERSION = "1"
 _TERMINAL = ("rejected", "cancelled", "failed", "completed", "rolled_back")
-# Scans (worker) and confirmations (api) are audited by fingerprint and address only.
+# Scans (worker) and confirmations (api) are audited by fingerprint and address only; a confirmation also records
+# where the operator read the fingerprint (``source``: console or ssh-keygen) and whether it came from the UI.
 audit.register_entity(
     "managed_vm_host_key",
-    ["managed_vm_id", "fingerprint", "key_type", "address", "port_id", "floating_ip_id"],
+    [
+        "managed_vm_id",
+        "fingerprint",
+        "key_type",
+        "address",
+        "port_id",
+        "floating_ip_id",
+        "source",
+        "via",
+    ],
 )
 
 #: OpenSSH's SHA-256 fingerprint form: ``SHA256:`` + 43 characters of unpadded base64.

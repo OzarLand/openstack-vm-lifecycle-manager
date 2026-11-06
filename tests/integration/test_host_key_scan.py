@@ -20,6 +20,7 @@ from ovlm.workflow.registry import Registry
 from tests.integration.auth_support import env as auth_env  # noqa: F401
 from tests.integration.test_auth_authz import bearer, mint_token
 from tests.integration.test_registry_api import Env, env  # noqa: F401
+from tests.integration.test_ui_pages import form_post, page
 from tests.integration.workflow.conftest import TEST_CONFIG
 
 
@@ -303,3 +304,46 @@ def test_is3_the_scan_uses_fixed_ips_0_not_the_first_ipv4(env: Env) -> None:
     assert guest.scanned == [("2001:db8::5", 22)]  # what the renewal's blue_ref uses: fixed_ips[0]
     ev = _scan_evidence(env, vm["host_key_scan_run"]["id"]).evidence
     assert ev["port_id"] == pid and ev["target_source"] == "only_fip_port"
+
+
+def test_ui_confirm_makes_the_operator_paste_the_fingerprint(env: Env) -> None:
+    """Review IS-2 (SF-10): the confirm form never shows or prefills the scanned fingerprint. The operator pastes the
+    one read on the VM and says where; a mismatch is refused, the source is audited, and a viewer cannot confirm."""
+    guest = Guest()
+    ed, other = _key(), _key()
+    guest.keys["10.0.0.5"] = [ed]
+    vm = _register(env)
+    _drive(env, guest)
+    op, viewer = env.users["operator"], env.users["viewer"]
+    server = env.observed_id(env.ids["blue"])
+    detail = page(op, f"/inventory/servers/{server}")
+    assert detail.status_code == 200 and "Confirm the SSH host key" in detail.text
+    assert ed.fingerprint not in detail.text  # neither shown nor prefilled while unconfirmed
+    [field] = [line for line in detail.text.splitlines() if 'name="fingerprint"' in line]
+    assert "value=" not in field
+    assert "Confirm the SSH host key" not in page(viewer, f"/inventory/servers/{server}").text
+
+    url = f"/inventory/servers/{server}/host-key/confirm"
+    assert (
+        form_post(viewer, url, {"fingerprint": ed.fingerprint, "source": "console"}).status_code
+        == 403
+    )
+    no_source = form_post(op, url, {"fingerprint": ed.fingerprint})
+    assert no_source.status_code == 422 and "never copied from OVLM" in no_source.text
+    wrong = form_post(op, url, {"fingerprint": other.fingerprint, "source": "console"})
+    assert wrong.status_code == 409 and "does not match" in wrong.text
+    assert ed.fingerprint not in wrong.text
+    assert env.client.get(f"/api/v1/managed-vms/{vm['id']}").json()["host_key_confirmed_at"] is None
+
+    done = form_post(op, url, {"fingerprint": f"  {ed.fingerprint} ", "source": "ssh-keygen"})
+    assert done.status_code == 303 and done.headers["location"].endswith(
+        "notice=host-key-confirmed"
+    )
+    after = page(op, done.headers["location"])
+    assert ed.fingerprint in after.text and "Confirm the SSH host key" not in after.text
+    [row] = env.auth.sql(
+        "SELECT actor_id, project_scope, after FROM audit_event WHERE action = 'managed_vm.host_key_confirm'"
+    )
+    assert str(row.actor_id) == str(env.operator_id) and row.project_scope
+    assert row.after["source"] == "ssh-keygen" and row.after["via"] == "ui"
+    assert row.after["fingerprint"] == ed.fingerprint

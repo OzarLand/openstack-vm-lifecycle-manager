@@ -159,6 +159,37 @@ def test_cs1_api_role_redirecting_the_cloud_gets_nothing(spy: Spy) -> None:
     assert spy.leaked() == []
 
 
+def test_sf5_direct_endpoint_rewrite_requests_revalidation_at_once(spy: Spy) -> None:
+    """Review N-4 (SF-5): a direct write of the cloud's endpoint (no API, so no ``invalidate_cloud_credentials``) is
+    signalled by a statement trigger: the credentials are due for validation at once, and the next validation pass
+    records them invalid without decrypting or sending anything. A change of a non-endpoint column signals nothing."""
+    pc = spy.connection()
+    _ready(spy, pc)
+    due = (
+        "SELECT count(*) AS n FROM credential_ref WHERE validation_requested_at > last_validated_at"
+    )
+    api = spy.env.role_engine("ovlm_api", API_PW)
+    try:
+        with api.begin() as c:  # not an endpoint column
+            c.execute(text("UPDATE cloud SET version = version + 1, updated_at = now()"))
+        assert spy.env.sql(due)[0].n == 0
+        assert spy.validator.run_once() == {}
+        with api.begin() as c:
+            c.execute(text("UPDATE cloud SET region = 'R2'"))
+    finally:
+        api.dispose()
+    assert spy.env.sql(due)[0].n == 2
+    spy.sent.clear()
+    assert spy.validator.run_once() == {"active": 2}  # stays active, recorded invalid
+    assert spy.sent == []
+    creds = spy.admin.get(f"/api/v1/project-connections/{pc}/credentials").json()["items"]
+    assert {c["validation"]["state"] for c in creds} == {"invalid"}
+    assert all("endpoint" in c["validation"]["reason"] for c in creds)
+    # the owner role (or any other) is signalled too: the trigger does not depend on who writes
+    spy.env.sql("UPDATE cloud SET region = 'R1'")
+    assert spy.env.sql(due)[0].n == 2
+
+
 def test_cs1_guest_access_change_needs_stepup(spy: Spy) -> None:
     pc = spy.connection()
     got = spy.admin.get(f"/api/v1/project-connections/{pc}").json()
@@ -289,7 +320,7 @@ def test_cs3_keystone_expiry_is_stored_and_enforced(spy: Spy) -> None:
     assert w["expires_in_days"] in (29, 30) and w["validation"]["state"] == "valid"
     # a never-expiring credential is rejected whatever the form said
     spy.facts[APP_R] = TokenFacts(PROJECT, ("reader",), "svc-user", APP_R, True, None, record_status=200,
-                                  record_expires_at=None)  # fmt: skip
+                                  record_unrestricted=False, record_expires_at=None)  # fmt: skip
     rid = spy.upload(pc, "os_read", "read-secret", APP_R).json()["id"]
     assert spy.validator.run_once() == {"rejected": 1}
     got = spy.admin.get(f"/api/v1/credentials/{rid}").json()

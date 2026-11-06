@@ -2,7 +2,8 @@
 
 The plan hash (security-model.md 7.1) is SHA-256 over canonical JSON of: the ``resolved`` document, the profile
 version id and ``spec_hash``, the automation SHA, the target ids, and the **policy version with every field the
-renewal acts on**. The worker never trusts ``renewal_plan.plan_hash``: :func:`load_facts` recomputes it from the
+renewal acts on**, and the active lint waivers of the profile version (SF-13; only when there are some, so a plan
+without waivers keeps the hash it always had). The worker never trusts ``renewal_plan.plan_hash``: :func:`load_facts` recomputes it from the
 live ``profile_version`` and ``policy`` rows, so an edited policy (new version) or a different profile version
 makes every approval bound to the old hash invalid (renewal-workflow.md 3.1 check 1).
 
@@ -24,6 +25,7 @@ from sqlalchemy import Connection, RowMapping, text
 
 from ovlm import audit  # noqa: E402
 from ovlm.auth.sod import RequesterSet
+from ovlm.profiles.waivers import active_waivers, hash_binding
 from ovlm.registry.errors import DomainError
 from ovlm.renewal.config import RenewalConfig
 
@@ -83,9 +85,12 @@ def compute_plan_hash(
     spec_hash: str,
     automation_sha: str | None,
     policy: Mapping[str, Any],
+    lint_waivers: list[dict[str, str]] | None = None,
 ) -> str:
+    extra: dict[str, Any] = {"lint_waivers": lint_waivers} if lint_waivers else {}
     return sha256(
         {
+            **extra,
             "strategy": f"{STRATEGY}/{STRATEGY_VERSION}",
             "resolved": resolved,
             "profile_version_id": profile_version_id,
@@ -113,6 +118,8 @@ class PlanFacts:
     recomputed_hash: str | None
     profile_author: UUID | None
     policy_editor: UUID | None
+    #: The active lint waivers of the plan's profile version, as bound into the hash (SF-13).
+    lint_waivers: tuple[dict[str, str], ...] = ()
 
     @property
     def scope(self) -> str:
@@ -157,6 +164,7 @@ def load_facts(conn: Connection, plan_id: str | UUID) -> PlanFacts:
         .first()
     )
     policy = policy_binding(pol) if pol else None
+    waivers = hash_binding(active_waivers(conn, plan["profile_version_id"]))
     recomputed = None
     if pv is not None and policy is not None:
         recomputed = compute_plan_hash(
@@ -165,6 +173,7 @@ def load_facts(conn: Connection, plan_id: str | UUID) -> PlanFacts:
             spec_hash=pv["spec_hash"],
             automation_sha=pv["automation_sha"],
             policy=policy,
+            lint_waivers=waivers,
         )
     return PlanFacts(
         plan_id=str(plan["id"]),
@@ -174,6 +183,7 @@ def load_facts(conn: Connection, plan_id: str | UUID) -> PlanFacts:
         recomputed_hash=recomputed,
         profile_author=pv["created_by"] if pv else None,
         policy_editor=pol["last_edited_by"] if pol else None,
+        lint_waivers=tuple(waivers),
     )
 
 
