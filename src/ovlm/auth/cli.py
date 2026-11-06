@@ -8,13 +8,18 @@ Every use is audited with ``principal_type=system``, ``auth_method=cli``.
 ``--reissue``: the link expired or was lost before the admin used it. Only for an existing admin who **never
 finished enrolment** (still ``pending_enrolment``: no password was ever set). Every earlier unused link of that user
 is revoked in the same transaction, so only the new link works, once; audited as ``user.enrolment_link.reissue``
-with the number of links revoked. An enrolled admin who lost their credentials is reset by another admin instead.
+with the number of links revoked, the OS user who ran the command and the host it ran on (review IS-6: whoever has a
+shell in the api container can bootstrap an admin, so the audit names who and where). An enrolled admin who lost
+their credentials is reset by another admin instead.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
+import pwd
+import socket
 import sys
 from collections.abc import Sequence
 from typing import Any
@@ -108,6 +113,20 @@ def admin_main(argv: Sequence[str]) -> int:
     return _print_link(settings, raw)
 
 
+def invoker() -> dict[str, str]:
+    """Who ran the command, and where (review IS-6). ``SUDO_USER`` first (the human behind sudo), then ``USER`` /
+    ``LOGNAME``, then the uid's passwd name (``uid:N`` without one: containers often have no matching entry). These
+    are claims of the environment the command ran in, recorded to help an investigation, not proofs of identity."""
+    name = next((os.environ[k] for k in ("SUDO_USER", "USER", "LOGNAME") if os.environ.get(k)), "")
+    if not name:
+        uid = os.getuid()
+        try:
+            name = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            name = f"uid:{uid}"
+    return {"os_user": name[:64], "hostname": socket.gethostname()[:255]}
+
+
 def _reissue(engine: Any, settings: Settings, username: str) -> str:
     with make_session_factory(engine)() as db:
         user_id, link_id, raw, revoked = users.reissue_enrolment_link(
@@ -116,7 +135,7 @@ def _reissue(engine: Any, settings: Settings, username: str) -> str:
         audit.record(
             db, action="user.enrolment_link.reissue", target_type="enrolment_link", target_id=str(link_id),
             principal_type="system", auth_method="cli",
-            after={"purpose": "enrol", "user_id": str(user_id), "revoked_links": revoked},
+            after={"purpose": "enrol", "user_id": str(user_id), "revoked_links": revoked, **invoker()},
         )  # fmt: skip
         db.commit()
     return raw

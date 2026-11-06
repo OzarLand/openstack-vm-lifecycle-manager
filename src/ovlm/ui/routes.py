@@ -16,7 +16,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from ovlm import audit
-from ovlm.auth.deps import get_db, require_role
+from ovlm.auth.authz import Action, authorize_action, project_scope_of
+from ovlm.auth.deps import get_db, require_action, require_role
 from ovlm.auth.principal import Principal
 from ovlm.inventory import service as inventory
 from ovlm.registry import host_keys
@@ -40,6 +41,12 @@ router.include_router(
 Db = Annotated[Session, Depends(get_db)]
 VIEWER = Depends(require_role("viewer"))
 OPERATOR = Depends(require_role("operator"))
+HOST_KEY_CONFIRMER = Depends(require_action(Action.HOST_KEY_CONFIRM))
+#: How the operator obtained the fingerprint they paste (review IS-2), recorded in the audit row.
+HOST_KEY_SOURCES = {
+    "console": "the VM's console (cloud-init prints the host keys)",
+    "ssh-keygen": "ssh-keygen -lf on the VM itself",
+}
 
 PAGE_SIZE = 50
 COUNT_CAP = 1000
@@ -49,6 +56,7 @@ NOTICES = {
     "registered": "The server is now a managed VM.",
     "service-created": "Service created.",
     "assessment-requested": "Readiness assessment requested. The worker will store the result.",
+    "host-key-confirmed": "SSH host key confirmed. OVLM will connect to this VM only with this key.",
 }
 
 
@@ -214,6 +222,7 @@ def _detail_context(db: Session, server_id: UUID) -> dict[str, Any] | None:
         "server": server, "managed": managed, "desired": desired, "service": service,
         "services": services, "can_register": can_register,
         "readiness": readiness_context(db, UUID(managed["id"])) if managed else None,
+        "host_key_sources": HOST_KEY_SOURCES,
     }  # fmt: skip
 
 
@@ -264,6 +273,49 @@ def register_server(
             error={"title": exc.title, "detail": exc.detail, "next_action": exc.next_action}, **ctx,
         )  # fmt: skip
     return RedirectResponse(f"/inventory/servers/{parsed}?notice=registered", status_code=303)
+
+
+@router.post("/inventory/servers/{server_id}/host-key/confirm", response_class=HTMLResponse)
+def confirm_host_key(
+    request: Request, server_id: str, db: Db, fingerprint: Annotated[str, Form()] = "",
+    source: Annotated[str, Form()] = "", who: Principal = HOST_KEY_CONFIRMER,
+) -> Response:  # fmt: skip
+    """The human face of ``POST /api/v1/managed-vms/{id}/host-key/confirm`` (review IS-2, SF-10). The form never
+    shows or prefills the scanned fingerprint: the operator pastes the one read on the VM's console or with
+    ``ssh-keygen -lf``, and says which; OVLM compares it with the scan (mismatch: refused). Same service call, scope
+    rule and audit row as the API, plus the comparison source."""
+    parsed = _uuid(server_id)
+    ctx = _detail_context(db, parsed) if parsed else None
+    managed = ctx["managed"] if ctx else None
+    scope = project_scope_of(ctx["server"]["project_connection_id"]) if ctx and managed else None
+    if (
+        parsed is None
+        or managed is None
+        or not authorize_action(who, Action.HOST_KEY_CONFIRM, scope)
+    ):
+        return error_page(request, 404, "Not a managed VM", "No such managed VM.")
+    assert ctx is not None and who.user_id is not None  # noqa: S101 - human session (matrix: human_only)
+    vm_id = UUID(managed["id"])
+    try:
+        if source not in HOST_KEY_SOURCES:
+            raise DomainError(422, "invalid-source", "Say where the fingerprint comes from",
+                              "Choose the console or ssh-keygen: the fingerprint must be read on the VM itself, "
+                              "never copied from OVLM.")  # fmt: skip
+        result = host_keys.confirm(db, vm_id, fingerprint.strip(), actor_id=who.user_id)
+        if not result["already_confirmed"]:
+            _audit(db, who, "managed_vm.host_key_confirm", "managed_vm_host_key", str(vm_id), scope=scope,
+                   after={"managed_vm_id": str(vm_id), "fingerprint": result["fingerprint"],
+                          "source": source, "via": "ui"})  # fmt: skip
+        db.commit()
+    except DomainError as exc:
+        db.rollback()
+        return render(
+            request, "inventory/detail.html", exc.status, active="inventory", notice=None,
+            error={"title": exc.title, "detail": exc.detail, "next_action": exc.next_action}, **ctx,
+        )  # fmt: skip
+    return RedirectResponse(
+        f"/inventory/servers/{parsed}?notice=host-key-confirmed", status_code=303
+    )
 
 
 # --- services -----------------------------------------------------------------------------------------------------

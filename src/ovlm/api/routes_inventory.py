@@ -21,7 +21,7 @@ Work the api starts, it only **queues** (a ``workflow_run`` in ``requested``; th
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine, Iterator
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
@@ -451,6 +451,8 @@ def register_managed_vm(
 class HostKeyConfirm(BaseModel):
     model_config = ConfigDict(extra="forbid")
     fingerprint: str = Field(min_length=1, max_length=100)
+    #: Where the operator read the fingerprint on the VM (review IS-2); recorded in the audit row.
+    source: Literal["console", "ssh-keygen"] | None = None
 
 
 def _vm_project(session: Session, vm_id: UUID) -> Any:
@@ -485,7 +487,8 @@ def confirm_host_key(
     if not result["already_confirmed"]:
         _audit(session, who, "managed_vm.host_key_confirm", "managed_vm_host_key", str(vm_id),
                scope=project_scope_of(_vm_project(session, vm_id)),
-               after={"managed_vm_id": str(vm_id), "fingerprint": result["fingerprint"]})  # fmt: skip
+               after={"managed_vm_id": str(vm_id), "fingerprint": result["fingerprint"],
+                      "source": body.source})  # fmt: skip
     session.commit()
     vm = _found(registry.get_managed_vm(session, vm_id), "managed-vm-not-found", "Managed VM")
     return {**vm, "already_confirmed": result["already_confirmed"]}
