@@ -6,6 +6,8 @@ from __future__ import annotations
 import contextlib
 from typing import Any
 
+import pytest
+
 from ovlm.openstack.errors import ServerError
 from ovlm.renewal.config import RenewalConfig
 from tests.integration.renewal.conftest import CFG, World, explain, to_cutover
@@ -275,6 +277,35 @@ def test_w1_quiesce_failure_needs_human_no_restore(world: World) -> None:
         and r["downtime_started_at"] is not None
     )
     assert ("volume", w.ids["volume"]) in w.locks()
+
+
+@pytest.mark.parametrize(
+    "service_units", [[], ["app.service"]], ids=["no-unit-names", "unit-names"]
+)
+def test_w1_parked_after_the_stop_operator_rollback_restarts_blue_service(
+    world_factory: Any, service_units: list[str]
+) -> None:
+    """Lab bug X (2026-11-07): W1 stopped the units, then parked before the unmount (bug W). Blue stayed ACTIVE with
+    the volume mounted. Without unit names in the profile, S6 cannot see the units are down and does not boot-cycle;
+    S7 must start the service itself (start_service on blue) instead of health-checking a stopped service."""
+    w = world_factory(service_units=service_units)
+    blue = w.ids["blue"]
+
+    def stop_units_only() -> None:
+        w.guest.g(blue).units = False  # the role stopped the units; the mount is still there
+
+    w.guest.hooks["quiesce"] = stop_units_only
+    w.guest.failures["quiesce"] = ["needs_human"]
+    to_cutover(w)
+    w.drive()
+    parked(w, "quiesce_old_failed")
+    assert w.guest.state[blue].mounted and not w.guest.state[blue].units
+    w.signal("rollback", tc=w.blue_tc())
+    w.drive()
+    restored(w)
+    recover = next(s for s in w.steps() if s["step_key"] == "recover_old_service")
+    assert recover["state"] == "succeeded" and recover["attempt"] == 1, explain(w)
+    assert ("start_service", blue) in w.guest.calls
 
 
 def test_w2_admin_lock_is_needs_human_directly(world: World) -> None:

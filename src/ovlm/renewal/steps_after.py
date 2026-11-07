@@ -492,7 +492,13 @@ class BootOld(RestoreStep):
 
 
 class RecoverOldService(WindowAnsible):
-    """S7: AC ``rollback_hooks.yml`` on blue if present (defence in depth), then ``healthcheck.yml`` (role old)."""
+    """S7: AC ``rollback_hooks.yml`` on blue if present (defence in depth), then ``start_service.yml`` on blue if
+    present, then ``healthcheck.yml`` (role old).
+
+    ``start_service`` is idempotent (contract 3.5) and refuses to start on an unmounted data path, so running it on
+    blue is safe whatever S6 did. It is needed when W1 stopped the units but blue never went down (lab bug X,
+    2026-11-07: W1 parked after the stop, S6 saw blue ACTIVE with the volume mounted and did not boot-cycle, and S7
+    only health-checked a stopped service ten times)."""
 
     key = "recover_old_service"
     phase = "healthcheck"
@@ -501,19 +507,25 @@ class RecoverOldService(WindowAnsible):
     def lease_for(self, params: Mapping[str, Any]) -> float | None:
         return (
             self.d.cfg.automation_timeout("rollback_hooks")
+            + self.d.cfg.automation_timeout("start_service")
             + self.d.cfg.automation_timeout("healthcheck")
-            + 120
+            + 180
         )
 
     def act(self, ctx: StepContext, intent: Mapping[str, Any]) -> None:
         target = self.target(ctx)
-        if self.d.guest.has_phase(ctx.run.id, "rollback_hooks"):
-            hooks = self.d.guest.run_phase(
-                run_id=ctx.run.id, step_id=ctx.step.id, attempt=ctx.attempt, phase="rollback_hooks", target=target,
-                timeout=self.d.cfg.automation_timeout("rollback_hooks"), fence=ctx.fence,
+        # start_service is mandatory unless the profile is stateless (contract section 2); rollback_hooks is optional.
+        stateful = not self.resolved(ctx).get("stateless")
+        for phase in ("rollback_hooks", "start_service"):
+            mandatory = phase == "start_service" and stateful
+            if not (mandatory or self.d.guest.has_phase(ctx.run.id, phase)):
+                continue
+            res = self.d.guest.run_phase(
+                run_id=ctx.run.id, step_id=ctx.step.id, attempt=ctx.attempt, phase=phase, target=target,
+                timeout=self.d.cfg.automation_timeout(phase), fence=ctx.fence,
             )  # fmt: skip
-            if not hooks.ok:
-                self.memo(ctx)["result"] = hooks
+            if not res.ok:
+                self.memo(ctx)["result"] = res
                 return
         self.run(ctx)
 

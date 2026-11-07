@@ -176,7 +176,10 @@ class FakeGuest:
         if not self._active(target.server_id):
             return GuestProbe(False)
         st = self.g(target.server_id)
-        return GuestProbe(True, st.mounted if mount_point else None, st.units, True, "running")
+        # Like production: no unit names, no ``systemctl is-active`` call, so the unit state is unknown (None).
+        return GuestProbe(
+            True, st.mounted if mount_point else None, st.units if units else None, True, "running"
+        )
 
     def external_probe(
         self, address: str, check: Mapping[str, Any], candidates: Mapping[str, str | None]

@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Owner | Agent 1 — PM / Engineering Manager |
-| Status | **Draft, 2026-11-07.** The primary acceptance scenario has not completed on Felcloud yet: it waits for the maintainer's approvals (G1–G3). Nothing below is marked "lab validated" without stored evidence. |
+| Status | **Draft, 2026-11-07.** The primary acceptance scenario has not completed on Felcloud yet. The first full attempt (ACC-01c) failed at the cutover (bugs W and X, now fixed in code) and was restored to blue; a re-run is pending. Nothing below is marked "lab validated" without stored evidence. |
 | Code | `main` at `3d4fce0` or later (PRs #1–#29) |
 
 ## 1. What the MVP is
@@ -29,7 +29,9 @@ Vocabulary: designed → implemented → unit tested → integration tested → 
 | Host-key scan and human confirmation | Integration tested, reviewed (IS-1..IS-12 fixed) ; used on Felcloud | Reviews; lab |
 | Renewal build phase (B1–B9) | Integration tested; **ran end to end on Felcloud twice** (about 3 min 17 s, 0 probe failures, data volume never attached twice) | ACC-01b build evidence |
 | Abort / discard in the build phase | Integration tested; **ran on Felcloud** after bug S was fixed (green deleted, blue untouched, locks released) | 2026-11-07 |
-| Cutover window (W1–W10), retention, retirement (G3) | Integration tested; **not yet run on Felcloud** | Pending G2/G3 |
+| Cutover window (W1–W10) | Integration tested; **first Felcloud attempt failed at W1** (bug W), fixed in code, not yet re-run | ACC-01c (2026-11-07) |
+| Restore (S1–S10) after an operator rollback | Integration tested; **ran on Felcloud**: volume and floating IP back on blue, data intact; S7 needed a manual service start (bug X), fixed in code, not yet re-run | ACC-01c |
+| Retention, retirement (G3) | Integration tested; **not yet run on Felcloud** | Pending a successful cutover |
 | Failure scenarios (Felcloud) | Not run yet | Prepared |
 | Production validated | No | — |
 
@@ -38,7 +40,7 @@ to run, with the measured downtime and the guard diff, and the failure scenarios
 
 ## 3. What the lab found that CI could not
 
-Running on a real cloud with the real process model found 19 defects that the CI suites (root, fake cloud, test HTTP
+Running on a real cloud with the real process model found 21 defects that the CI suites (root, fake cloud, test HTTP
 client) could not see. All are fixed, each with a test that fails without the fix where a test is possible.
 
 | ID | Defect | Fix |
@@ -59,6 +61,8 @@ client) could not see. All are fixed, each with a test that fails without the fi
 | Q | Evidence redaction erased audit action names | #28 |
 | R | Ed25519 lab certificate refused by browsers | lab configuration |
 | S | A server Nova still lists as DELETED blocked the abort | #28 |
+| W | Quiesce busy check used `fuser -vm`, which exits 0 on every idle mount: every real cutover parked at W1 | this fix |
+| X | Restore after a W1 park never restarted the service on blue: S6 saw unknown unit state as healthy, S7 only health-checked | this fix |
 
 ## 4. Deviations, recorded honestly
 
@@ -68,10 +72,17 @@ client) could not see. All are fixed, each with a test that fails without the fi
 - **D-4:** the lab UI is reachable on a floating IP over HTTPS (self-signed), TCP 443 open to the maintainer's IP
   only. Removed at teardown.
 - **D-5:** a guard FAIL caused by kit bug P, re-run PASS after the fix.
+- **D-6 (ACC-01c, run `01a1b658`):** G1 and G2 were approved by the maintainer in OVLM (`password+totp`), and the
+  rollback was typed by the maintainer. The cutover parked at W1 (bug W) with the service stopped on blue. The
+  restore then stopped at S7 (bug X). With the maintainer's yes, the lab agent started the service on blue by hand
+  (`systemctl start`) and then retried S7; OVLM finished the restore. Downtime: about 949 s measured by OVLM, about
+  896 s by the probe through the floating IP. Guard diff PASS. This run is **not** evidence of a successful
+  renewal; it is evidence that the restore keeps the data on blue (volume never attached twice, marker equal).
 
 ## 5. What remains before the MVP is done
 
-1. The maintainer: policy v2 (weekend windows), G1, G2, G3 on Felcloud; OVLM-measured and probe-measured downtime.
+1. Redeploy with the W and X fixes, pin the profile to the fixed automation commit, discard the ACC-01c green; then
+   the maintainer: G1, G2, G3 on Felcloud; OVLM-measured and probe-measured downtime.
 2. The failure scenarios on Felcloud.
 3. Evidence, guard diff, teardown (`destroy-lab.sh`; floating IPs stay allocated).
 4. This report finalised and the README statuses updated with what is lab validated.
