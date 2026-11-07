@@ -14,6 +14,7 @@ from sqlalchemy import Row, delete, func, insert, select, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ovlm import audit
 from ovlm.inventory.service import Page, clamp_limit, decode_cursor, encode_cursor
 from ovlm.policies.deadline import Deadline, ExceptionRef, active_exception, compute_deadline
 from ovlm.policies.durations import format_duration, parse_duration
@@ -23,6 +24,19 @@ from ovlm.policies.tables import policy, policy_binding, policy_exception
 from ovlm.policies.windows import rule_from_dict
 from ovlm.registry.errors import DomainError, conflict, not_found
 from ovlm.registry.tables import managed_vm, service, service_group
+
+# Audit allowlists: registered here so the API and the UI audit policy changes with the same fields.
+_POLICY_FIELDS = [
+    "name", "max_age", "renewal_interval", "windows", "approvals", "require_distinct_approvers",
+    "snapshot_retain_after_restore", "auto_restore_in_window", "max_window_duration", "retention_period", "version",
+]  # fmt: skip
+audit.register_entity("policy", _POLICY_FIELDS)
+audit.register_entity("policy_binding", ["policy_id", "scope_type", "scope_id"])
+audit.register_entity(
+    "policy_exception",
+    ["service_id", "reason", "starts_at", "expires_at", "requested_by", "approved_by"],
+    secret_fields=["owner"],  # may be a person's contact: only the fact of a change is recorded
+)
 
 
 def _iso(value: datetime | None) -> str | None:

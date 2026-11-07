@@ -26,6 +26,7 @@ NAV: tuple[tuple[str, str, str], ...] = (
     ("inventory", "/inventory", "Inventory"),
     ("services", "/services", "Services"),
     ("renewals", "/renewals", "Renewals"),
+    ("policies", "/policies", "Policies"),
     ("audit", "/audit", "Audit"),
 )
 

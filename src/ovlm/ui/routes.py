@@ -26,6 +26,7 @@ from ovlm.registry.errors import DomainError
 from ovlm.ui.readiness_view import readiness_context
 from ovlm.ui.routes_account import router as account_router
 from ovlm.ui.routes_audit import router as audit_router
+from ovlm.ui.routes_policies import router as policies_router
 from ovlm.ui.routes_readiness import router as readiness_router
 from ovlm.ui.routes_renewal import router as renewal_router
 from ovlm.ui.support import UiRoute, error_page, render
@@ -35,6 +36,7 @@ router.include_router(
     account_router
 )  # step-up page; one include_router line in api/app.py serves the whole UI
 router.include_router(audit_router)  # GET /audit (E6-4)
+router.include_router(policies_router)  # /policies: list, detail, admin edit (UI-2)
 router.include_router(readiness_router)  # POST /inventory/servers/{id}/assess
 router.include_router(
     renewal_router
