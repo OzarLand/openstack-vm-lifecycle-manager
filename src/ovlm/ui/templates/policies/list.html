@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Policies{% endblock %}
+{% block content %}
+<h1>Policies</h1>
+<p class="muted">A lifecycle policy says how old a VM may get and when its renewal may run. Each service or service group is bound to one policy.</p>
+{% if policies %}
+<table>
+  <caption class="sr">Lifecycle policies</caption>
+  <thead><tr><th scope="col">Name</th><th scope="col">Version</th><th scope="col">Max age</th><th scope="col">Renewal interval</th><th scope="col">Windows</th><th scope="col">Bindings</th><th scope="col">Last updated</th></tr></thead>
+  <tbody>
+  {% for p in policies %}
+  <tr>
+    <th scope="row"><a href="/policies/{{ p.id }}">{{ p.name }}</a></th>
+    <td>v{{ p.version }}</td><td class="mono">{{ p.max_age }}</td><td class="mono">{{ p.renewal_interval }}</td>
+    <td>{{ p.windows | length }}</td><td>{{ binding_counts.get(p.id, 0) }}</td><td>{{ p.updated_at | timestamp }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">No policy yet. Without a policy a service is never due for renewal.</p>
+{% endif %}
+{% endblock %}

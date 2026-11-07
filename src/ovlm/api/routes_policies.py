@@ -16,7 +16,6 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.orm import Session
 
-from ovlm import audit
 from ovlm.api.routes_common import IfMatch, ProblemRoute, audit_change, etag_of, page_body
 from ovlm.auth.deps import get_db, require_role
 from ovlm.auth.principal import Principal
@@ -30,18 +29,6 @@ VIEWER = Depends(require_role("viewer"))
 OPERATOR = Depends(require_role("operator", token_scope="operate"))  # noqa: S106 - an API token scope name, not a secret
 APPROVER = Depends(require_role("approver", human_only=True))
 ADMIN = Depends(require_role("admin"))
-
-_POLICY_FIELDS = [
-    "name", "max_age", "renewal_interval", "windows", "approvals", "require_distinct_approvers",
-    "snapshot_retain_after_restore", "auto_restore_in_window", "max_window_duration", "retention_period", "version",
-]  # fmt: skip
-audit.register_entity("policy", _POLICY_FIELDS)
-audit.register_entity("policy_binding", ["policy_id", "scope_type", "scope_id"])
-audit.register_entity(
-    "policy_exception",
-    ["service_id", "reason", "starts_at", "expires_at", "requested_by", "approved_by"],
-    secret_fields=["owner"],  # may be a person's contact: only the fact of a change is recorded
-)
 
 router = APIRouter(prefix="/api/v1", route_class=ProblemRoute)
 DB = Depends(get_db)

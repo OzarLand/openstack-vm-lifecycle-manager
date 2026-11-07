@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Edit policy {{ p.name }}{% endblock %}
+{% block content %}
+<p><a href="/policies/{{ p.id }}">&larr; {{ p.name }}</a></p>
+<h1>Edit policy <em>{{ p.name }}</em></h1>
+<p class="muted">Saving creates version {{ p.version + 1 }}. Every field below is filled from version {{ p.version }}; change only what you mean to change.</p>
+{% for m in problems %}<p role="alert" class="banner error">{{ m }}</p>{% endfor %}
+
+<div class="banner warn" role="note" data-testid="void-warning">
+  <strong>A new policy version changes the plan hash.</strong>
+  Approvals already given on plans under this policy stop matching and are voided; they must be requested again.
+  {% if impact.plans %}
+  <br><strong data-testid="impact">{{ impact.plans }} open plan{{ "" if impact.plans == 1 else "s" }} and {{ impact.approvals }} live approval{{ "" if impact.approvals == 1 else "s" }} would be affected.</strong>
+  {% else %}
+  <br><span data-testid="impact">No open plan uses this policy: nothing would be voided.</span>
+  {% endif %}
+</div>
+
+<form method="post" action="/policies/{{ p.id }}/edit" class="panel">
+  <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
+  <input type="hidden" name="if_match" value="{{ if_match }}">
+  <p><label>Name <input name="name" required maxlength="200" value="{{ form.name }}"></label></p>
+  <p><label>Maximum age <input name="max_age" required value="{{ form.max_age }}" class="mono"></label>
+     <label>Renewal interval <input name="renewal_interval" required value="{{ form.renewal_interval }}" class="mono"></label>
+     <span class="muted">ISO 8601 durations, for example P90D</span></p>
+  <p><label>Plan approval <select name="approval_plan"><option value="true"{% if form.approval_plan %} selected{% endif %}>required</option><option value="false"{% if not form.approval_plan %} selected{% endif %}>not required</option></select></label>
+     <label>Cutover approval <select name="approval_cutover"><option value="true"{% if form.approval_cutover %} selected{% endif %}>required</option><option value="false"{% if not form.approval_cutover %} selected{% endif %}>not required</option></select></label></p>
+  <p><label>Require distinct approvers <select name="require_distinct_approvers"><option value="true"{% if form.require_distinct_approvers %} selected{% endif %}>yes</option><option value="false"{% if not form.require_distinct_approvers %} selected{% endif %}>no</option></select></label>
+     <label>Auto restore in window <select name="auto_restore_in_window"><option value="true"{% if form.auto_restore_in_window %} selected{% endif %}>yes</option><option value="false"{% if not form.auto_restore_in_window %} selected{% endif %}>no</option></select></label></p>
+  <p><label>Max window duration <input name="max_window_duration" required value="{{ form.max_window_duration }}" class="mono"></label>
+     <label>Snapshot retention after restore <input name="snapshot_retain_after_restore" required value="{{ form.snapshot_retain_after_restore }}" class="mono"></label>
+     <label>Retention period <input name="retention_period" value="{{ form.retention_period }}" class="mono"></label>
+     <span class="muted">retention period may be empty</span></p>
+
+  <fieldset>
+    <legend>Windows</legend>
+    <p class="muted">Local time of the zone shown (default UTC). A window ends later than it starts on the same day; write a night window as two windows. Tick Remove to delete one.</p>
+    {% set rows = form.windows %}
+    {% for w in rows %}
+    {% set i = loop.index0 %}
+    <div class="panel">
+      <span role="group" aria-label="Window {{ loop.index }} weekdays">{% for d in weekdays %}<label><input type="checkbox" name="win_days" value="{{ i }}:{{ d }}"{% if d in w.days %} checked{% endif %}> {{ d }}</label> {% endfor %}</span><br>
+      <label>From <input name="win_start" value="{{ w.start }}" size="6" class="mono" placeholder="HH:MM"></label>
+      <label>To <input name="win_end" value="{{ w.end }}" size="6" class="mono" placeholder="HH:MM"></label>
+      <label>Zone <input name="win_tz" value="{{ w.tz }}" size="16" class="mono"></label>
+      <label><input type="checkbox" name="win_remove" value="{{ i }}"> Remove</label>
+    </div>
+    {% endfor %}
+    {% for k in spare %}
+    {% set i = rows | length + k %}
+    <div class="panel">
+      <strong>Add a window</strong>
+      <span role="group" aria-label="New window {{ k + 1 }} weekdays">{% for d in weekdays %}<label><input type="checkbox" name="win_days" value="{{ i }}:{{ d }}"> {{ d }}</label> {% endfor %}</span><br>
+      <label>From <input name="win_start" value="" size="6" class="mono" placeholder="HH:MM"></label>
+      <label>To <input name="win_end" value="" size="6" class="mono" placeholder="HH:MM"></label>
+      <label>Zone <input name="win_tz" value="UTC" size="16" class="mono"></label>
+    </div>
+    {% endfor %}
+  </fieldset>
+
+  {% if impact.plans %}
+  <p><label>Type the policy name <strong class="mono">{{ p.name }}</strong> to confirm
+     <input name="confirm_name" autocomplete="off" spellcheck="false" aria-invalid="{{ 'true' if confirm_error else 'false' }}" data-testid="confirm-name"></label></p>
+  {% endif %}
+  <p><button type="submit">Save as version {{ p.version + 1 }}</button> <a href="/policies/{{ p.id }}">Cancel</a></p>
+</form>
+{% endblock %}

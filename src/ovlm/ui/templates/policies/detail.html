@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Policy {{ p.name }}{% endblock %}
+{% block content %}
+<p><a href="/policies">&larr; Policies</a></p>
+<h1>{{ p.name }} <span class="chip">version {{ p.version }}</span></h1>
+{% if notice %}<p role="status" class="banner ok">{{ notice }}</p>{% endif %}
+{% if can_edit %}<p><a class="button" href="/policies/{{ p.id }}/edit">Edit (creates version {{ p.version + 1 }})</a></p>
+{% else %}<p class="muted">Only an admin can edit a policy.</p>{% endif %}
+
+<section class="panel" aria-labelledby="cur-h">
+  <h2 id="cur-h">Current version</h2>
+  <dl class="kv">
+    <dt>Maximum age</dt><dd class="mono">{{ p.max_age }}</dd>
+    <dt>Renewal interval</dt><dd class="mono">{{ p.renewal_interval }}</dd>
+    <dt>Plan approval</dt><dd>{{ "required" if p.approvals.plan else "not required" }}</dd>
+    <dt>Cutover approval</dt><dd>{{ "required" if p.approvals.cutover else "not required" }}</dd>
+    <dt>Distinct approvers</dt><dd>{{ "yes" if p.require_distinct_approvers else "no" }}</dd>
+    <dt>Auto restore in window</dt><dd>{{ "yes" if p.auto_restore_in_window else "no" }}</dd>
+    <dt>Max window duration</dt><dd class="mono">{{ p.max_window_duration }}</dd>
+    <dt>Snapshot retention</dt><dd class="mono">{{ p.snapshot_retain_after_restore }}</dd>
+    <dt>Retention period</dt><dd class="mono">{{ p.retention_period or "none" }}</dd>
+    <dt>Last updated</dt><dd>{{ p.updated_at | timestamp }}</dd>
+  </dl>
+</section>
+
+<section class="panel" aria-labelledby="win-h">
+  <h2 id="win-h">Effective windows</h2>
+  <table>
+    <caption class="sr">Renewal windows</caption>
+    <thead><tr><th scope="col">Days</th><th scope="col">From</th><th scope="col">To</th><th scope="col">Time zone</th></tr></thead>
+    <tbody>
+    {% for w in eff.rows %}
+    <tr><td>{{ w.days_sorted | join(", ") }}</td><td class="mono">{{ w.start }}</td><td class="mono">{{ w.end }}</td><td class="mono">{{ w.tz }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if eff.next %}<p>Next window opens {{ eff.next[0] | timestamp }} and closes {{ eff.next[1] | timestamp }}.</p>{% endif %}
+  <p class="muted">A window never crosses midnight; a night window is two windows.</p>
+</section>
+
+<section class="panel" aria-labelledby="bind-h">
+  <h2 id="bind-h">Bindings</h2>
+  {% if bindings %}
+  <ul>
+    {% for b in bindings %}<li>{{ b.scope_type | replace("_", " ") }} <strong>{{ scope_names[b.id] }}</strong> <span class="mono muted">{{ b.scope_id | short_id }}</span></li>{% endfor %}
+  </ul>
+  {% else %}<p class="empty">Not bound to any service or group: it applies to nothing.</p>{% endif %}
+</section>
+{% endblock %}
