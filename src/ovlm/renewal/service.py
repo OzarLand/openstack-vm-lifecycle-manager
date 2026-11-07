@@ -723,3 +723,25 @@ def approval_exists(s: Session, aid: UUID) -> bool:
 
 def visible(who: Principal, scope: str) -> bool:
     return authorize(who, "viewer", scope)
+
+
+#: Plan states in which a changed policy version still matters: the plan hash is recomputed from the live policy row.
+_PLAN_DONE = (*TERMINAL, "expired")
+
+
+def open_plans_for_policy(s: Session, policy_id: UUID) -> dict[str, int]:
+    """What a new version of a policy voids: plans under it that are not finished, and their live approvals.
+
+    The plan hash binds the policy version, so every approval given on these plans stops matching (UI-2).
+    """
+    done = list(_PLAN_DONE)
+    plans = s.execute(
+        text("SELECT count(*) FROM renewal_plan WHERE policy_id = :p AND NOT (state = ANY(:d))"),
+        {"p": policy_id, "d": done},
+    ).scalar_one()
+    approvals = s.execute(
+        text("SELECT count(*) FROM approval a JOIN renewal_plan p ON p.id = a.plan_id "
+             "WHERE p.policy_id = :p AND NOT (p.state = ANY(:d)) AND a.void_reason IS NULL "
+             "AND (a.decision IS NULL OR a.decision = 'approved')"),
+        {"p": policy_id, "d": done}).scalar_one()  # fmt: skip
+    return {"plans": int(plans), "approvals": int(approvals)}
