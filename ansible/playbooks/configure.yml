@@ -14,6 +14,9 @@
   tasks:
     - name: "Run the configure phase"
       block:
+        - name: "LAB-04 ONLY: deliberately broken configuration (throw-away branch, never merge)"
+          ansible.builtin.fail:
+            msg: "LAB-04 injected configure failure"
         - name: "Role base"
           ansible.builtin.include_role:
             name: base
