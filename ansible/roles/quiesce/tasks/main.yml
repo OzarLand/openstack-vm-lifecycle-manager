@@ -49,7 +49,9 @@
   when: q_mp_before.rc != 0 and not ovlm_test_mode | bool and q_prev.content is not defined
 
 - name: Confirm no process holds the mount (read-only; fuser -m rc 0 means somebody does)
-  ansible.builtin.command: fuser -vm {{ ovlm_mount_point | quote }}
+  # Never add -v here: verbose fuser also lists the "kernel mount" pseudo-entry and exits 0 on every idle mount
+  # (lab bug W, 2026-11-07). Without -v, rc 0 means a process uses the mount and stdout carries its PIDs.
+  ansible.builtin.command: fuser -m {{ ovlm_mount_point | quote }}
   register: q_fuser
   changed_when: false
   failed_when: false
@@ -63,7 +65,7 @@
 
 - name: Fail - mount busy
   ansible.builtin.fail:
-    msg: "processes still use {{ ovlm_mount_point }}: {{ q_fuser.stderr | default('') | truncate(150) }}"
+    msg: "processes still use {{ ovlm_mount_point }}: PIDs {{ q_fuser.stdout | default('') | trim | truncate(150) }}"
   when: q_mp_before.rc == 0 and not ovlm_test_mode | bool and q_fuser.rc == 0
 
 - name: Flush filesystem buffers (STATE-CHANGING in effect; no data changes)

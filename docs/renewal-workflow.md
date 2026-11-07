@@ -233,7 +233,7 @@ and revert. Restore runs S2 (quiesce green) before any detach.
 | S4 | `detach_from_green` | detach volume from green | volume not attached to green | as W3 (no auto restore inside restore) → needs_human |
 | S5 | `attach_to_old` | attach volume to **stopped** blue (allowed in STOPPED, OSI §4 SV) | attached to blue | as W5 → needs_human |
 | S6 | `boot_old` | **Ensure blue has booted since quiesce** (SRE-R-1): blue SHUTOFF → Nova start. Blue ACTIVE → read-only probe (`findmnt <mount_point>`, `systemctl is-active <service_units>`): mounted and all active → skip; otherwise Nova stop, wait `SHUTOFF`, Nova start. fstab (UUID, `nofail`) remounts, enabled units start | blue ACTIVE, mounted, units active | SSH probe fails while ACTIVE → needs_human; stop/start retryable → needs_human. Guest-shutdown behaviour of Nova stop on a quiesced guest is AS → lab |
-| S7 | `recover_old_service` | AC `rollback_hooks.yml` on blue if present (defence in depth, optional), then `healthcheck.yml` (role `old`) | — | exhausted → needs_human |
+| S7 | `recover_old_service` | AC `rollback_hooks.yml` on blue if present (defence in depth, optional), then `start_service.yml` on blue (idempotent; skipped only for a stateless profile), then `healthcheck.yml` (role `old`) | — | exhausted → needs_human |
 | S8 | `move_fip_to_old` | FIP → blue's port | FIP already on blue | needs_human |
 | S9 | `verify_external_old` | external probe via FIP; the identity must equal **blue** (SRE-R-13; `X-OVLM-Server-Id` / `server_id` / `hostname`, [automation-contract §3.6.1](automation-contract.md)) | — | needs_human |
 | S10 | `lock_green` | lock green, `locked_reason='ovlm:restored:<run>'` (own lock, OSI §7 SV) so nobody starts it by hand on its empty mount point (SRE-R-17) | locked by OVLM | retryable → needs_human (service already restored; reported, not paged) |
@@ -365,6 +365,7 @@ locks, refreshes the run's **current-truth panel** (§6.1) and shows: the stuck 
 | Failed health check | W8 exhausted → needs_human + page (D-1 = B); auto restore S2–S10 only if a W4 snapshot was taken. Recorded downtime includes the wait and any restore. |
 | Failed cutover | W9 4xx with FIP unchanged (single transaction, OSI §6.1 SV) → needs_human + page, or auto restore if a W4 snapshot was taken (D-1 = B). W10 failure → same rule; a restore includes S8. Unknown FIP state → needs_human. |
 | Quiesced but still ACTIVE (W1 ok, W2 refused / abort / crash then rollback) | S6 boot-cycles blue (stop, start); fstab remounts; enabled units start; S7 health. Converges without `rollback_hooks` (SRE-R-1). |
+| W1 parked after stopping the units, before the unmount (blue ACTIVE, volume mounted) | S6 sees the units down only when the profile names them (`inventory_vars.service_units`); otherwise it reports blue healthy. S7 runs `start_service` on blue before the health check, so the restore converges either way (lab bug X, 2026-11-07). |
 | DB or worker restart | §5. Resumes from persisted step; fenced commits; waits are timers, not threads. |
 | Detach refused / stuck (extra) | W3 needs_human; blue stays stopped; operator may roll back (S6 start blue) or call an admin (§6). |
 | Blank or wrong filesystem on green (extra) | W6 needs_human, no mkfs (`first_use` is always false in this strategy); operator rollback. |

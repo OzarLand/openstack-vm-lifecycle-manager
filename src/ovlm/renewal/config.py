@@ -167,6 +167,8 @@ class RenewalConfig:
                 self.automation_timeout("rollback_hooks")
                 + ANSIBLE_SLACK
                 + int(self.healthcheck_max_attempts or 1)
+                * (self.automation_timeout("start_service") + ANSIBLE_SLACK)
+                + int(self.healthcheck_max_attempts or 1)
                 * (self.automation_timeout("healthcheck") + ANSIBLE_SLACK)
             )
         if step_key == "verify_green_ready":

@@ -258,7 +258,7 @@ class World:
 
 def _seed(
     admin: Engine, cloud: RenewalFake, *, snapshot: bool, policy: dict[str, Any],
-    blue_fingerprint: str = "SHA256:x",
+    blue_fingerprint: str = "SHA256:x", service_units: list[str] | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:  # fmt: skip
     ext = cloud.add_network("ext", external=True)
     net = cloud.add_network("net")
@@ -285,7 +285,7 @@ def _seed(
         "data_volume": {"volume_id": vol, "fs_type": "ext4", "fs_uuid": "11111111-2222-3333-4444-555555555555",
                         "mount_point": "/srv/data", "snapshot_before_handoff": snapshot},
         "automation": {"repo": "https://git.example.invalid/app.git", "sha": "a" * 40,
-                       "inventory_vars": {"service_units": ["app.service"]}},
+                       "inventory_vars": {} if service_units == [] else {"service_units": service_units or ["app.service"]}},
         "guest_access": {"ssh_user": "ovlm"},
         "health_check": {"external": {"scheme": "http", "port": 80, "path": "/healthz", "expected_status": 200}},
         "cutover": {"floating_ip_id": fip},
@@ -391,7 +391,7 @@ def _seed(
 
 def build_world(admin_url: URL, db: str, secrets_dir: Path, *, snapshot: bool = False,
                 policy: dict[str, Any] | None = None, g1: bool = True, blue_fingerprint: str = "SHA256:x",
-                cloud: RenewalFake | None = None) -> World:  # fmt: skip
+                cloud: RenewalFake | None = None, service_units: list[str] | None = None) -> World:  # fmt: skip
     migrate(admin_url, db, secrets_dir)
     admin = create_engine(admin_url.set(database=db))
     worker = create_engine(
@@ -402,7 +402,12 @@ def build_world(admin_url: URL, db: str, secrets_dir: Path, *, snapshot: bool = 
         now=datetime.now(UTC), strict_gate=False
     )  # seeding the cloud; strict after
     ids, users = _seed(
-        admin, cloud, snapshot=snapshot, policy=policy or {}, blue_fingerprint=blue_fingerprint
+        admin,
+        cloud,
+        snapshot=snapshot,
+        policy=policy or {},
+        blue_fingerprint=blue_fingerprint,
+        service_units=service_units,
     )
     port = FakeCloudPort(
         cloud, datetime.now(UTC) + timedelta(days=30), datetime.now(UTC) + timedelta(hours=8)
