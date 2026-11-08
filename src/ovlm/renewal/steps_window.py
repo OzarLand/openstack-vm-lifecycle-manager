@@ -14,6 +14,10 @@
   probe attached; nothing is re-run blindly (AC section 6). OpenStack steps re-probe and never re-send a call whose
   effect is already visible (probe -> decide).
 * Every failure carries a fresh probe (``truth``) for the closed table; ``first_use`` is always ``false`` (SRE-R-3).
+* **Data marker** (automation-contract 3.3, 3.4, 3.7): the phases report it as ``facts.marker_sha256``
+  (:data:`MARKER_FACT`). W1 must report one when the run has a data volume, or it parks ``quiesce_no_marker``: without
+  it W6 and W8 could not prove the data survived. W6 and W8 compare against W1's value and say so in their evidence
+  (``marker_comparison``).
 """
 
 from __future__ import annotations
@@ -42,6 +46,10 @@ from ovlm.renewal.steps_build import (
 from ovlm.workflow.contract import Act, Decision, Done, ErrorClass, Fail, Outcome, StepContext, Wait
 
 E = ErrorClass
+
+#: The result-facts key that carries the data marker's SHA-256, as automation-contract 3.7 and the reference roles
+#: (quiesce, data_volume, healthcheck) name it. OVLM's own evidence keeps the W1 value under ``marker_checksum``.
+MARKER_FACT = "marker_sha256"
 
 
 class WindowStep(RStep):
@@ -227,9 +235,15 @@ class QuiesceOld(WindowAnsible):
     def verify(self, ctx: StepContext, intent: Mapping[str, Any]) -> Outcome:
         res = self.memo(ctx)["result"]
         out = phase_outcome(self, ctx, res, data_phase=True)
-        if isinstance(out, Done):
-            return Done({**dict(out.evidence), "marker_checksum": res.facts.get("marker_checksum")})
-        return out
+        if not isinstance(out, Done):
+            return out
+        marker = res.facts.get(MARKER_FACT)
+        if self.resolved(ctx).get("data_volume") and not marker:
+            # Contract 3.4: quiesce returns the final marker checksum, the value W6 and W8 compare on green. A repo
+            # that omits it would let the renewal finish without ever proving the data survived: stop here instead.
+            return self.fail(ctx, E.NEEDS_HUMAN, "quiesce_no_marker", phase_reason=res.reason,
+                             facts=dict(res.facts), expected_fact=MARKER_FACT)  # fmt: skip
+        return Done({**dict(out.evidence), "marker_checksum": marker})
 
     def classify(self, ctx: StepContext, exc: Exception) -> Fail:
         if isinstance(exc, StepRefusal) and exc.reason == "w1_claim_refused":
@@ -490,7 +504,18 @@ def w1_marker(ctx: StepContext) -> str | None:
             ),
             {"r": ctx.run.id},
         ).scalar()
-    return None if not ev else ev.get("marker_checksum")
+    if not ev:
+        return None
+    # ``marker_checksum`` is OVLM's own evidence key. A run that passed W1 before OVLM read ``marker_sha256`` has it
+    # empty, but W1's evidence also keeps the raw result facts, which carry the reported value.
+    return ev.get("marker_checksum") or (ev.get("facts") or {}).get(MARKER_FACT)
+
+
+def marker_comparison(expected: str | None, observed: Any) -> str:
+    """Evidence text for W6/W8: whether the marker was compared, so a skipped comparison is visible."""
+    if expected is None:
+        return "skipped: no W1 marker recorded"
+    return "equal" if observed == expected else "differs"
 
 
 class DataAttachGreen(WindowAnsible):
@@ -533,11 +558,12 @@ class DataAttachGreen(WindowAnsible):
         problems = []
         if dv.get("fs_uuid") and res.facts.get("fs_uuid") != dv["fs_uuid"]:
             problems.append("fs_uuid differs from the profile")
-        if marker is not None and res.facts.get("marker_checksum") != marker:
+        if marker is not None and res.facts.get(MARKER_FACT) != marker:
             problems.append("marker checksum differs from W1")
         if problems:
             return self.fail(ctx, E.NEEDS_HUMAN, "data_attach_mismatch", problems=problems)
-        return Done({**dict(out.evidence), "first_use": False})
+        return Done({**dict(out.evidence), "first_use": False,
+                     "marker_comparison": marker_comparison(marker, res.facts.get(MARKER_FACT))})  # fmt: skip
 
     def classify(self, ctx: StepContext, exc: Exception) -> Fail:
         f = super().classify(ctx, exc)
@@ -578,21 +604,26 @@ class HealthcheckGreen(WindowAnsible):
             return fail
         return Act({"phase": self.phase})
 
+    def act(self, ctx: StepContext, intent: Mapping[str, Any]) -> None:
+        # Contract 3.6: the playbook checks the marker against ``ovlm.expected_marker_checksum`` itself too; OVLM's
+        # own comparison in ``verify`` stays authoritative.
+        dv = self.resolved(ctx).get("data_volume") or {}
+        self.run(ctx, expected_marker=w1_marker(ctx), expected_fs_uuid=dv.get("fs_uuid"))
+
     def verify(self, ctx: StepContext, intent: Mapping[str, Any]) -> Outcome:
         res = self.memo(ctx)["result"]
         marker = w1_marker(ctx)
-        if res.ok and (marker is None or res.facts.get("marker_checksum") == marker):
-            return Done(
-                {"healthcheck": res.reason, "marker_checksum": res.facts.get("marker_checksum")}
-            )
+        observed = res.facts.get(MARKER_FACT)
+        if res.ok and (marker is None or observed == marker):
+            return Done({"healthcheck": res.reason, "marker_checksum": observed,
+                         "marker_comparison": marker_comparison(marker, observed)})  # fmt: skip
         done = int((ctx.previous_evidence or {}).get("hc_attempts", 0)) + 1
         if done >= int(self.d.cfg.healthcheck_max_attempts or 1) or res.classification in (
             "fatal",
             "needs_human",
         ):
-            return self.fail(
-                ctx, E.NEEDS_HUMAN, "healthcheck_exhausted", attempts=done, phase_reason=res.reason
-            )
+            return self.fail(ctx, E.NEEDS_HUMAN, "healthcheck_exhausted", attempts=done, phase_reason=res.reason,
+                             marker_comparison=marker_comparison(marker, observed))  # fmt: skip
         return Wait(
             poll_after=float(self.d.cfg.healthcheck_interval or 0), evidence={"hc_attempts": done}
         )
