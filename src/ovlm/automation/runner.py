@@ -65,6 +65,7 @@ from ovlm.automation.rundir import RunDir, RunUser, processes_referencing
 from ovlm.automation.types import (
     KILL_GRACE_SECONDS,
     AutomationError,
+    CheckoutUnverifiable,
     Classification,
     Phase,
 )
@@ -268,9 +269,8 @@ class AutomationRunner:
         will be used is digested and must equal ``expected_digest``, the digest B6 recorded in the database (outside
         the cache); otherwise nothing is adopted and a human decides. Never contacts the git host."""
         if not expected_digest:
-            raise AutomationError(
-                "a cached checkout exists but the run has no recorded tree digest to check it against",
-                Classification.NEEDS_HUMAN,
+            raise CheckoutUnverifiable(
+                "a cached checkout exists but the run has no recorded tree digest to check it against"
             )
         co.validate_sha(spec.ref)
         self.cfg.run_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -287,10 +287,9 @@ class AutomationRunner:
             ) from None
         if got != expected_digest:
             co.remove_tree(tmp)
-            raise AutomationError(
+            raise CheckoutUnverifiable(
                 "the cached checkout does not match the tree digest recorded by prepare_automation "
-                "(modified on disk?); not adopted",
-                Classification.NEEDS_HUMAN,
+                "(modified on disk?); not adopted"
             )
         try:
             tmp.rename(dest)
@@ -346,9 +345,8 @@ class AutomationRunner:
             )
         digest = co.tree_digest(dest)
         if expected_digest is not None and digest != expected_digest:
-            raise AutomationError(
-                "the checkout on disk does not match the tree digest recorded by prepare_automation",
-                Classification.NEEDS_HUMAN,
+            raise CheckoutUnverifiable(
+                "the checkout on disk does not match the tree digest recorded by prepare_automation"
             )
         # the same waivers as B6 (SF-13), not audited again: B6 recorded every finding they covered
         return self._verify(spec, workflow_id, dest, head, waivers, None, digest)

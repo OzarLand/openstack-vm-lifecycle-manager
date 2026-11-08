@@ -1423,18 +1423,30 @@ class WorkflowEngine:
                 return "abort: lock conflict in the abort transition; run parked", True
             return "aborted at boundary", True
 
-        if sig.kind in ("retry_step", "mark_resolved"):
+        if sig.kind in ("retry_step", "mark_resolved", "reprepare_automation"):
             if run.state != "needs_human" or step is None or step.state != "needs_human":
                 return "rejected: no step in needs_human", False
+            recorded: str | None = None
+            if sig.kind == "reprepare_automation":
+                # The strategy records the one-shot authorization (its own rows, this transaction); then the
+                # parked step is re-queued exactly as retry-step does.
+                res = defn.on_signal(ctx)
+                if not isinstance(res, str):
+                    return f"unsupported signal {sig.kind} for this strategy", False
+                if res.startswith("refused"):
+                    return res, True
+                recorded = res
             # Both re-queue the step with a fresh retry budget and deadline. mark_resolved records the
             # operator's attestation as evidence but does not close the step: the next attempt probes and
             # must reach Done by itself ("the engine re-probes before continuing", renewal-workflow.md
             # section 6; SRE-C-2).
-            evidence = (
-                {"mark_resolved": {"actor_id": sig.actor_id, "payload": dict(sig.payload)}}
-                if sig.kind == "mark_resolved"
-                else None
-            )
+            evidence: dict[str, Any] | None = None
+            if sig.kind == "mark_resolved":
+                evidence = {
+                    "mark_resolved": {"actor_id": sig.actor_id, "payload": dict(sig.payload)}
+                }
+            elif sig.kind == "reprepare_automation":
+                evidence = {"reprepare_automation": {"actor_id": sig.actor_id, "signal_id": sig.id}}
             c.execute(
                 text(
                     "UPDATE workflow_step SET state = 'ready', not_before = now(), error_class = NULL, "
@@ -1456,6 +1468,8 @@ class WorkflowEngine:
             )
             if sig.kind == "retry_step":
                 return f"step {step.step_key} re-queued", True
+            if recorded is not None:
+                return f"{recorded}; step {step.step_key} re-queued", True
             return f"step {step.step_key} re-queued for verification (mark_resolved)", True
 
         # Strategy-specific kinds and wake-ups need a step boundary.

@@ -77,11 +77,18 @@ from ovlm.automation.model import (
     PhaseRequest,
     PreparedAutomation,
 )
-from ovlm.automation.types import AutomationError, Classification, Phase, SecretBytes
+from ovlm.automation.types import (
+    AutomationError,
+    CheckoutUnverifiable,
+    Classification,
+    Phase,
+    SecretBytes,
+)
 from ovlm.openstack.ownership import OwnershipRegistry
 from ovlm.openstack.sdk_write import WriteCredential
 from ovlm.openstack.write import GuardedWriteClient
 from ovlm.profiles.waivers import MAX_WAIVED_FINDINGS, active_waivers, verify_active_waivers
+from ovlm.renewal import reprepare
 from ovlm.renewal.base import StepRefusal
 from ovlm.renewal.ledger import plan_resolved
 from ovlm.renewal.ports import (
@@ -518,6 +525,10 @@ class RunnerLike(Protocol):
         self, prepared: PreparedAutomation, req: PhaseRequest, *, fence: FenceLike | None = None
     ) -> PhaseOutcome: ...
 
+    def release(self, prepared: PreparedAutomation) -> None:
+        """Remove the run-level checkout and its cached copy."""
+        ...
+
 
 class RecordStore(Protocol):
     def save(self, conn: Any, record: Any, *, store_diffs: bool) -> str: ...
@@ -602,7 +613,8 @@ class RunnerGuestPort:
         kept in ``automation.checkout_cache`` (persistent, worker-only) is adopted instead, only if its tree digest
         equals the one B6 recorded in its step evidence (lab finding Z). If no verified copy is left, re-clone only
         **outside** the downtime window: nothing contacts the git host inside it (automation-contract.md 2); inside
-        it the step stops for a human."""
+        it the step stops for a human (``automation_checkout_lost`` / ``automation_checkout_unverifiable``), and the
+        only way on is an approver's one-shot ``reprepare-automation`` authorization (:meth:`_reprepare`)."""
         with self._lock:
             prepared = self._prepared.get(run_id)
         if prepared is not None:
@@ -610,22 +622,98 @@ class RunnerGuestPort:
         resolved = self._resolved(run_id)
         spec = self._spec(run_id, resolved)
         waivers = self._waivers(resolved)
-        prepared = self.runner.adopt_checkout(
-            spec, run_id, waivers=waivers, expected_digest=self._recorded_tree_digest(run_id)
-        )
+        recorded = self._recorded_tree_digest(run_id)
+        try:
+            prepared = self.runner.adopt_checkout(
+                spec, run_id, waivers=waivers, expected_digest=recorded
+            )
+        except CheckoutUnverifiable as exc:
+            prepared = self._reprepare(
+                run_id, resolved, spec, recorded,
+                refusal=(reprepare.CHECKOUT_UNVERIFIABLE, str(exc)),
+            )  # fmt: skip
         if prepared is None:
             if self._in_outage(run_id):
-                raise AutomationError(
-                    "the run's verified checkout is gone (worker container restarted without a checkout cache?); "
-                    "re-cloning would contact the git host inside the downtime window",
-                    Classification.NEEDS_HUMAN,
-                )
-            prepared, _reach = self._prepare_with_waivers(run_id, resolved, spec)
+                prepared = self._reprepare(
+                    run_id, resolved, spec, recorded,
+                    refusal=(
+                        reprepare.CHECKOUT_LOST,
+                        "the run's verified checkout is gone (worker container restarted without a checkout "
+                        "cache?); re-cloning would contact the git host inside the downtime window",
+                    ),
+                )  # fmt: skip
+            else:
+                prepared, _reach = self._prepare_with_waivers(run_id, resolved, spec)
         else:
             self._waiver_reach(prepared, waivers)
         with self._lock:
             self._prepared[run_id] = prepared
         return prepared
+
+    def _reprepare(
+        self,
+        run_id: str,
+        resolved: Mapping[str, Any],
+        spec: AutomationSpec,
+        recorded: str | None,
+        *,
+        refusal: tuple[str, str],
+    ) -> PreparedAutomation:
+        """The only git contact allowed where the checkout cannot be adopted: an approver's one-shot authorization
+        (``reprepare-automation``), consumed **before** the clone. The normal B6 path runs (pinned SHA, verify, lint,
+        waivers, cache copy) and must yield the tree digest B6 recorded, when it recorded one; a different tree is
+        discarded and stops the step for a human. Without an authorization: ``refusal`` (reason, message)."""
+        auth = self._take_authorization(run_id)
+        if auth is None:
+            raise StepRefusal(ErrorClass.NEEDS_HUMAN, refusal[0], message=refusal[1][:300])
+        if auth.sha != spec.ref:
+            self._finish_authorization(
+                auth, ok=False, outcome="refused: the authorized SHA is not the plan's pin"
+            )
+            raise StepRefusal(
+                ErrorClass.NEEDS_HUMAN,
+                refusal[0],
+                message="the authorized SHA is not the plan's pin",
+            )
+        log.warning("re-cloning the run's pinned automation inside the window on an approver's authorization",
+                    extra={"run_id": run_id, "signal_id": auth.signal_id})  # fmt: skip
+        try:
+            prepared, _reach = self._prepare_with_waivers(run_id, resolved, spec)
+        except Exception as exc:
+            self._finish_authorization(
+                auth,
+                ok=False,
+                outcome=f"failed: {type(exc).__name__}: {str(exc)[:200]}",
+                recorded_digest=recorded,
+            )
+            raise
+        if recorded is not None and prepared.tree_digest != recorded:
+            with contextlib.suppress(Exception):
+                self.runner.release(
+                    prepared
+                )  # never adopted later: the next attempt must not find it
+            self._finish_authorization(
+                auth, ok=False, outcome="refused: the re-clone differs from the tree B6 verified",
+                recorded_digest=recorded, tree_digest=prepared.tree_digest,
+            )  # fmt: skip
+            raise StepRefusal(
+                ErrorClass.NEEDS_HUMAN, reprepare.REPREPARE_MISMATCH,
+                message="the re-clone of the pinned SHA does not have the tree digest B6 recorded",
+                recorded_tree_digest=recorded, tree_digest=prepared.tree_digest,
+            )  # fmt: skip
+        self._finish_authorization(
+            auth, ok=True, outcome="re-cloned and verified", recorded_digest=recorded,
+            tree_digest=prepared.tree_digest,
+        )  # fmt: skip
+        return prepared
+
+    def _take_authorization(self, run_id: str) -> reprepare.Authorization | None:
+        with self.engine.begin() as c:
+            return reprepare.take(c, run_id)
+
+    def _finish_authorization(self, auth: reprepare.Authorization, **outcome: Any) -> None:
+        with self.engine.begin() as c:
+            reprepare.finish(c, auth, **outcome)
 
     def _waivers(self, resolved: Mapping[str, Any]) -> StaticWaivers:
         """The active lint waivers of the plan's profile version (SF-13), as the B6 lint applies them. The plan hash
@@ -1096,3 +1184,6 @@ class _LazyRunner:
     ) -> PhaseOutcome:
         outcome: PhaseOutcome = self._get().run_phase(prepared, req, fence=fence)
         return outcome
+
+    def release(self, prepared: PreparedAutomation) -> None:
+        self._get().release(prepared)
