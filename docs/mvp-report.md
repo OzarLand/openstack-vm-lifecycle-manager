@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Owner | Agent 1 — PM / Engineering Manager |
-| Status | **Draft, 2026-11-07.** The primary acceptance scenario has not completed on Felcloud yet. The first full attempt (ACC-01c) failed at the cutover (bugs W and X, now fixed in code) and was restored to blue; a re-run is pending. Nothing below is marked "lab validated" without stored evidence. |
+| Status | **Draft, 2026-11-08.** The primary acceptance scenario **passed on Felcloud** (ACC-01d, run `01a1b752`, 2026-11-07). The first attempt (ACC-01c) had failed at the cutover (bugs W and X, fixed in #31). The three kept failure scenarios are running. Nothing below is marked "lab validated" without stored evidence. |
 | Code | `main` at `3d4fce0` or later (PRs #1–#29) |
 
 ## 1. What the MVP is
@@ -29,14 +29,15 @@ Vocabulary: designed → implemented → unit tested → integration tested → 
 | Host-key scan and human confirmation | Integration tested, reviewed (IS-1..IS-12 fixed) ; used on Felcloud | Reviews; lab |
 | Renewal build phase (B1–B9) | Integration tested; **ran end to end on Felcloud twice** (about 3 min 17 s, 0 probe failures, data volume never attached twice) | ACC-01b build evidence |
 | Abort / discard in the build phase | Integration tested; **ran on Felcloud** after bug S was fixed (green deleted, blue untouched, locks released) | 2026-11-07 |
-| Cutover window (W1–W10) | Integration tested; **first Felcloud attempt failed at W1** (bug W), fixed in code, not yet re-run | ACC-01c (2026-11-07) |
-| Restore (S1–S10) after an operator rollback | Integration tested; **ran on Felcloud**: volume and floating IP back on blue, data intact; S7 needed a manual service start (bug X), fixed in code, not yet re-run | ACC-01c |
-| Retention, retirement (G3) | Integration tested; **not yet run on Felcloud** | Pending a successful cutover |
+| Cutover window (W1–W10) | **Lab validated** (ACC-01d): all steps first attempt, no manual intervention; downtime 134.7 s (OVLM), 112.8 s (probe through the floating IP); volume never attached twice (2,357 samples); data marker and fs UUID equal | ACC-01d; ACC-01c failed first (bug W) |
+| Restore (S1–S10) after an operator rollback | Integration tested; **ran on Felcloud**: volume and floating IP back on blue, data intact; S7 needed a manual service start (bug X), fixed in #31; re-run is failure scenario 3 | ACC-01c |
+| Retention, retirement (G3, X1) | **Lab validated** (ACC-01d): blue deleted, data volume kept on green, run completed with 0 locks; G3 by a lab account (D-7b) | ACC-01d |
 | Failure scenarios (Felcloud) | Not run yet | Prepared |
 | Production validated | No | — |
 
-**The headline claim "a renewal is lab validated on Felcloud" is not made yet.** It needs the cutover and retirement
-to run, with the measured downtime and the guard diff, and the failure scenarios.
+**A renewal is lab validated on Felcloud** (ACC-01d, 2026-11-07): G1 and G2 decided by the maintainer in OVLM
+(`password+totp`), B1–B9, W1–W10, R1, R2, G3, X1, guard diff PASS (0 violations), evidence stored. Failure behaviour
+on Felcloud is limited to the three kept scenarios (section 5); the others are integration tested only.
 
 ## 3. What the lab found that CI could not
 
@@ -78,12 +79,19 @@ client) could not see. All are fixed, each with a test that fails without the fi
   (`systemctl start`) and then retried S7; OVLM finished the restore. Downtime: about 949 s measured by OVLM, about
   896 s by the probe through the floating IP. Guard diff PASS. This run is **not** evidence of a successful
   renewal; it is evidence that the restore keeps the data on blue (volume never attached twice, marker equal).
+- **D-7:** at the maintainer's request (2026-11-07), the failure-scenario runs are approved by two lab-only accounts
+  (`lab-agent-a` approver, `lab-agent-b` operator), created through a temporary admin that was disabled right after.
+  Their secrets stay on the lab host; all three accounts are removed at teardown. These runs prove failure behaviour,
+  not the approval control.
+- **D-7b:** G3 of ACC-01d was decided by `lab-agent-a`, on the maintainer's direct authorization. The approval-control
+  evidence of ACC-01d is G1 and G2, decided by the maintainer; G3 proves the retirement mechanics only.
 
 ## 5. What remains before the MVP is done
 
-1. Redeploy with the W and X fixes, pin the profile to the fixed automation commit, discard the ACC-01c green; then
-   the maintainer: G1, G2, G3 on Felcloud; OVLM-measured and probe-measured downtime.
-2. The failure scenarios on Felcloud.
+1. ~~Primary scenario on Felcloud~~: done (ACC-01d).
+2. The failure scenarios on Felcloud, reduced by the maintainer's decision to three: LAB-04 (configure failure),
+   LAB-01 (worker kill in the window), operator rollback after the cutover. The others (LAB-02/03/05..09) remain
+   integration tested only.
 3. Evidence, guard diff, teardown (`destroy-lab.sh`; floating IPs stay allocated).
 4. This report finalised and the README statuses updated with what is lab validated.
 
