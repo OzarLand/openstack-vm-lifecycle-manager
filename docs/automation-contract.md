@@ -120,7 +120,7 @@ Rules (mandatory):
 - Idempotent: if already stopped/unmounted, report ok. "Already unmounted" means a record of an earlier quiesce exists (the reference workload keeps it on the root disk, `last-quiesce.json`) and its marker checksum is reported again.
 - **Not mounted and no earlier record**: on the OLD VM (W1) this state is unknown (someone unmounted it, or the VM is not the one OVLM thinks): fail `needs_human`. On the NEW VM in restore step S2, OVLM passes `ovlm.quiesce_allow_unmounted: true` (lab finding AA, 2026-11-08: the worker died after W5 attached the volume and before W6 mounted it, so green holds the volume but never mounted it). Then the phase stops the units as usual and reports **ok** with `facts.was_mounted: false` and **no** marker checksum (`facts.marker_sha256: null`), writes no record, and unmounts nothing. The playbook honours the flag only when `ovlm.role` is `new`. OVLM never passes it from W1, and the restore compares no marker (S7's healthcheck on the old VM gets no `expected_marker_checksum`): S2's evidence records `green_was_mounted: false` and `marker_comparison: skipped ...` so the gap is visible, and W1's checksum from the old VM stays the recorded value. A repo that ignores the flag still fails `needs_human` there, which is safe (restore parks).
 - Must refuse (fail needs-human) if `umount` fails after the bounded wait: OVLM must not detach a mounted volume in MVP. OVLM never passes a "force" flag.
-- Output includes final marker checksum (the value later compared on the NEW VM), except in the S2 "never mounted" case above (`null`).
+- Output includes final marker checksum (the value later compared on the NEW VM) as `facts.marker_sha256` (section 3.7; the same key in `data_attach` and `healthcheck`). Except in the S2 "never mounted" case above (`null`), it is **required whenever the renewal has a data volume**: a successful quiesce without it parks W1 `needs_human` (`quiesce_no_marker`) before the old VM is stopped, because without it OVLM cannot prove on the new VM that the data survived. OVLM does not skip the comparison silently. The data marker file must therefore exist on the volume before a renewal.
 - This phase causes service downtime; OVLM requires the maintenance-window decision to be recorded before calling it (section 10).
 
 ### 3.5 `start_service` (NEW VM)
@@ -156,6 +156,7 @@ Written by the playbook to `{{ ovlm_result_path }}` (OVLM passes the path; ASSUM
   "facts": {"device": "/dev/disk/by-id/...", "fs_uuid": "...", "marker_sha256": "..."},
   "checks": [{"name":"mount","ok":true,"detail":"..."}], "message": "short, no secrets" }
 ```
+The marker key is `marker_sha256` in every phase; OVLM reads no other spelling (a `marker_checksum` fact is ignored, so W1 parks). `tests/unit/test_marker_contract.py` ties this name to OVLM and the reference roles.
 OVLM must treat a missing or malformed result as `classification = needs_human` for data phases and `retryable` (bounded) for `configure`/`healthcheck`. `result.json` is size-limited (64 KiB, ASSUMPTION) and redacted again by OVLM.
 
 ### 3.8 `rollback_hooks` (optional)

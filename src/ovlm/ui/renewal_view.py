@@ -387,6 +387,16 @@ NEEDS_HUMAN: Mapping[str, tuple[str, list[str]]] = {
             "Retry step, or Abort to stop the window safely.",
         ],
     ),
+    "quiesce_no_marker": (
+        "The service on the old VM was stopped and the data volume unmounted, but the automation reported no data "
+        "marker checksum. Without it OVLM cannot prove on the new VM that the data survived, so it stopped before "
+        "stopping the old VM or detaching the volume.",
+        [
+            "Rollback restores the old VM (read its effect below).",
+            "Before a new renewal: make the automation repository's quiesce phase report facts.marker_sha256 "
+            "(automation contract 3.4, 3.7) and make sure the data marker file exists on the volume.",
+        ],
+    ),  # fmt: skip
     "data_attach_failed": (
         "The data volume could not be mounted on the new VM.",
         [

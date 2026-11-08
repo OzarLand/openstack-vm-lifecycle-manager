@@ -7,6 +7,9 @@ answers from whichever server holds the FIP's port, with that server's id as ide
 reference role (contract 3.4): a guest with the volume not mounted and no earlier quiesce record (on its root disk)
 is refused as "state unknown" (needs_human), unless OVLM passed ``quiesce_allow_unmounted`` (restore S2, role new):
 then it is ok with ``was_mounted: false`` and no marker (lab finding AA).
+Result facts use the contract's names (automation-contract 3.7, ``marker_sha256``), the same as the reference
+roles: a double with its own spelling would hide a field-name mismatch (defect AB; ``tests/unit/test_marker_contract.py``
+checks both).
 """
 
 from __future__ import annotations
@@ -76,6 +79,8 @@ class FakeGuest:
     external_down: bool = False
     #: (server id, quiesce_allow_unmounted) of every quiesce call that reached the guest
     quiesce_calls: list[tuple[str, bool]] = field(default_factory=list)
+    #: (phase, expected_marker) of every phase call that reached the guest: what OVLM asked the playbook to compare
+    expected_markers: list[tuple[str, str | None]] = field(default_factory=list)
 
     def g(self, sid: str) -> GuestState:
         return self.state.setdefault(sid, GuestState())
@@ -123,6 +128,7 @@ class FakeGuest:
         )
         self.sync()
         self.calls.append((phase, target.server_id))
+        self.expected_markers.append((phase, expected_marker))
         if phase in self.hooks:
             self.hooks.pop(phase)()
         forced = self._fail(phase)
@@ -143,15 +149,15 @@ class FakeGuest:
                 st.mounted = False
                 st.quiesce_record = self.marker
                 return PhaseResult(
-                    "ok", "quiesced", {"marker_checksum": self.marker, "was_mounted": True}
+                    "ok", "quiesced", {"marker_sha256": self.marker, "was_mounted": True}
                 )
             if st.quiesce_record is not None:
                 return PhaseResult(
-                    "ok", "quiesced", {"marker_checksum": st.quiesce_record, "was_mounted": False}
+                    "ok", "quiesced", {"marker_sha256": st.quiesce_record, "was_mounted": False}
                 )
             if quiesce_allow_unmounted and target.role == "new":
                 return PhaseResult(
-                    "ok", "nothing to quiesce", {"marker_checksum": None, "was_mounted": False}
+                    "ok", "nothing to quiesce", {"marker_sha256": None, "was_mounted": False}
                 )
             return PhaseResult("needs_human", "not mounted and no earlier quiesce record: state is unknown",
                                {"error_kind": "planned"})  # fmt: skip
@@ -162,7 +168,7 @@ class FakeGuest:
                 return PhaseResult("needs_human", "device not found")
             st.mounted = True
             return PhaseResult(
-                "ok", "mounted", {"fs_uuid": self.fs_uuid, "marker_checksum": self.marker}
+                "ok", "mounted", {"fs_uuid": self.fs_uuid, "marker_sha256": self.marker}
             )
         if phase == "start_service":
             if self.volume_id and not st.mounted:
@@ -171,7 +177,7 @@ class FakeGuest:
             return PhaseResult("ok", "started")
         if phase == "healthcheck":
             if st.units and (st.mounted or not self.volume_id):
-                return PhaseResult("ok", "healthy", {"marker_checksum": self.marker})
+                return PhaseResult("ok", "healthy", {"marker_sha256": self.marker})
             return PhaseResult("retryable", "unhealthy")
         raise AssertionError(phase)
 
