@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | Owner | Agent 1 — PM / Engineering Manager |
-| Status | **Draft, 2026-11-08.** The primary acceptance scenario **passed on Felcloud** (ACC-01d, run `01a1b752`, 2026-11-07). The first attempt (ACC-01c) had failed at the cutover (bugs W and X, fixed in #31). The three kept failure scenarios are running. Nothing below is marked "lab validated" without stored evidence. |
-| Code | `main` at `3d4fce0` or later (PRs #1–#29) |
+| Status | **Draft, 2026-11-08.** The primary acceptance scenario **passed on Felcloud** (ACC-01d, run `01a1b752`, 2026-11-07). The first attempt (ACC-01c) had failed at the cutover (bugs W and X, fixed in #31). Failure scenarios: LAB-04 passed; LAB-01 found defect Z (fixed in #34, #35) and is being re-run; the operator rollback is next. Nothing below is marked "lab validated" without stored evidence. |
+| Code | `main` at `24cf092` or later (PRs #1–#35) |
 
 ## 1. What the MVP is
 
@@ -30,9 +30,9 @@ Vocabulary: designed → implemented → unit tested → integration tested → 
 | Renewal build phase (B1–B9) | Integration tested; **ran end to end on Felcloud twice** (about 3 min 17 s, 0 probe failures, data volume never attached twice) | ACC-01b build evidence |
 | Abort / discard in the build phase | Integration tested; **ran on Felcloud** after bug S was fixed (green deleted, blue untouched, locks released) | 2026-11-07 |
 | Cutover window (W1–W10) | **Lab validated** (ACC-01d): all steps first attempt, no manual intervention; downtime 134.7 s (OVLM), 112.8 s (probe through the floating IP); volume never attached twice (2,357 samples); data marker and fs UUID equal | ACC-01d; ACC-01c failed first (bug W) |
-| Restore (S1–S10) after an operator rollback | Integration tested; **ran on Felcloud**: volume and floating IP back on blue, data intact; S7 needed a manual service start (bug X), fixed in #31; re-run is failure scenario 3 | ACC-01c |
+| Restore (S1–S10) after an operator rollback | Integration tested; **ran on Felcloud**: volume and floating IP back on blue, data intact; S7 needed a manual service start (bug X), fixed in #31; re-run is failure scenario 3. A second restore (after the LAB-01 rollback) is parked at S2 on defect Z, to be released with `reprepare-automation` | ACC-01c |
 | Retention, retirement (G3, X1) | **Lab validated** (ACC-01d): blue deleted, data volume kept on green, run completed with 0 locks; G3 by a lab account (D-7b) | ACC-01d |
-| Failure scenarios (Felcloud) | Not run yet | Prepared |
+| Failure scenarios (Felcloud) | LAB-04 (configure failure) **passed**: green kept, run parked for a human, no change to blue. LAB-01 (worker kill in the window), first attempt: takeover worked at W3 and W5, then W6 parked on defect Z; re-run pending. Operator rollback: pending | Lab evidence 2026-11-07/08 |
 | Production validated | No | — |
 
 **A renewal is lab validated on Felcloud** (ACC-01d, 2026-11-07): G1 and G2 decided by the maintainer in OVLM
@@ -41,7 +41,7 @@ on Felcloud is limited to the three kept scenarios (section 5); the others are i
 
 ## 3. What the lab found that CI could not
 
-Running on a real cloud with the real process model found 21 defects that the CI suites (root, fake cloud, test HTTP
+Running on a real cloud with the real process model found 22 defects that the CI suites (root, fake cloud, test HTTP
 client) could not see. All are fixed, each with a test that fails without the fix where a test is possible.
 
 | ID | Defect | Fix |
@@ -62,8 +62,9 @@ client) could not see. All are fixed, each with a test that fails without the fi
 | Q | Evidence redaction erased audit action names | #28 |
 | R | Ed25519 lab certificate refused by browsers | lab configuration |
 | S | A server Nova still lists as DELETED blocked the abort | #28 |
-| W | Quiesce busy check used `fuser -vm`, which exits 0 on every idle mount: every real cutover parked at W1 | this fix |
-| X | Restore after a W1 park never restarted the service on blue: S6 saw unknown unit state as healthy, S7 only health-checked | this fix |
+| W | Quiesce busy check used `fuser -vm`, which exits 0 on every idle mount: every real cutover parked at W1 | #31 |
+| X | Restore after a W1 park never restarted the service on blue: S6 saw unknown unit state as healthy, S7 only health-checked | #31 |
+| Z | A worker container restart inside the window emptied the tmpfs `run_root`: B6's verified checkout was gone, every later automation phase (W6–W8, S2, S7) parked, and no exit existed (re-cloning in the window is refused) | #34 (checkout cache on persistent storage, re-adopted only on an equal tree digest); #35 (`reprepare-automation`: an approver-authorized, audited, one-shot re-clone of the pinned SHA, kept only on B6's digest) |
 
 ## 4. Deviations, recorded honestly
 
@@ -85,17 +86,25 @@ client) could not see. All are fixed, each with a test that fails without the fi
   not the approval control.
 - **D-7b:** G3 of ACC-01d was decided by `lab-agent-a`, on the maintainer's direct authorization. The approval-control
   evidence of ACC-01d is G1 and G2, decided by the maintainer; G3 proves the retirement mechanics only.
+- **D-8 (LAB-01, first attempt):** after the operator rollback (by `lab-agent-b`) the restore parked at S2 on defect Z.
+  The lab service stayed down from about 06:49Z, with blue SHUTOFF, the floating IP on blue and the data volume
+  attached to green only (never attached twice). No manual cloud action was taken: the run waits for the
+  `reprepare-automation` exit (#35), used by `lab-agent-a`. The outage time is a lab finding, not a measured downtime.
 
 ## 5. What remains before the MVP is done
 
 1. ~~Primary scenario on Felcloud~~: done (ACC-01d).
-2. The failure scenarios on Felcloud, reduced by the maintainer's decision to three: LAB-04 (configure failure),
-   LAB-01 (worker kill in the window), operator rollback after the cutover. The others (LAB-02/03/05..09) remain
+2. The failure scenarios on Felcloud, reduced by the maintainer's decision to three: LAB-04 (configure failure,
+   **passed**), LAB-01 (worker kill in the window; re-run after #34/#35), operator rollback after the cutover. The others (LAB-02/03/05..09) remain
    integration tested only.
 3. Evidence, guard diff, teardown (`destroy-lab.sh`; floating IPs stay allocated).
 4. This report finalised and the README statuses updated with what is lab validated.
 
 ## 6. After the MVP
+
+Known follow-ups found during the lab: run checkouts in the tmpfs `run_root` are not released when a run ends (tmpfs
+memory grows with each run until the worker restarts; to confirm and fix); login does not redirect back to the requested page.
+
 
 The roadmap's security follow-ups (SF), AU/UI items and V1 list: signed approvals, OIDC, multiple data volumes, boot
 from volume, other strategies.
