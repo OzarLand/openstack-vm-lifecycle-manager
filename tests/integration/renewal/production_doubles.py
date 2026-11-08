@@ -262,6 +262,7 @@ class RunnerDouble:
             data_volume=None if dv is None else {"id": dv.id, "mount_point": dv.mount_point,
                                                  "fs_type": dv.fs_type, "first_use": dv.first_use},
             expected_marker=req.expected_marker_checksum, expected_fs_uuid=req.expected_fs_uuid,
+            quiesce_allow_unmounted=req.quiesce_allow_unmounted,
         )  # fmt: skip
         cls = Classification(res.classification)
         result = ValidatedResult(req.phase, res.ok, False, cls, dict(res.facts), (), res.reason)

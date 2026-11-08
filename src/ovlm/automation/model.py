@@ -109,6 +109,11 @@ class PhaseRequest:
     data_volume: DataVolume | None = None
     expected_marker_checksum: str | None = None
     expected_fs_uuid: str | None = None
+    #: ``quiesce`` on the NEW VM during restore (S2) only: a data volume that is not mounted and has no earlier
+    #: quiesce record is a safe end state there (the worker died between W5 and W6, green never mounted it), not
+    #: "state unknown". Never set for W1 on the old VM; :func:`~ovlm.automation.render.build_extravars` refuses it
+    #: for any other phase or role (lab finding AA, contract 3.4).
+    quiesce_allow_unmounted: bool = False
     rollback_phase: Phase | None = None
     check_mode: bool = False
     #: Extra known secret values to redact besides the key and vault password (e.g. profile secret refs).

@@ -816,7 +816,7 @@ class RunnerGuestPort:
     def run_phase(
         self, *, run_id: str, step_id: str, attempt: int, phase: str, target: GuestRef, timeout: float,
         fence: FenceLike, data_volume: Mapping[str, Any] | None = None, expected_marker: str | None = None,
-        expected_fs_uuid: str | None = None,
+        expected_fs_uuid: str | None = None, quiesce_allow_unmounted: bool = False,
     ) -> PhaseResult:  # fmt: skip
         resolved = self._resolved(run_id)
         creds = self._creds(resolved)
@@ -838,6 +838,7 @@ class RunnerGuestPort:
                                user=resolved["guest_access"]["ssh_user"]),
             ssh_key=creds.guest_key, service_name=resolved["service"]["slug"], project_scope=resolved["scope"],
             data_volume=dv, expected_marker_checksum=expected_marker, expected_fs_uuid=expected_fs_uuid,
+            quiesce_allow_unmounted=quiesce_allow_unmounted,
         )  # fmt: skip
         outcome = self.runner.run_phase(prepared, req, fence=fence)
         record_id = None

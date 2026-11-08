@@ -83,6 +83,7 @@ Common extra-vars (always passed, as a JSON file `env/extravars`, never on the c
 | `ovlm.data_volume.fs_type` | string | expected fs, e.g. `ext4` |
 | `ovlm.data_volume.first_use` | bool | **Always `false` for renewals**: the renewal strategy cannot pass `true`, and the value passed is recorded in the step evidence. `true` is reserved for a future initial-provisioning strategy with its own gate. A blank volume during a renewal stops for a human (decision table, section 3.3) and is never formatted. |
 | `ovlm.vars` | object | profile `inventory_vars` (non-secret) |
+| `ovlm.quiesce_allow_unmounted` | bool, optional | `quiesce` on the NEW VM in restore step S2 only (section 3.4). OVLM refuses to render it for any other phase or for role `old`; absent means `false` |
 
 Secrets are NOT in this object (section 5).
 
@@ -114,11 +115,12 @@ Rules (mandatory):
 5. Verify marker: if `data_marker` (a file path profile-defined, default `.ovlm-marker`) exists, read it; its checksum is returned in the result JSON.
 6. Never `wipefs`, `mkfs -f`, `dd`, `parted mklabel` anywhere in the repo's `data_attach`. OVLM static-lints the playbook for these strings before the run (cheap, advisory; not a proof).
 
-### 3.4 `quiesce` (runs on OLD VM, before OVLM detaches the volume)
+### 3.4 `quiesce` (runs on OLD VM, before OVLM detaches the volume; on the NEW VM in restore step S2)
 - Stop write sources: stop the service units listed in `ovlm.vars.service_units`, confirm no process holds the mount (`fuser -m`/`lsof` read-only), `sync`, `umount <mount_point>`; never edit fstab and never disable units. Service units are stopped, never disabled, and the fstab entry (by UUID or label, `nofail`) stays in place: restore boots the old VM again and relies on fstab to remount the volume and on enabled units to restart the service.
-- Idempotent: if already stopped/unmounted, report ok.
+- Idempotent: if already stopped/unmounted, report ok. "Already unmounted" means a record of an earlier quiesce exists (the reference workload keeps it on the root disk, `last-quiesce.json`) and its marker checksum is reported again.
+- **Not mounted and no earlier record**: on the OLD VM (W1) this state is unknown (someone unmounted it, or the VM is not the one OVLM thinks): fail `needs_human`. On the NEW VM in restore step S2, OVLM passes `ovlm.quiesce_allow_unmounted: true` (lab finding AA, 2026-11-08: the worker died after W5 attached the volume and before W6 mounted it, so green holds the volume but never mounted it). Then the phase stops the units as usual and reports **ok** with `facts.was_mounted: false` and **no** marker checksum (`facts.marker_sha256: null`), writes no record, and unmounts nothing. The playbook honours the flag only when `ovlm.role` is `new`. OVLM never passes it from W1, and the restore compares no marker (S7's healthcheck on the old VM gets no `expected_marker_checksum`): S2's evidence records `green_was_mounted: false` and `marker_comparison: skipped ...` so the gap is visible, and W1's checksum from the old VM stays the recorded value. A repo that ignores the flag still fails `needs_human` there, which is safe (restore parks).
 - Must refuse (fail needs-human) if `umount` fails after the bounded wait: OVLM must not detach a mounted volume in MVP. OVLM never passes a "force" flag.
-- Output includes final marker checksum (the value later compared on the NEW VM).
+- Output includes final marker checksum (the value later compared on the NEW VM), except in the S2 "never mounted" case above (`null`).
 - This phase causes service downtime; OVLM requires the maintenance-window decision to be recorded before calling it (section 10).
 
 ### 3.5 `start_service` (NEW VM)
