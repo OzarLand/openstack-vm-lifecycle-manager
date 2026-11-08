@@ -501,11 +501,17 @@ class RunnerLike(Protocol):
     ) -> PreparedAutomation: ...  # fmt: skip
 
     def adopt_checkout(
-        self, spec: AutomationSpec, workflow_id: str, *, waivers: StaticWaivers | None = None
+        self,
+        spec: AutomationSpec,
+        workflow_id: str,
+        *,
+        waivers: StaticWaivers | None = None,
+        expected_digest: str | None = None,
     ) -> PreparedAutomation | None:
         """The run-level checkout B6 left on disk (``automation.run_root``, tmpfs: it survives a worker *process*
-        restart, not a container restart), re-verified locally (HEAD == SHA, lint, pins); ``None`` if absent.
-        Never contacts the git host."""
+        restart) or, after a worker *container* restart, its copy in ``automation.checkout_cache`` when its tree
+        digest equals ``expected_digest`` (B6's recorded evidence); re-verified locally (HEAD == SHA, lint, pins);
+        ``None`` if neither exists. Never contacts the git host."""
         ...
 
     def run_phase(
@@ -592,8 +598,11 @@ class RunnerGuestPort:
 
     def _prepared_for(self, run_id: str) -> PreparedAutomation:
         """B6's checkout for this run. Another process prepared it (a restarted worker): re-adopt the checkout on
-        disk, re-verified locally. If it is gone, re-clone only **outside** the downtime window: nothing contacts the
-        git host inside it (automation-contract.md 2); inside it the step stops for a human."""
+        disk, re-verified locally. After a worker **container** restart the tmpfs ``run_root`` is empty: the copy B6
+        kept in ``automation.checkout_cache`` (persistent, worker-only) is adopted instead, only if its tree digest
+        equals the one B6 recorded in its step evidence (lab finding Z). If no verified copy is left, re-clone only
+        **outside** the downtime window: nothing contacts the git host inside it (automation-contract.md 2); inside
+        it the step stops for a human."""
         with self._lock:
             prepared = self._prepared.get(run_id)
         if prepared is not None:
@@ -601,12 +610,14 @@ class RunnerGuestPort:
         resolved = self._resolved(run_id)
         spec = self._spec(run_id, resolved)
         waivers = self._waivers(resolved)
-        prepared = self.runner.adopt_checkout(spec, run_id, waivers=waivers)
+        prepared = self.runner.adopt_checkout(
+            spec, run_id, waivers=waivers, expected_digest=self._recorded_tree_digest(run_id)
+        )
         if prepared is None:
             if self._in_outage(run_id):
                 raise AutomationError(
-                    "the run's verified checkout is gone (worker container restarted?); re-cloning would contact "
-                    "the git host inside the downtime window",
+                    "the run's verified checkout is gone (worker container restarted without a checkout cache?); "
+                    "re-cloning would contact the git host inside the downtime window",
                     Classification.NEEDS_HUMAN,
                 )
             prepared, _reach = self._prepare_with_waivers(run_id, resolved, spec)
@@ -672,6 +683,18 @@ class RunnerGuestPort:
                 for finding, waiver in applied:
                     hook(finding, waiver)
         return prepared, reach
+
+    def _recorded_tree_digest(self, run_id: str) -> str | None:
+        """The tree digest of the checkout B6 verified, from its step evidence in the database (outside the checkout
+        cache it vouches for). ``None`` when B6 has not succeeded or recorded none (a run prepared before it existed)."""
+        with self.engine.connect() as c:
+            ev = c.execute(
+                text("SELECT evidence FROM workflow_step WHERE run_id = :r AND step_key = 'prepare_automation' "
+                     "AND state = 'succeeded' ORDER BY seq DESC LIMIT 1"), {"r": run_id},
+            ).scalar()  # fmt: skip
+        prepared = (ev or {}).get("prepared") if isinstance(ev, dict) else None
+        digest = prepared.get("tree_digest") if isinstance(prepared, dict) else None
+        return digest if isinstance(digest, str) and digest else None
 
     def _in_outage(self, run_id: str) -> bool:
         with self.engine.connect() as c:
@@ -1054,12 +1077,17 @@ class _LazyRunner:
         return prepared
 
     def adopt_checkout(
-        self, spec: AutomationSpec, workflow_id: str, *, waivers: StaticWaivers | None = None
+        self,
+        spec: AutomationSpec,
+        workflow_id: str,
+        *,
+        waivers: StaticWaivers | None = None,
+        expected_digest: str | None = None,
     ) -> PreparedAutomation | None:
         """Local re-verification of the run's checkout with the runner's own checks (the automation module's public
         :meth:`~ovlm.automation.runner.AutomationRunner.reverify_checkout`; never contacts the git host)."""
         prepared: PreparedAutomation | None = self._get().reverify_checkout(
-            spec, workflow_id, waivers=waivers
+            spec, workflow_id, waivers=waivers, expected_digest=expected_digest
         )
         return prepared
 

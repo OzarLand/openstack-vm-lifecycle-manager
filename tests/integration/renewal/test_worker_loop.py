@@ -34,6 +34,7 @@ from tests.integration.conftest import settings_for
 from tests.integration.renewal.conftest import CFG, World, build_world, explain
 from tests.integration.renewal.doubles import FakeGuest, GuestState
 from tests.integration.renewal.production_doubles import (
+    TREE_DIGEST,
     GuestKeys,
     HttpDouble,
     RunnerDouble,
@@ -183,6 +184,10 @@ def test_full_renewal_through_the_worker_loop_with_a_crash_in_the_window(
     # the production adapter's guest side
     # one clone per run (B6); the restarted worker re-adopted the checkout on disk: no git inside the window
     assert [(len(r.prepared), len(r.adopted)) for r in h.runners] == [(1, 0), (0, 1)]
+    # the re-adoption is checked against the tree digest B6 recorded in its step evidence (lab finding Z)
+    b6 = next(s for s in w.steps() if s["step_key"] == "prepare_automation")
+    assert b6["evidence"]["prepared"]["tree_digest"] == TREE_DIGEST
+    assert h.runners[1].expected_digests == [TREE_DIGEST]
     phases = [(r.phase.value, r.target.role) for runner in h.runners for r in runner.requests]
     assert (
         ("quiesce", "old") in phases

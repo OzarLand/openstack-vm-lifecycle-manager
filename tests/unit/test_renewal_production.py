@@ -536,6 +536,9 @@ class _CheckoutPort(RunnerGuestPort):
     def _in_outage(self, run_id: str) -> bool:
         return self.outage
 
+    def _recorded_tree_digest(self, run_id: str) -> str | None:
+        return None
+
 
 @pytest.mark.parametrize(
     ("on_disk", "outage", "cloned"), [(True, True, 0), (True, False, 0), (False, False, 1)]
@@ -573,3 +576,69 @@ def test_lazy_runner_adopts_the_checkout_through_the_public_reverify() -> None:
     assert lazy.adopt_checkout(spec, "run") is prepared  # type: ignore[arg-type]
     assert lazy.adopt_checkout(spec, "gone") is None  # type: ignore[arg-type]
     assert seen == [(spec, "run"), (spec, "gone")]
+
+
+# --- lab finding Z: a worker *container* restart inside the window empties the tmpfs run_root ----------------------
+
+
+class _CachePort(_CheckoutPort):
+    """The production port over the real automation runner (file:// repository, checkout cache), with B6's recorded
+    tree digest given by the test instead of read from the database."""
+
+    def __init__(self, runner: Any, spec: Any, recorded: str | None) -> None:
+        super().__init__(runner, outage=True)
+        self.spec, self.recorded = spec, recorded
+
+    def _spec(self, run_id: str, resolved: Mapping[str, Any]) -> Any:
+        return self.spec
+
+    def _recorded_tree_digest(self, run_id: str) -> str | None:
+        return self.recorded
+
+
+def _cached_b6(tmp_path: Path) -> tuple[Any, Any, Any]:
+    from ovlm.automation import checkout as co
+    from ovlm.automation.checkout import CloneOptions
+    from ovlm.automation.model import AutomationSpec, RunnerConfig
+    from ovlm.automation.runner import AutomationRunner
+    from ovlm.renewal.production import _LazyRunner
+    from tests.unit.automation.test_checkout import make_repo
+    from tests.unit.automation.test_runner import FILES
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "ansible").write_text("#!/bin/sh\necho 'ansible [core 2.99.1]'\n")
+    (bin_dir / "ansible").chmod(0o755)
+    url, sha = make_repo(tmp_path / "src", FILES)
+    cfg = RunnerConfig(run_root=tmp_path / "run", checkout_cache=tmp_path / "cache", ansible_bin_dir=bin_dir,
+                       run_user=None, clone=CloneOptions(allowed_repos=[url], allow_file=True))  # fmt: skip
+    spec = AutomationSpec(repo=url, ref=sha)
+    prepared = AutomationRunner(cfg).prepare_automation(spec, "run")  # B6, before the window
+    co.remove_tree(cfg.run_root)  # the container restarted: tmpfs empty, the cache volume kept
+    return _LazyRunner(lambda: AutomationRunner(cfg)), spec, prepared
+
+
+def test_container_restart_in_the_window_adopts_the_cached_checkout_without_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ovlm.automation import checkout as co
+
+    runner, spec, b6 = _cached_b6(tmp_path)
+    git: list[Any] = []
+    monkeypatch.setattr(co, "_git", lambda *a, **k: git.append(a))
+    monkeypatch.setattr(co, "clone_verified", lambda *a, **k: git.append(a))
+    port = _CachePort(runner, spec, b6.tree_digest)
+    prepared = port._prepared_for("run")  # noqa: SLF001
+    assert git == []
+    assert prepared.tree_digest == b6.tree_digest and prepared.sha == b6.sha
+    assert port.has_phase("run", "data_attach")  # W6 is possible again
+
+
+@pytest.mark.parametrize("recorded", ["0" * 64, None])
+def test_container_restart_in_the_window_refuses_an_unverifiable_cached_checkout(
+    tmp_path: Path, recorded: str | None
+) -> None:
+    runner, spec, _b6 = _cached_b6(tmp_path)
+    with pytest.raises(AutomationError) as exc:
+        _CachePort(runner, spec, recorded)._prepared_for("run")  # noqa: SLF001
+    assert exc.value.classification.value == "needs_human"

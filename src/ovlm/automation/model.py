@@ -22,6 +22,11 @@ class RunnerConfig:
     """Mirror of ``automation.*`` settings (architecture.md): the settings module wires it from the TOML file."""
 
     run_root: Path
+    #: Persistent, worker-only directory keeping a copy of each run's verified checkout, so a worker *container*
+    #: restart (tmpfs ``run_root`` emptied) inside the downtime window does not strand the run (lab finding Z). The
+    #: copy is re-adopted only when its :func:`~ovlm.automation.checkout.tree_digest` equals the one B6 recorded.
+    #: ``None``: no copy (the checkout lives on ``run_root`` only).
+    checkout_cache: Path | None = None
     #: Directory holding ``ansible-runner`` and ``ansible``: the venv the worker image ships (pinned versions).
     ansible_bin_dir: Path = field(default_factory=lambda: Path(sys.executable).parent)
     #: Pre-provisioned, pinned collections (image or vendored); never populated at run time (no Galaxy).
@@ -120,9 +125,13 @@ class PreparedAutomation:
     requirements_hash: str
     ansible_core_version: str
     lint: LintResult
+    #: :func:`~ovlm.automation.checkout.tree_digest` of the verified checkout, recorded in B6's step evidence: the
+    #: only proof a cached copy may be re-adopted after a container restart.
+    tree_digest: str | None = None
 
     def evidence(self) -> dict[str, Any]:
         return {
+            "tree_digest": self.tree_digest,
             "repo": self.spec.repo,
             "sha": self.sha,
             "requirements_hash": self.requirements_hash,

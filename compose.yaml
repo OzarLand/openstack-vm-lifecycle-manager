@@ -99,6 +99,9 @@ services:
       OVLM_AUTOMATION__RUN_ROOT: /run/ovlm
       OVLM_AUTOMATION__REQUIRE_TMPFS: "true"
       OVLM_AUTOMATION__RUN_USER: ovlm-ansible
+      # Persistent copy of each run's verified checkout (digest-checked against B6's evidence on re-adoption): a
+      # container restart inside the downtime window empties the /run/ovlm tmpfs but not this volume (lab finding Z).
+      OVLM_AUTOMATION__CHECKOUT_CACHE: /var/lib/ovlm/checkouts
       OVLM_KEK__PRIVATE_KEY_FILE: /run/ovlm-kek/worker_kek   # the launcher's 0600 copy, readable by uid ovlm only
       # Egress proxy for the OpenStack APIs (openstacksdk/keystoneauth honour these; docs/install-guide.md 5a).
       # NO_PROXY must list the project subnet(s) and guest addresses: SSH never uses an HTTP proxy, and OVLM's own
@@ -111,6 +114,10 @@ services:
     tmpfs:
       - /run/ovlm:mode=0710,uid=10001,gid=10002   # automation.run_root: memory only; group ovlm-ansible may traverse
       - /run/ovlm-kek:mode=0700,uid=10001,gid=10001   # the KEK copy: uid ovlm only (not ovlm-ansible)
+    volumes:
+      # automation.checkout_cache: 0700 ovlm:ovlm (the image's empty directory seeds a new volume with that owner and
+      # mode); ovlm-ansible cannot list it. Holds no secret: verified, read-only checkouts only.
+      - checkouts:/var/lib/ovlm/checkouts
     stop_grace_period: 40s
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -131,3 +138,4 @@ secrets:
 
 volumes:
   pgdata:
+  checkouts:   # worker only: automation.checkout_cache

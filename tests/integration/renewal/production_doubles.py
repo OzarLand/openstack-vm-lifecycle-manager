@@ -171,6 +171,10 @@ class HttpDouble:
                           json.dumps({"hostname": name, "counter": 1}).encode())  # fmt: skip
 
 
+#: The tree digest :class:`RunnerDouble` reports for B6's checkout (recorded in B6's step evidence).
+TREE_DIGEST = "d" * 64
+
+
 class RunnerDouble:
     """Stands in for ``AutomationRunner``: a "verified checkout" with the phase playbooks, and phases answered by the
     :class:`FakeGuest` model of the guest the request targets."""
@@ -180,6 +184,7 @@ class RunnerDouble:
         self.prepared: list[str] = []
         self.waivers: list[Any] = []
         self.adopted: list[str] = []
+        self.expected_digests: list[str | None] = []
         self.requests: list[PhaseRequest] = []
 
     def prepare_automation(
@@ -194,12 +199,25 @@ class RunnerDouble:
             if phase not in optional or phase.value in self.guest.phases:
                 (checkout / spec.playbook_dir / f"{phase.value}.yml").write_text("- hosts: all\n")
         return PreparedAutomation(
-            spec, workflow_id, checkout, spec.ref, "none", "2.19.4", LintResult()
+            spec,
+            workflow_id,
+            checkout,
+            spec.ref,
+            "none",
+            "2.19.4",
+            LintResult(),
+            tree_digest=TREE_DIGEST,
         )
 
     def adopt_checkout(
-        self, spec: AutomationSpec, workflow_id: str, *, waivers: Any = None
+        self,
+        spec: AutomationSpec,
+        workflow_id: str,
+        *,
+        waivers: Any = None,
+        expected_digest: str | None = None,
     ) -> PreparedAutomation | None:
+        self.expected_digests.append(expected_digest)
         checkout = self.root / workflow_id / "_checkout"
         if not checkout.is_dir():
             return None
