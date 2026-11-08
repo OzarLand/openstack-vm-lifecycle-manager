@@ -237,7 +237,7 @@ and revert. Restore runs S2 (quiesce green) before any detach.
 | # | Step | Action | Skip if | Failure |
 |---|---|---|---|---|
 | S1 | `unlock_old` | unlock blue (own lock) | not locked | unlock refused (admin lock) → needs_human (§6) |
-| S2 | `quiesce_green` | AC `quiesce.yml` on green (role `new`) | volume not attached to green or green not ACTIVE | needs_human |
+| S2 | `quiesce_green` | AC `quiesce.yml` on green (role `new`) with `ovlm.quiesce_allow_unmounted: true` (S2 only, never W1; [automation-contract §3.4](automation-contract.md)): green holding the volume without ever having mounted it (worker died after W5, before W6; lab finding AA) is ok, `was_mounted: false`, no marker checksum; evidence `green_was_mounted: false`, `marker_comparison: skipped` (restore compares no marker; W1's value from blue stands) | volume not attached to green or green not ACTIVE | needs_human |
 | S3 | `stop_green` | Nova stop green | green SHUTOFF / gone | retryable → needs_human |
 | S4 | `detach_from_green` | detach volume from green | volume not attached to green | as W3 (no auto restore inside restore) → needs_human |
 | S5 | `attach_to_old` | attach volume to **stopped** blue (allowed in STOPPED, OSI §4 SV) | attached to blue | as W5 → needs_human |

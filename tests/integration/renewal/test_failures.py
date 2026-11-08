@@ -710,3 +710,24 @@ def test_stateless_profile_skips_handoff_steps(world_factory: Any) -> None:
     keys = w.keys()
     assert not any(k in keys for k in ("detach_volume", "attach_volume_green", "data_attach_green"))
     assert json.dumps(w.run()["phase"]) == '"retained"'
+
+
+def test_w1_unmounted_blue_without_quiesce_record_stays_needs_human(world: World) -> None:
+    """Lab finding AA keeps W1 strict: blue with the data volume not mounted and no earlier quiesce record is an
+    unknown state. OVLM never passes ``quiesce_allow_unmounted`` to W1, so the quiesce refuses and the run parks
+    inside the window, with no automatic restore."""
+    w = world
+    blue = w.ids["blue"]
+
+    def unmounted_by_hand() -> None:
+        w.guest.g(
+            blue
+        ).mounted = False  # somebody unmounted the volume on blue; no quiesce ever ran there
+
+    w.guest.hooks["quiesce"] = unmounted_by_hand
+    to_cutover(w)
+    w.drive()
+    r = parked(w, "quiesce_old_failed")
+    assert not r["auto_restore_used"] and r["phase"] == "window"
+    assert w.guest.quiesce_calls == [(blue, False)]
+    assert w.attached() == [blue] and w.fip_port() == w.ids["blue_port"]

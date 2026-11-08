@@ -28,6 +28,8 @@ ovlm_packages:
 # --- optional values OVLM may pass (healthcheck) ---
 ovlm_expected_marker: "{{ ovlm.expected_marker_checksum | default('') }}"
 ovlm_expected_fs_uuid: "{{ ovlm.expected_fs_uuid | default('') }}"
+# --- optional value OVLM passes to quiesce only from restore step S2 (NEW VM); never for W1 (contract 3.4) ---
+ovlm_quiesce_allow_unmounted: "{{ ovlm.quiesce_allow_unmounted | default(false) | bool }}"
 
 # --- where the ovlm.result/1 JSON is written (on the controller) ---
 ovlm_result_path: "{{ lookup('ansible.builtin.env', 'PWD') }}/artifacts/result.json"

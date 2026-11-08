@@ -101,6 +101,14 @@ def build_extravars(
         ovlm["expected_marker_checksum"] = req.expected_marker_checksum
     if req.expected_fs_uuid:
         ovlm["expected_fs_uuid"] = req.expected_fs_uuid
+    if req.quiesce_allow_unmounted:
+        # Restore quiesce of green (S2) only. W1 on the old VM must keep refusing an unmounted volume without a
+        # record: there it means the state is unknown (contract 3.4, lab finding AA).
+        if req.phase is not Phase.QUIESCE or req.target.role != "new":
+            raise AutomationError(
+                "quiesce_allow_unmounted is only for the quiesce phase on the new VM"
+            )
+        ovlm["quiesce_allow_unmounted"] = True
     if req.phase is Phase.ROLLBACK_HOOKS:
         if req.rollback_phase is None:
             raise AutomationError("rollback_hooks needs the phase that failed")

@@ -3,7 +3,10 @@
 ``FakeGuest`` models what matters for data safety: the data volume's content marker travels with the volume; a
 guest's mount and units follow its power state (a boot remounts by fstab if the volume is attached and starts the
 enabled units, SRE-R-1); ``data_attach`` refuses a volume that is not attached to that guest; the external probe
-answers from whichever server holds the FIP's port, with that server's id as identity.
+answers from whichever server holds the FIP's port, with that server's id as identity. ``quiesce`` behaves like the
+reference role (contract 3.4): a guest with the volume not mounted and no earlier quiesce record (on its root disk)
+is refused as "state unknown" (needs_human), unless OVLM passed ``quiesce_allow_unmounted`` (restore S2, role new):
+then it is ok with ``was_mounted: false`` and no marker (lab finding AA).
 """
 
 from __future__ import annotations
@@ -51,6 +54,8 @@ class GuestState:
     mounted: bool = False
     units: bool = False
     down: bool = False
+    #: marker checksum the last quiesce recorded on this guest's root disk (survives reboots, like the real record)
+    quiesce_record: str | None = None
 
 
 @dataclass
@@ -69,6 +74,8 @@ class FakeGuest:
     hooks: dict[str, Callable[[], None]] = field(default_factory=dict)
     pin_attempts: int = 0
     external_down: bool = False
+    #: (server id, quiesce_allow_unmounted) of every quiesce call that reached the guest
+    quiesce_calls: list[tuple[str, bool]] = field(default_factory=list)
 
     def g(self, sid: str) -> GuestState:
         return self.state.setdefault(sid, GuestState())
@@ -107,9 +114,13 @@ class FakeGuest:
     def run_phase(
         self, *, run_id: str, step_id: str, attempt: int, phase: str, target: GuestRef, timeout: float,
         fence: FenceLike, data_volume: Mapping[str, Any] | None = None, expected_marker: str | None = None,
-        expected_fs_uuid: str | None = None,
+        expected_fs_uuid: str | None = None, quiesce_allow_unmounted: bool = False,
     ) -> PhaseResult:  # fmt: skip
         fence.check(f"spawn:{phase}")
+        assert not quiesce_allow_unmounted or (phase == "quiesce" and target.role == "new"), (
+            phase,
+            target.role,
+        )
         self.sync()
         self.calls.append((phase, target.server_id))
         if phase in self.hooks:
@@ -126,8 +137,24 @@ class FakeGuest:
         if phase in ("preflight", "configure", "rollback_hooks"):
             return PhaseResult("ok", "ok")
         if phase == "quiesce":
-            st.units = st.mounted = False
-            return PhaseResult("ok", "quiesced", {"marker_checksum": self.marker})
+            self.quiesce_calls.append((target.server_id, quiesce_allow_unmounted))
+            st.units = False
+            if st.mounted:
+                st.mounted = False
+                st.quiesce_record = self.marker
+                return PhaseResult(
+                    "ok", "quiesced", {"marker_checksum": self.marker, "was_mounted": True}
+                )
+            if st.quiesce_record is not None:
+                return PhaseResult(
+                    "ok", "quiesced", {"marker_checksum": st.quiesce_record, "was_mounted": False}
+                )
+            if quiesce_allow_unmounted and target.role == "new":
+                return PhaseResult(
+                    "ok", "nothing to quiesce", {"marker_checksum": None, "was_mounted": False}
+                )
+            return PhaseResult("needs_human", "not mounted and no earlier quiesce record: state is unknown",
+                               {"error_kind": "planned"})  # fmt: skip
         if phase == "data_attach":
             assert data_volume is not None and data_volume["first_use"] is False
             vol = self.cloud.snapshot()["volumes"][data_volume["id"]]

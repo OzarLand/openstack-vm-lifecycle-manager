@@ -147,7 +147,10 @@ class GuestPort(Protocol):
         data_volume: Mapping[str, Any] | None = None,
         expected_marker: str | None = None,
         expected_fs_uuid: str | None = None,
-    ) -> PhaseResult: ...
+        quiesce_allow_unmounted: bool = False,
+    ) -> PhaseResult:
+        """``quiesce_allow_unmounted``: S2 only (quiesce of green during restore); see contract 3.4."""
+        ...
 
     def has_phase(self, run_id: str, phase: str) -> bool:
         """Whether the prepared repository has the optional playbook (``preflight``, ``rollback_hooks``)."""

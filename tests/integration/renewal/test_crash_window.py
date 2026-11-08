@@ -134,3 +134,44 @@ def test_abort_crash_after_green_was_deleted_finishes_the_discard(world: World, 
     assert r["state"] == "rolled_back", explain(w)
     assert w.cloud.calls.count("delete_server") == 1
     assert w.locks() == [] and w.cloud.snapshot()["servers"][w.ids["blue"]]["status"] == "ACTIVE"
+
+
+def test_worker_killed_between_w5_and_w6_rollback_quiesces_the_unmounted_green(
+    world: World,
+) -> None:
+    """Lab finding AA (2026-11-08): the worker dies after W5 attached the volume to green and before W6 mounted it.
+    W6's takeover parks (data_phase_interrupted); the operator rolls back. S2 then quiesces a green that holds the
+    volume but never mounted it and has no earlier quiesce record. OVLM passes ``quiesce_allow_unmounted`` from S2
+    only, so that state is ok there (nothing to stop or unmount) and the restore reaches S10 with the volume and the
+    FIP back on blue. Without it, S2 refused "state is unknown" and the restore parked."""
+    w = world
+    to_cutover(w)
+    _crash("data_attach_green", "after_intent")
+    w.drive()
+    r = w.run()
+    assert r["state"] == "needs_human" and r["needs_human_reason"] == "data_phase_interrupted", (
+        explain(w)
+    )
+    green = w.green_id()
+    assert green is not None and w.attached() == [green]
+    assert not w.guest.g(green).mounted and w.guest.g(green).quiesce_record is None
+    assert ("data_attach", green) not in w.guest.calls  # W6 never ran its playbook
+    w.signal("rollback", tc=w.blue_tc())
+    w.drive()
+    restored(w)
+    s2 = next(s for s in w.steps() if s["step_key"] == "quiesce_green")
+    assert s2["state"] == "succeeded", explain(w)
+    assert (
+        s2["evidence"]["green_was_mounted"] is False and s2["evidence"]["marker_checksum"] is None
+    )
+    assert s2["evidence"]["marker_comparison"].startswith("skipped"), s2["evidence"]
+    lock = next(s for s in w.steps() if s["step_key"] == "lock_green")
+    assert lock["state"] == "succeeded" and lock["evidence"]["green_locked"].startswith(
+        "ovlm:restored:"
+    )
+    # S2 is the only quiesce that may accept "never mounted"; W1 on blue never got the flag
+    assert (w.ids["blue"], False) in w.guest.quiesce_calls and (
+        green,
+        True,
+    ) in w.guest.quiesce_calls
+    assert all(not allow for sid, allow in w.guest.quiesce_calls if sid == w.ids["blue"])
