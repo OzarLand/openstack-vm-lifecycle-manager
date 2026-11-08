@@ -117,6 +117,10 @@ RUN --mount=type=secret,id=pip_ca,required=false \
 COPY --from=venv-worker /opt/venv /opt/venv
 COPY --from=collections /opt/ovlm/collections /opt/ovlm/collections
 COPY docker/worker-entrypoint.sh /usr/local/bin/ovlm-worker-entrypoint
+# automation.checkout_cache (compose mounts the `checkouts` volume here): created 0700 ovlm:ovlm so that Docker seeds a
+# new named volume with this owner and mode. The worker has no CAP_CHOWN/CAP_FOWNER, so it cannot be fixed at start;
+# the worker refuses a cache directory it does not own, and `make smoke` checks 0700 ovlm, unlistable by ovlm-ansible.
+RUN install -d -m 0700 -o 10001 -g 10001 /var/lib/ovlm/checkouts
 USER ovlm
 ENTRYPOINT ["/usr/local/bin/ovlm-worker-entrypoint"]
 CMD ["worker"]

@@ -5,10 +5,16 @@ and symlinks that leave the tree, drops ``.git`` and makes the tree read-only. E
 local copy (:func:`copy_for_attempt`): nothing contacts the git host inside the downtime window.
 
 Git runs with a scrubbed environment (no user config, no hooks, no prompts, protocol allowlist).
+
+:func:`tree_digest` fingerprints a verified checkout (paths, types, modes, symlink targets, contents). B6 records it in
+its step evidence, so a copy kept on persistent storage (``automation.checkout_cache``) can be re-adopted after a
+worker container restart only if it is byte-for-byte the tree that was verified (lab finding Z).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -211,6 +217,47 @@ def copy_for_attempt(checkout: Path, dest: Path) -> None:
     shutil.copytree(checkout, dest, symlinks=True)
     make_writable(dest)
     check_tree(dest)
+
+
+TREE_DIGEST_VERSION = "ovlm.tree/1"
+
+
+def tree_digest(root: Path) -> str:
+    """Deterministic sha256 of a checkout: a sorted manifest of one JSON line per entry, ``[relative path, type
+    (dir/file/symlink), permission bits, symlink target, sha256 of the content]``; the root itself is ``"."``.
+    Symlinks are never followed. Anything else than a directory, a regular file or a symlink is refused."""
+    lines: list[str] = []
+
+    def entry(rel: str, path: Path) -> None:
+        st = os.lstat(path)
+        mode = stat.S_IMODE(st.st_mode)
+        if stat.S_ISLNK(st.st_mode):
+            lines.append(json.dumps([rel, "symlink", 0, os.readlink(path), ""]))
+        elif stat.S_ISDIR(st.st_mode):
+            lines.append(json.dumps([rel, "dir", mode, "", ""]))
+            for name in sorted(os.listdir(path)):
+                entry(name if rel == "." else f"{rel}/{name}", path / name)
+        elif stat.S_ISREG(st.st_mode):
+            h = hashlib.sha256()
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    h.update(chunk)
+            lines.append(json.dumps([rel, "file", mode, "", h.hexdigest()]))
+        else:
+            raise AutomationError(f"unsupported file type in the checkout: {rel}")
+
+    if not root.is_dir() or root.is_symlink():
+        raise AutomationError("checkout to digest is not a directory")
+    entry(".", root)
+    manifest = TREE_DIGEST_VERSION + "\n" + "\n".join(lines) + "\n"
+    return hashlib.sha256(manifest.encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def copy_exact(src: Path, dest: Path) -> None:
+    """Copy a read-only checkout keeping its layout and permission bits (symlinks as symlinks); ``dest`` must not
+    exist. The copy has the same :func:`tree_digest` as ``src``."""
+    shutil.copytree(src, dest, symlinks=True, copy_function=shutil.copy2)
 
 
 def remove_tree(root: Path) -> None:

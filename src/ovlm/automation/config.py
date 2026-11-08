@@ -34,6 +34,7 @@ def runner_config(settings: Settings) -> RunnerConfig:
         kwargs["ansible_bin_dir"] = a.ansible_bin_dir
     return RunnerConfig(
         run_root=a.run_root,
+        checkout_cache=a.checkout_cache,
         collections_paths=a.collections_paths,
         run_user=a.run_user,
         signal_prefix=a.signal_prefix,

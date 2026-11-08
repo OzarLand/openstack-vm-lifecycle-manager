@@ -44,6 +44,8 @@ log = logging.getLogger("ovlm.worker")
 
 #: Refresh the workflow gauges every N loop iterations.
 METRICS_EVERY = 6
+#: Sweep the checkout cache of finished runs about this often (seconds; also once at start-up).
+CACHE_SWEEP_SECONDS = 3600.0
 
 
 def build_registry(
@@ -170,6 +172,36 @@ class Worker:
             return
         if removed:
             log.warning("removed orphan automation run directories", extra={"count": len(removed)})
+        self._sweep_checkout_cache()
+
+    def _sweep_checkout_cache(self) -> None:
+        """Remove cached checkouts (``automation.checkout_cache``) of runs that are terminal or unknown, once older
+        than the orphan max age, so the persistent cache does not grow forever. Live runs keep theirs whatever their
+        age (a run may wait days at a gate). Skipped when the active runs cannot be read. Never fatal."""
+        cache = self.settings.automation.checkout_cache
+        if cache is None:
+            return
+        from ovlm.automation.config import orphan_max_age, runner_config
+        from ovlm.automation.runner import sweep_checkout_cache
+        from ovlm.workflow.contract import TERMINAL_RUN_STATES
+
+        try:
+            with self.engine.connect() as conn:
+                active = {
+                    str(r[0])
+                    for r in conn.execute(
+                        text("SELECT id FROM workflow_run WHERE NOT (state = ANY(:t))"),
+                        {"t": sorted(TERMINAL_RUN_STATES)},
+                    )
+                }
+            removed = sweep_checkout_cache(
+                cache, orphan_max_age(runner_config(self.settings)), keep=active
+            )
+        except Exception:
+            log.exception("checkout cache sweep failed")
+            return
+        if removed:
+            log.info("removed cached checkouts of finished runs", extra={"count": len(removed)})
 
     def _workflow_tick(self) -> None:
         wf = self.workflow
@@ -181,6 +213,13 @@ class Worker:
         wf.process_signals()
         wf.admit_pending()
         wf.run_scheduler()
+        if (
+            self._iterations
+            and self._iterations
+            % max(1, int(CACHE_SWEEP_SECONDS / self.settings.worker.heartbeat_interval))
+            == 0
+        ):
+            self._sweep_checkout_cache()
         if self._iterations % METRICS_EVERY == 0:
             wf.sweep_worker_rows(SWEEP_AFTER_BEATS * self.settings.worker.heartbeat_interval)
             wf.refresh_metrics()

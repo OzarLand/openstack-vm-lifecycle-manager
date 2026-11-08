@@ -1,7 +1,8 @@
 """Run inside the worker container (``python - < worker_checks.py``, by ``make smoke``).
 
 Proves: the worker process is the unprivileged ``ovlm`` user holding exactly CAP_SETUID/SETGID/KILL (ambient); the
-image ships ansible and the pinned ansible.posix collection; and ansible really runs as ``ovlm-ansible``."""
+image ships ansible and the pinned ansible.posix collection; ansible really runs as ``ovlm-ansible``; and the
+checkout cache volume is private to the worker user."""
 
 import json
 import os
@@ -107,5 +108,21 @@ for path in ("/run/ovlm-kek/worker_kek", "/run/secrets/worker_kek"):
         capture_output=True, check=False,
     )  # fmt: skip
     assert denied.returncode != 0, f"ovlm-ansible can read {path}"
+# Checkout cache (automation.checkout_cache, lab finding Z): a persistent volume, 0700 owned by ovlm; ovlm-ansible
+# cannot list it (a copy it could change would be re-adopted as verified; the digest check is the second line).
+cache = pathlib.Path("/var/lib/ovlm/checkouts")
+cst = cache.stat()
+assert cache.is_dir() and cst.st_uid == 10001 and (cst.st_mode & 0o777) == 0o700, (
+    f"checkout cache is not 0700 ovlm: uid {cst.st_uid} mode {oct(cst.st_mode & 0o777)}"
+)
+listed = subprocess.run(  # noqa: S603
+    ["/usr/bin/ls", "-A", str(cache)], user="ovlm-ansible", group="ovlm-ansible", extra_groups=[],
+    capture_output=True, check=False,
+)  # fmt: skip
+assert listed.returncode != 0, "ovlm-ansible can list the checkout cache"
+cache_probe = cache / f".smoke-{os.getpid()}"
+# the worker user can write it (a volume, not the read-only root filesystem)
+cache_probe.mkdir(mode=0o700)
+cache_probe.rmdir()
 sys.stdout.write(f"worker image OK: {proc.stdout.splitlines()[0]}\n")
 sys.exit(0)

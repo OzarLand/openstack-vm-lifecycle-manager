@@ -23,7 +23,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Container, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
@@ -168,7 +168,9 @@ class AutomationRunner:
         waivers: WaiverProvider | None = None,
         on_waiver: Callable[[Finding, Waiver], None] | None = None,
     ) -> PreparedAutomation:
-        """Step ``prepare_automation`` (before the downtime window): the only contact with the git host."""
+        """Step ``prepare_automation`` (before the downtime window): the only contact with the git host. With
+        ``checkout_cache`` set, the verified checkout is also copied there (worker-only, persistent storage); the
+        returned :attr:`~PreparedAutomation.tree_digest` is what B6 records to re-adopt that copy later."""
         dest = self.cfg.run_root / _safe_component(workflow_id) / "_checkout"
         self.cfg.run_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         dest.parent.mkdir(exist_ok=True, mode=0o700)
@@ -177,10 +179,14 @@ class AutomationRunner:
         sha = co.clone_verified(spec.repo, spec.ref, dest, self.cfg.clone)
         try:
             self._sha_file(dest).write_text(sha + "\n", encoding="ascii")
-            return self._verify(spec, workflow_id, dest, sha, waivers, on_waiver)
+            digest = co.tree_digest(dest)
+            prepared = self._verify(spec, workflow_id, dest, sha, waivers, on_waiver, digest)
+            self._store_in_cache(workflow_id, dest, digest)
+            return prepared
         except BaseException:
             co.remove_tree(dest)
             self._sha_file(dest).unlink(missing_ok=True)
+            self._drop_cache(workflow_id)
             raise
 
     @staticmethod
@@ -189,17 +195,145 @@ class AutomationRunner:
         cannot be read back from the (read-only) tree."""
         return dest.parent / "_checkout.sha"
 
+    # ---- the persistent copy of the checkout (automation.checkout_cache, lab finding Z) ------------------------
+
+    def _cache_root(self) -> Path | None:
+        """The cache directory, created 0700 if missing. Refused unless the worker user owns it: it must not be
+        shared with ``ovlm-ansible`` or anyone else (a copy they could change would be adopted as verified)."""
+        root = self.cfg.checkout_cache
+        if root is None:
+            return None
+        try:
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            st = os.lstat(root)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
+                raise AutomationError(
+                    "automation.checkout_cache is not a directory owned by the worker user",
+                    Classification.NEEDS_HUMAN,
+                )
+            if stat.S_IMODE(st.st_mode) != 0o700:
+                os.chmod(root, 0o700)
+        except OSError as exc:
+            raise AutomationError(
+                f"automation.checkout_cache is not usable: {type(exc).__name__}",
+                Classification.NEEDS_HUMAN,
+            ) from None
+        return root
+
+    def _cache_entry(self, workflow_id: str) -> Path | None:
+        root = self._cache_root()
+        return None if root is None else root / _safe_component(workflow_id)
+
+    def _store_in_cache(self, workflow_id: str, dest: Path, digest: str) -> None:
+        """Copy the verified checkout to ``<checkout_cache>/<workflow_id>/_checkout`` (written aside, checked
+        against ``digest``, then renamed into place)."""
+        entry = self._cache_entry(workflow_id)
+        if entry is None:
+            return
+        entry.mkdir(exist_ok=True, mode=0o700)
+        final, tmp = entry / "_checkout", entry / "_checkout.tmp"
+        for old in (final, tmp):
+            co.remove_tree(old)
+        try:
+            co.copy_exact(dest, tmp)
+            if co.tree_digest(tmp) != digest:
+                raise AutomationError(
+                    "the cached copy of the checkout differs from the verified checkout",
+                    Classification.RETRYABLE,
+                )
+            tmp.rename(final)
+        except OSError as exc:
+            co.remove_tree(tmp)
+            raise AutomationError(
+                f"cannot write the checkout cache: {type(exc).__name__}", Classification.RETRYABLE
+            ) from None
+        except BaseException:
+            co.remove_tree(tmp)
+            raise
+        os.utime(entry)
+
+    def _drop_cache(self, workflow_id: str) -> None:
+        """Remove this run's cached checkout (never fails the caller)."""
+        try:
+            entry = self._cache_entry(workflow_id)
+        except (AutomationError, OSError):
+            return
+        if entry is not None and entry.exists():
+            co.remove_tree(entry)
+
+    def _adopt_from_cache(
+        self, spec: AutomationSpec, cached: Path, dest: Path, expected_digest: str | None
+    ) -> str:
+        """Bring the cached checkout back to ``dest`` (``run_root`` emptied by a container restart). The copy that
+        will be used is digested and must equal ``expected_digest``, the digest B6 recorded in the database (outside
+        the cache); otherwise nothing is adopted and a human decides. Never contacts the git host."""
+        if not expected_digest:
+            raise AutomationError(
+                "a cached checkout exists but the run has no recorded tree digest to check it against",
+                Classification.NEEDS_HUMAN,
+            )
+        co.validate_sha(spec.ref)
+        self.cfg.run_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        dest.parent.mkdir(exist_ok=True, mode=0o700)
+        tmp = dest.parent / "_checkout.adopt"
+        co.remove_tree(tmp)
+        try:
+            co.copy_exact(cached, tmp)
+            got = co.tree_digest(tmp)
+        except (AutomationError, OSError) as exc:
+            co.remove_tree(tmp)
+            raise AutomationError(
+                f"the cached checkout cannot be read back: {exc}", Classification.NEEDS_HUMAN
+            ) from None
+        if got != expected_digest:
+            co.remove_tree(tmp)
+            raise AutomationError(
+                "the cached checkout does not match the tree digest recorded by prepare_automation "
+                "(modified on disk?); not adopted",
+                Classification.NEEDS_HUMAN,
+            )
+        try:
+            tmp.rename(dest)
+            co.check_tree(dest)
+            self._sha_file(dest).write_text(spec.ref + "\n", encoding="ascii")
+        except BaseException:
+            co.remove_tree(tmp)
+            co.remove_tree(dest)
+            self._sha_file(dest).unlink(missing_ok=True)
+            raise
+        log.warning(
+            "re-adopted the run's verified checkout from the checkout cache (digest matched)",
+            extra={"workflow_id": dest.parent.name},
+        )
+        return got
+
     def reverify_checkout(
-        self, spec: AutomationSpec, workflow_id: str, *, waivers: WaiverProvider | None = None
+        self,
+        spec: AutomationSpec,
+        workflow_id: str,
+        *,
+        waivers: WaiverProvider | None = None,
+        expected_digest: str | None = None,
     ) -> PreparedAutomation | None:
-        """Re-verify, locally, the run-level checkout that :meth:`prepare_automation` left on disk (no git host
-        contact). Returns ``None`` when there is no checkout for ``workflow_id``. Refuses (``NEEDS_HUMAN``) when
-        the checkout is not at ``spec.ref`` (the commit recorded by ``prepare_automation``); otherwise runs the same lint / pin / collection checks as
-        ``prepare_automation`` and returns a fresh :class:`PreparedAutomation`. Used by the renewal code to adopt
-        a checkout after a crash; replaces its use of ``_safe_component``, ``_git`` and ``_verify``."""
+        """Re-verify, locally, the run-level checkout that :meth:`prepare_automation` left (no git host contact).
+
+        * On ``run_root`` (a worker *process* restart): refused (``NEEDS_HUMAN``) when it is not at ``spec.ref`` (the
+          commit recorded by ``prepare_automation``) or, given ``expected_digest``, when its tree digest differs.
+        * Gone from ``run_root`` (a worker *container* restart emptied the tmpfs) but kept in ``checkout_cache``: the
+          copy is adopted only if its digest equals ``expected_digest`` (B6's recorded evidence); a mismatch or no
+          expected digest is ``NEEDS_HUMAN``.
+        * Neither: ``None``.
+
+        Then the same lint / pin / collection checks as ``prepare_automation`` run and a fresh
+        :class:`PreparedAutomation` is returned. Used by the renewal code to adopt a checkout after a crash."""
         dest = self.cfg.run_root / _safe_component(workflow_id) / "_checkout"
         if not dest.is_dir():
-            return None
+            entry = self._cache_entry(workflow_id)
+            cached = None if entry is None else entry / "_checkout"
+            if cached is None or not cached.is_dir():
+                return None
+            digest = self._adopt_from_cache(spec, cached, dest, expected_digest)
+            return self._verify(spec, workflow_id, dest, spec.ref, waivers, None, digest)
         try:
             head = self._sha_file(dest).read_text(encoding="ascii").strip()
         except (
@@ -210,8 +344,14 @@ class AutomationRunner:
             raise AutomationError(
                 "the checkout on disk is not at the pinned SHA", Classification.NEEDS_HUMAN
             )
+        digest = co.tree_digest(dest)
+        if expected_digest is not None and digest != expected_digest:
+            raise AutomationError(
+                "the checkout on disk does not match the tree digest recorded by prepare_automation",
+                Classification.NEEDS_HUMAN,
+            )
         # the same waivers as B6 (SF-13), not audited again: B6 recorded every finding they covered
-        return self._verify(spec, workflow_id, dest, head, waivers, None)
+        return self._verify(spec, workflow_id, dest, head, waivers, None, digest)
 
     def _verify(
         self,
@@ -221,6 +361,7 @@ class AutomationRunner:
         sha: str,
         waivers: WaiverProvider | None,
         on_waiver: Callable[[Finding, Waiver], None] | None,
+        tree_digest: str | None = None,
     ) -> PreparedAutomation:
         try:
             lint = lint_repo(dest, spec.playbook_dir, waivers=waivers, on_waiver=on_waiver)
@@ -247,6 +388,7 @@ class AutomationRunner:
             requirements_hash=req_hash,
             ansible_core_version=self.ansible_core_version(),
             lint=lint,
+            tree_digest=tree_digest,
         )
 
     def _collections_search_path(self, checkout: Path) -> list[Path]:
@@ -282,11 +424,12 @@ class AutomationRunner:
                 )
 
     def release(self, prepared: PreparedAutomation) -> None:
-        """Remove the run-level checkout (end of the run)."""
+        """Remove the run-level checkout and its cached copy (end of the run)."""
         co.remove_tree(prepared.checkout)
         self._sha_file(prepared.checkout).unlink(missing_ok=True)
         with contextlib.suppress(OSError):
             prepared.checkout.parent.rmdir()
+        self._drop_cache(prepared.workflow_id)
 
     # ---- once per phase attempt -------------------------------------------------------------------------
 
@@ -626,6 +769,32 @@ class AutomationRunner:
 
 
 # ---- module-level helpers -------------------------------------------------------------------------------
+
+
+def sweep_checkout_cache(
+    cache: Path, max_age: float, *, keep: Container[str], now: float | None = None
+) -> list[Path]:
+    """Remove cached checkouts (``<cache>/<workflow_id>``) of runs not in ``keep`` (the non-terminal runs) that
+    were last written more than ``max_age`` seconds ago. Run by the worker at start-up and periodically, so the
+    cache does not grow forever. Returns the removed entries."""
+    import time
+
+    now = time.time() if now is None else now
+    removed: list[Path] = []
+    if not cache.is_dir():
+        return removed
+    for entry in sorted(cache.iterdir()):
+        if entry.name in keep or entry.is_symlink() or not entry.is_dir():
+            continue
+        try:
+            age = now - entry.lstat().st_mtime
+        except OSError:
+            continue
+        if age < max_age:
+            continue
+        co.remove_tree(entry)
+        removed.append(entry)
+    return removed
 
 
 def _safe_component(value: str) -> str:

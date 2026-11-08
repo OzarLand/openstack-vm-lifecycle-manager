@@ -275,6 +275,11 @@ class AutomationSettings(_Section):
     #: Parent of the per-attempt run directories. tmpfs in the worker container (secrets touch only memory).
     run_root: Path = Path("/run/ovlm")
     require_tmpfs: bool = False
+    #: Persistent, worker-only directory (mode 0700, owned by the worker user) keeping a copy of each run's
+    #: verified checkout, so a worker container restart inside the downtime window can re-adopt it (digest-checked
+    #: against B6's evidence; never a new clone). ``None``: no copy, a container restart in the window stops the run
+    #: for a human. Holds no secret.
+    checkout_cache: Path | None = None
     #: Directory holding ``ansible`` and ``ansible-runner`` (the worker image's venv). ``None``: the running
     #: interpreter's directory.
     ansible_bin_dir: Path | None = None
@@ -329,6 +334,13 @@ class AutomationSettings(_Section):
             raise ValueError("automation.run_user is not a valid OS user name")
         if not self.run_root.is_absolute():
             raise ValueError("automation.run_root must be an absolute path")
+        if self.checkout_cache is not None:
+            if not self.checkout_cache.is_absolute():
+                raise ValueError("automation.checkout_cache must be an absolute path")
+            if self.checkout_cache.is_relative_to(self.run_root) or self.run_root.is_relative_to(
+                self.checkout_cache
+            ):
+                raise ValueError("automation.checkout_cache must be outside automation.run_root")
         if self.ansible_bin_dir is not None and not self.ansible_bin_dir.is_absolute():
             raise ValueError("automation.ansible_bin_dir must be an absolute path")
         if any(not p.is_absolute() for p in self.collections_paths):
