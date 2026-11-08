@@ -134,6 +134,7 @@ approver). "op" below = operator. SoD (requester ≠ approver; retirement two-pe
 | `POST /runs/{id}/actions/abort` `{typed_confirmation}` | op, human session + TC | sets `abort_requested`; effect depends on phase (renewal-workflow.md §5) |
 | `POST /runs/{id}/actions/rollback` `{typed_confirmation}` | op, human session + TC | build phase: delete green; window: run restore sequence |
 | `POST /runs/{id}/actions/revert` `{typed_confirmation}` | op, human session + TC | after cutover until retirement: restore sequence (FIP back to blue) |
+| `POST /runs/{id}/actions/reprepare-automation` `{typed_confirmation, stepup_id}` | **approver** (not the run's requester: 403 `sod-violation`), human session + step-up + TC | only on a step parked on a lost/unverifiable automation checkout (else 409 `not-applicable`); authorizes one re-clone of the pinned SHA inside the window (renewal-workflow.md §2, AC §2) |
 | `POST /runs/{id}/actions/mark-resolved` `{step_id, attestation, typed_confirmation}` | op + TC; approver if next step is destructive (security-model.md §3.1) | operator states the manual fix (e.g. admin force-detached); engine re-probes before continuing |
 
 All action POSTs require `Idempotency-Key`, return **202** with the run, and are audited. A 403 for a missing role names the account: `Signed in as approver-a (approver). This action needs the operator role.` Every web page header shows `username · role (scope)` for each effective binding and a "Sign out / switch account" button (UI-1).

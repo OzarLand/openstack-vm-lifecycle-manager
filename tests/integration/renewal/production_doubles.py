@@ -11,6 +11,7 @@ threads at once.
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -35,7 +36,7 @@ from ovlm.automation.model import (
     RunRecord,
 )
 from ovlm.automation.result import ValidatedResult
-from ovlm.automation.types import Classification, Phase, SecretBytes
+from ovlm.automation.types import CheckoutUnverifiable, Classification, Phase, SecretBytes
 from ovlm.openstack.sdk_write import WriteCredential
 from ovlm.openstack.types import CreateServerSpec, ServerInfo
 from ovlm.renewal.ports import FenceLike, GuestRef
@@ -186,6 +187,11 @@ class RunnerDouble:
         self.adopted: list[str] = []
         self.expected_digests: list[str | None] = []
         self.requests: list[PhaseRequest] = []
+        self.released: list[str] = []
+        #: the tree digest the next ``prepare_automation`` reports (a re-clone that differs from B6's tree)
+        self.digest = TREE_DIGEST
+        #: ``adopt_checkout`` finds a copy whose digest does not match (``CheckoutUnverifiable``)
+        self.unverifiable = False
 
     def prepare_automation(
         self, spec: AutomationSpec, workflow_id: str, *, waivers: Any = None, on_waiver: Any = None
@@ -206,7 +212,7 @@ class RunnerDouble:
             "none",
             "2.19.4",
             LintResult(),
-            tree_digest=TREE_DIGEST,
+            tree_digest=self.digest,
         )
 
     def adopt_checkout(
@@ -219,12 +225,24 @@ class RunnerDouble:
     ) -> PreparedAutomation | None:
         self.expected_digests.append(expected_digest)
         checkout = self.root / workflow_id / "_checkout"
+        if self.unverifiable:
+            raise CheckoutUnverifiable(
+                "the cached checkout does not match the tree digest recorded by B6"
+            )
         if not checkout.is_dir():
             return None
         self.adopted.append(workflow_id)
         return PreparedAutomation(
             spec, workflow_id, checkout, spec.ref, "none", "2.19.4", LintResult()
         )
+
+    def release(self, prepared: PreparedAutomation) -> None:
+        self.released.append(prepared.workflow_id)
+        shutil.rmtree(prepared.checkout, ignore_errors=True)
+
+    def lose_checkouts(self) -> None:
+        """A worker container restart without a checkout cache: every run-level checkout is gone."""
+        shutil.rmtree(self.root, ignore_errors=True)
 
     def run_phase(
         self, prepared: PreparedAutomation, req: PhaseRequest, *, fence: FenceLike | None = None

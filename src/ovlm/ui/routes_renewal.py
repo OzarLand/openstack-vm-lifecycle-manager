@@ -501,6 +501,7 @@ _TERMINAL = svc.TERMINAL
 _ACTION_LABEL = {
     "probe": "Probe", "retry-step": "Retry step", "abort": "Abort", "rollback": "Roll back",
     "revert": "Revert to the old VM", "discard": "Discard the new VM", "mark-resolved": "Mark resolved",
+    "reprepare-automation": "Re-prepare automation (one re-clone)",
 }  # fmt: skip
 
 
@@ -577,14 +578,14 @@ def _run_context(db: Session, who: Principal, run_id: UUID) -> dict[str, Any]:
     for a in body["available_actions"]:
         name = a["action"]
         confirmed = name in CONFIRMED
-        usable = is_op or (name == "mark-resolved" and is_appr)
+        if name == "reprepare-automation":
+            usable, needed = is_appr, "approver"
+        else:
+            usable = is_op or (name == "mark-resolved" and is_appr)
+            needed = "operator or approver" if name == "mark-resolved" else "operator"
         why = None
         if not usable:
-            why = (
-                who.needs_role_message("operator")
-                if name != "mark-resolved"
-                else who.needs_role_message("operator or approver")
-            )
+            why = who.needs_role_message(needed)
         elif confirmed and not who.is_human:
             why = "API tokens cannot confirm this; use a human session in the web interface."
         actions.append(

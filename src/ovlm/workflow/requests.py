@@ -15,7 +15,8 @@ from sqlalchemy import Connection, text
 from ovlm.workflow.ids import new_id
 
 #: ``approve`` (E5-5): an approval decision was recorded; the strategy wakes its gate step, which re-reads and
-#: re-validates the approval itself (the signal carries no authority).
+#: re-validates the approval itself (the signal carries no authority). ``reprepare_automation``: an approver's
+#: one-shot authorization to re-clone the run's pinned SHA inside the window (``ovlm.renewal.reprepare``).
 SIGNAL_KINDS = frozenset(
     {
         "admit",
@@ -27,6 +28,7 @@ SIGNAL_KINDS = frozenset(
         "probe",
         "discard",
         "approve",
+        "reprepare_automation",
     }
 )
 

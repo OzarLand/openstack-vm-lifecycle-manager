@@ -20,8 +20,9 @@ from ovlm.automation.checkout import CloneOptions
 from ovlm.automation.lint import StaticWaivers
 from ovlm.automation.model import AutomationSpec, RunnerConfig
 from ovlm.automation.runner import AutomationRunner
-from ovlm.automation.types import AutomationError, Classification
+from ovlm.renewal.base import StepRefusal
 from ovlm.renewal.production import RunnerGuestPort, _LazyRunner
+from ovlm.workflow.contract import ErrorClass
 from tests.integration.renewal.conftest import World
 from tests.unit.automation.test_checkout import make_repo
 from tests.unit.automation.test_runner import FILES
@@ -96,9 +97,10 @@ def test_a_tampered_cached_checkout_stops_for_a_human(world: World, tmp_path: Pa
     f.chmod(0o644)
     f.write_text("- hosts: ovlm_target\n  tasks: [{ansible.builtin.ping: {}}]\n")
     f.chmod(0o444)
-    with pytest.raises(AutomationError, match="does not match the tree digest") as exc:
+    with pytest.raises(StepRefusal, match="automation_checkout_unverifiable") as exc:
         port._prepared_for(run_id)  # noqa: SLF001
-    assert exc.value.classification is Classification.NEEDS_HUMAN
+    assert exc.value.error_class is ErrorClass.NEEDS_HUMAN
+    assert "does not match the tree digest" in exc.value.detail["message"]
 
 
 def test_a_b6_without_a_recorded_digest_cannot_adopt_the_cache(
@@ -106,9 +108,10 @@ def test_a_b6_without_a_recorded_digest_cannot_adopt_the_cache(
 ) -> None:
     port, _b6, run_id, _cfg = _setup(world, tmp_path, record_digest=False)
     assert port._recorded_tree_digest(run_id) is None  # noqa: SLF001
-    with pytest.raises(AutomationError, match="no recorded tree digest") as exc:
+    with pytest.raises(StepRefusal, match="automation_checkout_unverifiable") as exc:
         port._prepared_for(run_id)  # noqa: SLF001
-    assert exc.value.classification is Classification.NEEDS_HUMAN
+    assert exc.value.error_class is ErrorClass.NEEDS_HUMAN
+    assert "no recorded tree digest" in exc.value.detail["message"]
 
 
 def test_the_worker_sweeps_cached_checkouts_of_finished_runs_only(

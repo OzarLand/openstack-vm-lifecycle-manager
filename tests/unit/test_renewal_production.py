@@ -25,6 +25,7 @@ from ovlm.automation.types import AutomationError, SecretBytes
 from ovlm.openstack.errors import ReadOnlyViolationError, WriteNotAllowedError
 from ovlm.openstack.ownership import InMemoryOwnershipRegistry
 from ovlm.openstack.sdk_write import WriteCredential
+from ovlm.renewal.base import StepRefusal
 from ovlm.renewal.ports import GuestRef
 from ovlm.renewal.production import (
     NO_STORE_REASON,
@@ -539,6 +540,9 @@ class _CheckoutPort(RunnerGuestPort):
     def _recorded_tree_digest(self, run_id: str) -> str | None:
         return None
 
+    def _take_authorization(self, run_id: str) -> Any:
+        return None  # no approver authorized a re-clone
+
 
 @pytest.mark.parametrize(
     ("on_disk", "outage", "cloned"), [(True, True, 0), (True, False, 0), (False, False, 1)]
@@ -554,9 +558,10 @@ def test_a_restarted_worker_reuses_the_checkout_and_clones_only_outside_the_outa
 
 def test_no_git_host_contact_inside_the_downtime_window() -> None:
     runner = _Runner(on_disk=False)
-    with pytest.raises(AutomationError, match="inside the downtime window") as exc:
+    with pytest.raises(StepRefusal, match="automation_checkout_lost") as exc:
         _CheckoutPort(runner, outage=True)._prepared_for("run")  # noqa: SLF001
-    assert exc.value.classification.value == "needs_human" and runner.cloned == 0
+    assert exc.value.error_class.value == "needs_human" and runner.cloned == 0
+    assert "inside the downtime window" in exc.value.detail["message"]
 
 
 def test_lazy_runner_adopts_the_checkout_through_the_public_reverify() -> None:
@@ -639,6 +644,79 @@ def test_container_restart_in_the_window_refuses_an_unverifiable_cached_checkout
     tmp_path: Path, recorded: str | None
 ) -> None:
     runner, spec, _b6 = _cached_b6(tmp_path)
-    with pytest.raises(AutomationError) as exc:
+    with pytest.raises(StepRefusal) as exc:
         _CachePort(runner, spec, recorded)._prepared_for("run")  # noqa: SLF001
-    assert exc.value.classification.value == "needs_human"
+    assert exc.value.error_class.value == "needs_human"
+    assert exc.value.reason == "automation_checkout_unverifiable"
+
+
+@pytest.mark.parametrize(
+    ("error", "applies"),
+    [
+        ({"reason": "automation_checkout_lost"}, True),
+        ({"reason": "automation_checkout_unverifiable"}, True),
+        # a run parked by a worker before these reasons existed (the lab's stranded run)
+        (
+            {
+                "reason": "automation_error",
+                "message": "the run's verified checkout is gone (worker container "
+                "restarted?); re-cloning would contact the git host inside the downtime window",
+            },
+            True,
+        ),
+        ({"reason": "automation_error", "message": "blocking lint findings: hosts_pattern"}, False),
+        ({"reason": "automation_reprepare_digest_mismatch"}, False),
+        ({"reason": "server_locked"}, False),
+        (None, False),
+    ],
+)
+def test_reprepare_applies_only_to_a_lost_or_unverifiable_checkout(
+    error: Any, applies: bool
+) -> None:
+    from ovlm.renewal import reprepare
+
+    assert reprepare.applies_to(error) is applies
+
+
+def test_reprepare_consumes_the_authorization_before_cloning_and_refuses_without_one(
+    tmp_path: Path,
+) -> None:
+    from ovlm.renewal import reprepare
+
+    finished: list[dict[str, Any]] = []
+    auth = reprepare.Authorization("a", "run", "sig", "data_attach_green", "f" * 40, "ap")
+
+    class _Port(_CheckoutPort):
+        def __init__(self, runner: Any, pending: Any) -> None:
+            super().__init__(runner, outage=True)
+            self.pending = pending
+
+        def _take_authorization(self, run_id: str) -> Any:
+            got, self.pending = self.pending, None  # one-shot
+            return got
+
+        def _finish_authorization(self, auth: Any, **outcome: Any) -> None:
+            finished.append(outcome)
+
+        def _spec(self, run_id: str, resolved: Mapping[str, Any]) -> Any:
+            from ovlm.automation.model import AutomationSpec
+
+            return AutomationSpec(repo="https://git.invalid/r.git", ref="f" * 40)
+
+        def _prepare_with_waivers(self, run_id: str, resolved: Any, spec: Any) -> Any:
+            runner.cloned += 1
+            return type("P", (), {"tree_digest": None})(), []
+
+    runner = _Runner(on_disk=False)
+    port = _Port(runner, auth)
+    port._prepared_for("run")  # noqa: SLF001
+    assert runner.cloned == 1 and finished[-1]["ok"] is True
+    port._prepared.clear()  # noqa: SLF001
+    with pytest.raises(StepRefusal, match="automation_checkout_lost"):
+        port._prepared_for("run")  # noqa: SLF001
+    assert runner.cloned == 1
+    # an authorization for another SHA than the plan's pin is refused and recorded
+    port = _Port(runner, reprepare.Authorization("b", "run", "sig2", "k", "0" * 40, "ap"))
+    with pytest.raises(StepRefusal):
+        port._prepared_for("run")  # noqa: SLF001
+    assert runner.cloned == 1 and finished[-1]["ok"] is False

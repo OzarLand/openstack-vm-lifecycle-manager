@@ -29,6 +29,7 @@ from ovlm.auth.stepup import consume_stepup
 from ovlm.policies.service import effective_policy
 from ovlm.profiles.waivers import active_waivers, for_display, hash_binding
 from ovlm.registry.errors import DomainError
+from ovlm.renewal import reprepare
 from ovlm.renewal.config import RenewalConfig
 from ovlm.renewal.evidence import APPROVAL_STEPUP_ACTION, CUTOVER_STEPUP_ACTION
 from ovlm.renewal.plans import (
@@ -57,6 +58,7 @@ ACTIONS: Mapping[str, tuple[str, bool]] = {
     "revert": ("revert", True),
     "discard": ("discard", True),
     "mark-resolved": ("mark_resolved", True),
+    "reprepare-automation": ("reprepare_automation", True),
 }
 
 
@@ -499,6 +501,11 @@ def available_actions(
         out.append({"action": "mark-resolved",
                     "role": "operator (+approver if the current or next step is destructive)",
                     "effect": f"state the manual fix for {key}; the engine re-probes"})  # fmt: skip
+        if step is not None and reprepare.applies_to(step.get("error")):
+            out.append({"action": "reprepare-automation",
+                        "role": "approver (not the run's requester) + TC",
+                        "effect": f"authorize ONE re-clone of the pinned SHA inside the window (the only git contact "
+                                  f"allowed there); its tree must match B6's digest; {key} is retried"})  # fmt: skip
     snap = bool((resolved.get("data_volume") or {}).get("snapshot_before_handoff"))
     if phase == "build":
         out.append(
@@ -660,12 +667,15 @@ def action(
     kind, confirmed = ACTIONS[name]
     run, resolved = run_row(s, run_id, who)
     scope = resolved["scope"]
-    role_ok = authorize(who, "operator", scope) or (
-        kind == "mark_resolved" and authorize(who, "approver", scope)
-    )
-    if not role_ok:
-        raise DomainError(403, "forbidden", "Forbidden", who.needs_role_message("operator"),
-                          "Sign out and sign in as an account that holds it.")  # fmt: skip
+    if kind == "reprepare_automation":
+        _check_reprepare(s, who, run, scope)
+    else:
+        role_ok = authorize(who, "operator", scope) or (
+            kind == "mark_resolved" and authorize(who, "approver", scope)
+        )
+        if not role_ok:
+            raise DomainError(403, "forbidden", "Forbidden", who.needs_role_message("operator"),
+                              "Sign out and sign in as an account that holds it.")  # fmt: skip
     if not who.is_human and "operate" not in who.token_scopes:
         raise DomainError(
             403, "token-scope", "Forbidden", "The API token's scope does not allow this action."
@@ -688,6 +698,28 @@ def action(
         s, who, f"run.{kind}.request", "renewal_run", str(run_id), scope, kind=kind, signal_id=sig
     )
     return run_body(s, run_id)
+
+
+def _check_reprepare(s: Session, who: Principal, run: Mapping[Any, Any], scope: str) -> None:
+    """``reprepare-automation`` (:mod:`ovlm.renewal.reprepare`): an approver, never the run's requester (run starter,
+    plan creator), on a run parked on a lost or unverifiable automation checkout. The worker re-checks all of it."""
+    if not authorize(who, "approver", scope):
+        raise DomainError(403, "forbidden", "Forbidden", who.needs_role_message("approver"),
+                          "Sign out and sign in as an account that holds it.")  # fmt: skip
+    creator = s.execute(
+        text("SELECT created_by FROM renewal_plan WHERE id = :p"), {"p": run["renewal_plan_id"]}
+    ).scalar()
+    if who.user_id in {run["started_by"], creator}:
+        raise DomainError(403, "sod-violation", "Separation of duties",
+                          "The run's requester (who started it or created its plan) cannot authorize a re-clone.")  # fmt: skip
+    error = s.execute(
+        text("SELECT error FROM workflow_step WHERE run_id = :r AND state = 'needs_human'"),
+        {"r": run["id"]},
+    ).scalar()
+    if run["state"] != "needs_human" or not reprepare.applies_to(error):
+        raise DomainError(409, "not-applicable", "Not stopped on a lost checkout",
+                          "reprepare-automation applies only to a step parked because the run's verified automation "
+                          "checkout is gone or does not match B6's tree digest.")  # fmt: skip
 
 
 def list_runs(

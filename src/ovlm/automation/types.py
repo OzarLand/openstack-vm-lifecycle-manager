@@ -56,6 +56,15 @@ class AutomationError(Exception):
         self.classification = classification
 
 
+class CheckoutUnverifiable(AutomationError):  # noqa: N818 - a classified refusal, like its base
+    """The run's checkout (on ``run_root`` or in the checkout cache) cannot be shown to be the tree B6 verified: its
+    tree digest differs from the recorded one, or none was recorded. Always ``NEEDS_HUMAN``; never resolved by a git
+    contact unless an approver authorizes one re-clone (``reprepare-automation``)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, Classification.NEEDS_HUMAN)
+
+
 @dataclass(frozen=True)
 class SecretBytes:
     """A secret handed to the runner. ``repr`` hides the value so a stray log line cannot leak it."""

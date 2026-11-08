@@ -21,9 +21,10 @@ Failure handling (:meth:`BlueGreenFipV1.on_failure`):
 Signals (re-validated here, SEC-R-1): ``rollback``/``abort``/``revert``/``discard`` need an operator in scope, a
 consumed step-up ``run.<kind>`` on the run and the TC of the affected VM; ``mark_resolved`` additionally needs the
 approver role when the current step (re-queued by the engine, so its own act comes next) or the following step is
-destructive (REN-5); ``revert`` is refused once X1 has persisted its delete intent (REN-4); ``probe`` refreshes the
-current-truth panel and, sent by the re-probe job for ``api_unreachable``, applies the self-resolution rules of
-section 5.1.
+destructive (REN-5); ``reprepare_automation`` needs the approver role (never the run's requester), the step-up and
+TC, and a step parked on a lost/unverifiable automation checkout (:mod:`ovlm.renewal.reprepare`); ``revert`` is
+refused once X1 has persisted its delete intent (REN-4); ``probe`` refreshes the current-truth panel and, sent by the
+re-probe job for ``api_unreachable``, applies the self-resolution rules of section 5.1.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ from sqlalchemy.orm import Session
 from ovlm import audit
 from ovlm.auth.sod import INTERACTIVE_AUTH, STEPUP_VALIDITY, role_held_at
 from ovlm.openstack.errors import WriteNotAllowedError
-from ovlm.renewal import closed_table, metrics
+from ovlm.renewal import closed_table, metrics, reprepare
 from ovlm.renewal.base import Deps, RStep, project_of, read_truth
 from ovlm.renewal.config import RESTORE_STEPS, WINDOW_STEPS
 from ovlm.renewal.ledger import DbOwnershipRegistry, green_row, plan_resolved, snapshot_row
@@ -461,6 +462,8 @@ class BlueGreenFipV1(WorkflowDefinition):
         with Session(bind=c) as s:
             operator = role_held_at(s, UUID(sig.actor_id), "operator", scope, now)
             approver = role_held_at(s, UUID(sig.actor_id), "approver", scope, now)
+        if sig.kind == "reprepare_automation":
+            return self._validate_reprepare(ctx, resolved, approver)
         if not operator and not (sig.kind == "mark_resolved" and approver):
             return "the actor does not hold the operator role in this scope"
         if sig.kind == "probe":
@@ -507,6 +510,35 @@ class BlueGreenFipV1(WorkflowDefinition):
         target = tc_target(c, run.id, sig.kind, phase, resolved)
         return _check_confirmation(c, sig, run.id, target)
 
+    def _validate_reprepare(
+        self, ctx: TxContext, resolved: Mapping[str, Any], approver: bool
+    ) -> str | None:
+        """``reprepare_automation`` (the exit of :mod:`ovlm.renewal.reprepare`): an approver who is not the run's
+        requester (run starter, plan creator), a parked step whose refusal is the lost or unverifiable checkout, no
+        authorization already pending, and the step-up + typed confirmation of the affected VM."""
+        sig, run, c, step = ctx.signal, ctx.run, ctx.conn, ctx.step
+        assert sig is not None  # noqa: S101 - checked by the caller
+        if not approver:
+            return "reprepare-automation needs the approver role"
+        creator = c.execute(
+            text("SELECT created_by FROM renewal_plan WHERE id = :p"), {"p": run.renewal_plan_id}
+        ).scalar()
+        if sig.actor_id in {run.started_by, str(creator) if creator else None}:
+            return "separation of duties: the run's requester cannot authorize a re-clone"
+        if run.state != "needs_human" or step is None or step.state != "needs_human":
+            return "no step in needs_human"
+        error = c.execute(
+            text("SELECT error FROM workflow_step WHERE id = :i"), {"i": step.id}
+        ).scalar()
+        if not reprepare.applies_to(error):
+            return "the parked step is not stopped on a lost or unverifiable automation checkout"
+        if reprepare.pending(c, run.id):
+            return "a re-clone is already authorized for this run"
+        if not str((resolved.get("automation") or {}).get("sha") or ""):
+            return "the plan pins no automation commit"
+        phase = effective_phase(run.phase, *outage_marks(c, run.id))
+        return _check_confirmation(c, sig, run.id, tc_target(c, run.id, sig.kind, phase, resolved))
+
     def prepare_signal(self, run: RunView, signal: SignalView) -> Any:
         if signal.kind != "probe":
             return None
@@ -545,6 +577,13 @@ class BlueGreenFipV1(WorkflowDefinition):
             if sig.actor_id is None:
                 return self._self_resolve(ctx, truth)
             return "current truth refreshed"
+        if sig.kind == "reprepare_automation":
+            if step is None:
+                return "refused: no parked step"
+            sha = str(plan_resolved(c, run.id)["automation"]["sha"])
+            aid = reprepare.authorize(c, run_id=run.id, signal_id=sig.id, step_id=step.id, step_key=key,
+                                      sha=sha, approver_id=str(sig.actor_id))  # fmt: skip
+            return f"re-clone of {sha} authorized once ({aid})"
         if sig.kind == "discard":
             return Transition(next_step=self.spec("discard_green"), phase="restore")
         if sig.kind == "rollback":
