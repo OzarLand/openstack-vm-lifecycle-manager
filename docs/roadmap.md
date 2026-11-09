@@ -3,8 +3,8 @@
 | Field | Value |
 |---|---|
 | Owner | Agent 1 — Product Manager / Engineering Manager (single source of truth for the backlog) |
-| Last updated | 2026-11-05 |
-| Authorization | The maintainer said on 2026-11-04: "you must continue until the end of the MVP". Phases 2–6 are authorized. |
+| Last updated | 2026-11-09 |
+| Authorization | The maintainer said on 2026-11-04: "you must continue until the end of the MVP". Phases 2–6 are authorized. **The MVP is done (2026-11-09)**: lab validated on Felcloud, not production validated ([MVP report](mvp-report.md)). The post-MVP plan below needs the maintainer's go per phase. |
 
 Status vocabulary: **Designed → Implemented → Unit tested → Integration tested → Lab validated → Production
 validated**. An item is **Done** only when its tests pass in CI, QA (Agent 9) confirms them, its docs are updated, and
@@ -16,11 +16,14 @@ the required reviews are recorded.
 |---|---|---|
 | **M1 — Phase 1 frozen** ✅ 2026-11-04 | Design round 2 closed, reviewers have no open "required before implementation" item | Both review files say "accept" for the items in scope |
 | **M2 — Foundation** (Phase 2) ✅ 2026-11-04 (#1) | Runnable skeleton: api + worker + PostgreSQL in Compose, config, logging, health, migrations, CI | `docker compose up` gives a healthy api and worker; CI green |
-| **M3 — Inventory** (Phase 3) | Read-only discovery, managed VM registration, sync | Inventory of a fake cloud in CI; of Felcloud in the lab (read-only) |
-| **M4 — Lifecycle** (Phase 4) | Profiles, policies, deadlines, planning, audit, auth/RBAC/TOTP | CRUD + audit + RBAC tests in CI |
-| **M5 — Readiness** (Phase 5) | Explainable readiness checks | Rule-based levels with evidence, unit tested |
-| **M6 — Renewal engine** (Phase 6) | Workflow engine + `bluegreen_fip_v1` + the acceptance scenario | Crash-injection suite green in CI; **acceptance scenario lab validated** on Felcloud (ADR-0007) |
-| **MVP** | M1–M6 + operator UI for the MVP pages + install guide | Section 9 acceptance scenario and failure scenarios lab validated, with stored evidence |
+| **M3 — Inventory** (Phase 3) ✅ | Read-only discovery, managed VM registration, sync | Inventory of a fake cloud in CI; of Felcloud in the lab (read-only) |
+| **M4 — Lifecycle** (Phase 4) ✅ | Profiles, policies, deadlines, planning, audit, auth/RBAC/TOTP | CRUD + audit + RBAC tests in CI |
+| **M5 — Readiness** (Phase 5) ✅ | Explainable readiness checks | Rule-based levels with evidence, unit tested |
+| **M6 — Renewal engine** (Phase 6) ✅ 2026-11-08 | Workflow engine + `bluegreen_fip_v1` + the acceptance scenario | Crash-injection suite green in CI; **acceptance scenario lab validated** on Felcloud (ADR-0007) |
+| **MVP** ✅ 2026-11-09 | M1–M6 + operator UI for the MVP pages + install guide | Section 9 acceptance scenario and failure scenarios lab validated, with stored evidence |
+| **M7 — Production hardening** | P0 and P1 below: known MVP defects closed, security follow-ups closed, ops basics (paging, backup/restore, upgrade) | Each item Done; LAB-02/03/05..09 lab validated; one independent security and SRE review "accept" for a production pilot |
+| **M8 — Production pilot** | One real service renewed on a real (non-lab) cloud by its operators | Status "production validated" for that scope, with evidence |
+| **V1** | Scope extensions (P3) | Per item |
 
 ## Backlog
 
@@ -34,7 +37,7 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | E0-1 | Design revision round 2 (decisions M9, SEC-R-11/13/34/35/36, SRE-R-23/24/26, ADR-0006 fallback, readiness before T0) | 2 | Opus | — | Done | Edits merged; list of edits for other owners |
 | E0-2 | Apply cross-owner edits | doc-sync | Sonnet | E0-1 | Done | Files consistent |
 | E0-3 | Reviewers check their own open items only | 7, 8 | Fable | E0-2 | Done (SRE: accept; Security: accept with conditions) | "Accept" for implementation scope |
-| E0-4 | README, CONTRIBUTING, issue/PR templates (OzarLand conventions) | 10 | Haiku | M2 | To do | check_content-style rules: no secrets, statuses honest |
+| E0-4 | README, CONTRIBUTING, issue/PR templates (OzarLand conventions) | 10 | Haiku | M2 | Done (README with diagrams and screenshots #41) | check_content-style rules: no secrets, statuses honest |
 
 ### E1 — Foundation (Phase 2)
 
@@ -56,7 +59,7 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | E2-1 | OpenStack adapter interface; read client (GET/HEAD-only guard) and a hand-written fake | 3 → 4 | Sonnet | E1 | Integration tested (PR #3) | Fake models async states and the observed gotchas |
 | E2-2 | Inventory sync job (worker), snapshots, `gone` handling, Nova changes-since | 4 | Sonnet | E2-1 | Integration tested (PR #3) | Unit tests with the fake |
 | E2-3 | Managed VM registration and services | 4 | Haiku | E2-2 | Integration tested (PR #3) | API tests |
-| E2-4 | Read-only inventory against Felcloud (lab) | ozar-dev | — | E2-2 | To do | Evidence stored |
+| E2-4 | Read-only inventory against Felcloud (lab) | ozar-dev | — | E2-2 | Lab validated (E2-4 evidence) | Evidence stored |
 
 ### E3 — Lifecycle (Phase 4)
 
@@ -66,7 +69,7 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | E3-2 | RBAC with project scope, requester sets, separation of duties, "self-approved" flag | 4 | Opus | E3-1 | Integration tested; security review fixes merged (PR #7) | Matrix tests; review by 8 |
 | E3-3 | Profiles + immutable versions; policies + bindings + exceptions; deadlines | 4 | Sonnet | E1 | Integration tested (PR #4); lint waivers added by SF-13; automation lint job and repo allowlist still to do | API + unit tests |
 | E3-4 | Append-only audit (grants + trigger), mirror to the log stream | 4 | Sonnet | E1-3 | Integration tested (PR #3) | DB-level tests: UPDATE/DELETE refused |
-| E3-5 | Renewal planning: upcoming list, advisory quota check, same-service lock | 4 | Sonnet | E3-3, E2 | To do | Unit tests |
+| E3-5 | Renewal planning: upcoming list, advisory quota check, same-service lock | 4 | Sonnet | E3-3, E2 | Integration tested; the quota reading is not collected yet, so the advisory check reports `unknown` (P2-4) | Unit tests |
 
 ### E4 — Readiness (Phase 5)
 
@@ -85,9 +88,9 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | E5-4 | `bluegreen_fip_v1` steps B1–X1, W1–W10, S1–S10 per renewal-workflow.md | 4 | Opus | E5-1..3 | Integration tested, reviewed, fixes verified (PR #8) | Unit tests with the fake per step and per failure row; reviews by 7 and 8 |
 | E5-5 | Gates G1–G3, approval evidence re-validation, typed confirmation | 4 | Opus | E3-2, E5-4 | Integration tested, reviewed (PR #8) | Security tests |
 | E5-7 | Encrypted credential store and project connections (envelope AES-GCM, worker-only unsealing, Keystone application credentials) | 4 | Opus | E5-2 | Integration tested; reviewed (CS-1..CS-10), fixes verified; CS-6 open | Binding and role tests; review by 8 |
-| E5-8 | Worker egress proxy (`HTTPS_PROXY`/`NO_PROXY` for OpenStack and the automation clone, guests always direct) | 6 | Sonnet | E5-3 | Unit tested; lab check pending | Unit tests; lab run behind the Felcloud proxy |
+| E5-8 | Worker egress proxy (`HTTPS_PROXY`/`NO_PROXY` for OpenStack and the automation clone, guests always direct) | 6 | Sonnet | E5-3 | Unit tested; not exercised in the Felcloud lab (direct egress) | Unit tests; lab run behind the Felcloud proxy |
 | E5-9 | Inventory sync through project connections (worker run, API, periodic), blue host-key scan + human confirmation | 4 | Opus | E5-7 | Integration tested; security review: fit for the lab, IS-1 fix round | Sync and host-key tests; review by 8 |
-| E5-6 | Acceptance scenario + failure scenarios on Felcloud (ADR-0007) | 9 + ozar-dev | Sonnet | E5-4 | To do | Evidence stored; status "lab validated" |
+| E5-6 | Acceptance scenario + failure scenarios on Felcloud (ADR-0007) | 9 + ozar-dev | Sonnet | E5-4 | **Lab validated**: ACC-01d, LAB-04, LAB-01, operator rollback; 24 lab defects fixed (#19–#38) | Evidence stored; status "lab validated" |
 
 ### E6 — Operator UI (HTMX)
 
@@ -96,7 +99,7 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | E6-1 | Layout, auth pages, TOTP enrolment | 5 | Sonnet | E3-1 | Integration tested (PR #4) | UI tests (HTTP-level) |
 | E6-2 | Inventory list + VM details (observed vs desired) | 5 | Sonnet | E2 | Integration tested (PR #4) | |
 | E6-3 | Readiness view; renewal plan; approvals with hash inputs and diff | 5 | Sonnet | E4, E5-5 | Integration tested (PR #8) | |
-| E6-4 | Run timeline with step evidence, available actions, audit view | 5 | Sonnet | E5 | Run timeline: integration tested (PR #8). **Audit view: PR #8 shipped only a placeholder page and no `GET /api/v1/audit` (404 in the Felcloud lab).** Both now exist on `claude/ovlm-audit-api`: integration tested locally, not yet merged | Audit view: scoping, admin-only actions, `run=` trail, pagination, token scope, HTTP-level page test |
+| E6-4 | Run timeline with step evidence, available actions, audit view | 5 | Sonnet | E5 | Integration tested, merged (#8, audit view #27); used on Felcloud | Audit view: scoping, admin-only actions, `run=` trail, pagination, token scope, HTTP-level page test |
 
 ### Security follow-ups (before production, not blocking the MVP lab)
 
@@ -119,7 +122,43 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | UI-2 | Policies list page, policy detail (current version, bindings, effective windows) and an admin-only edit form that creates a new version through the API's service code; the Felcloud lab needed a hand-written script for weekend windows | Felcloud lab, 2026-11-06 | Fixed (`claude/ovlm-ui2-policy-page`): `/policies`, `/policies/{id}`, `/policies/{id}/edit` and a "Policies" nav entry. The form pre-fills every field (a missing field is refused, never defaulted), sends the ETag as `If-Match` (stale → 409, nothing saved), needs a human admin session and CSRF, and writes the same `policy.update` audit row as the API. It warns that a new version changes the plan hash, shows the open plans and live approvals it would void, and demands the typed policy name when the count is above 0 |
 | SF-10 | Host-key confirm hardening (paste, not prefill; optional step-up); `--reissue` audit names the OS user; TOTP key backup in the install guide | IS-2, IS-6, IS-7 | Fixed (`claude/ovlm-security-followups`): UI confirm form (paste, source recorded), `os_user` + `hostname` in the audit, install guide §3a. The optional step-up was not added |
 
-### Later (V1, not in the MVP)
+## After the MVP (from 2026-11-09)
+
+Ordered by risk. P0 must be closed before OVLM runs for long periods or on any cloud other than the lab. Sources: the
+[MVP report](mvp-report.md) (sections 4 and 6), [HANDOFF](HANDOFF.md) and the reviews.
+
+### P0 — Known MVP defects and gaps
+
+| ID | Task | Source | Status | Acceptance / tests |
+|---|---|---|---|---|
+| P0-1 | Release the run checkout in the tmpfs `run_root` when a run ends (nothing calls `release()`), and sweep leftovers at start-up | Lab, Z fix review | To do | Test: run ends → checkout gone; worker memory stable over N runs |
+| P0-2 | An OVLM exit when a step's own (pinned) playbook refuses a state the operator has made safe: an audited, approver-only "accept step as done" with attestation, limited to restore steps that change no cloud resource, or a pin bump for restore phases only. Design first (ADR) | D-8b | To do | ADR accepted by SRE and security reviewers; integration test reproducing D-8 converges without a manual guest action |
+| P0-3 | Record every downtime interval of a run (window and revert), not only the first | AC (LAB-01b / rollback) | To do | Run with a revert after the cutover shows both intervals; metric and UI |
+| P0-4 | Contract tests for every phase result field OVLM reads, against the reference roles' real output (AB class of defect) | AB | Partly (marker done in #38) | Static test fails on any field OVLM reads that no role emits |
+
+### P1 — Before a production pilot
+
+| ID | Task | Source | Status |
+|---|---|---|---|
+| P1-1 | Failure scenarios LAB-02, LAB-03, LAB-05..09 on a real cloud (only integration tested today) | testing-strategy | To do |
+| P1-2 | Paging path: sample Prometheus rules wired and documented, `OvlmPostStartFailure` and "needs_human in window" routed | SRE-R-9, architecture §6 | To do |
+| P1-3 | Backup/restore and upgrade procedure for OVLM itself (PostgreSQL, KEK), tested | SRE review | To do |
+| P1-4 | SF-2 (jump host binding), SF-6 (`/readyz` KEK mismatch), SF-10 optional step-up on host-key confirm | Security follow-ups above | To do |
+| P1-5 | Worker egress proxy checked on a cloud that requires it (E5-8) | E5-8 | To do |
+| P1-6 | Independent security and SRE review of the post-MVP code (#31–#38: checkout cache, reprepare exit, AA, AB) | Process | To do |
+| P1-7 | Install guide for a real cloud (today: evaluation only) | README | To do |
+
+### P2 — Operator experience
+
+| ID | Task | Source | Status |
+|---|---|---|---|
+| P2-1 | Login redirects back to the requested page | Lab (UX) | To do |
+| P2-2 | VM page shows the profile version readiness was assessed against | README screenshots | To do |
+| P2-3 | Downtime panel shows a measured value or "not measured", never "0s" | README screenshots | To do |
+| P2-4 | Collect a quota reading so the advisory quota check can pass or fail (E3-5) | E3-5 | To do |
+| P2-5 | Periodic sync scheduling UI | V1 list | To do |
+
+### P3 — V1 scope (not in the MVP)
 
 Scenario B (greenfield), multiple data volumes, boot from volume, other strategies, signed approvals, OIDC, audit hash
-chain, periodic sync scheduling UI, Barbican/Vault, the SRE V1 backlog (SRE-R-19..22).
+chain, Barbican/Vault, the SRE V1 backlog (SRE-R-19..22, including a notification channel SRE-R-20).
