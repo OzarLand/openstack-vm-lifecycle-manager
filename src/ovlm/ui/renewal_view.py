@@ -211,7 +211,7 @@ NEEDS_HUMAN: Mapping[str, tuple[str, list[str]]] = {
         [_PROBE, "Check the volume in OpenStack. " + _ADMIN, _AFTER_FIX],
     ),
     "data_attach_mismatch": (
-        "The volume mounted on the new VM does not match the profile (filesystem UUID or data marker). "
+        "The volume mounted on the new VM does not match the profile (filesystem UUID or label, or data marker). "
         "OVLM never formats an existing volume.",
         [
             "Do not retry until you know why. Check the filesystem on the new VM.",

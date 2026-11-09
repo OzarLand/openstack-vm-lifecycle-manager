@@ -196,6 +196,71 @@ def test_w6_fails_when_green_reports_no_marker() -> None:
     assert isinstance(out, Fail) and out.needs_human_reason == "data_attach_mismatch", out
 
 
+# --- P0-5: W6 checks the filesystem identity the profile names (fs_uuid or label) -----------------------------------
+
+LABEL_VOLUME = {"volume_id": "vol-1", "mount_point": "/srv/data", "fs_type": "ext4", "fs_uuid": None,
+                "label": "app-data"}  # fmt: skip
+
+
+def _w6(facts: dict[str, Any], data_volume: Mapping[str, Any]) -> Any:
+    ctx = _Ctx(_w1_evidence(_contract_result()))
+    return _step(DataAttachGreen, ctx, _contract_result(**facts), data_volume=data_volume).verify(
+        ctx, {}
+    )
+
+
+def test_w6_label_profile_passes_on_the_same_label() -> None:
+    out = _w6({"fs_uuid": "some-other-uuid", "fs_label": "app-data"}, LABEL_VOLUME)
+    assert isinstance(out, Done), out
+    assert out.evidence["fs_identity_checked"] == "fs_label"
+
+
+def test_w6_label_profile_parks_on_a_different_label() -> None:
+    out = _w6({"fs_label": "other-data"}, LABEL_VOLUME)
+    assert isinstance(out, Fail), out
+    assert out.error_class is ErrorClass.NEEDS_HUMAN
+    assert out.needs_human_reason == "data_attach_mismatch"
+    assert out.detail["problems"] == ["fs_label differs from the profile"]
+
+
+@pytest.mark.parametrize("label", [None, ""], ids=["null", "empty"])
+def test_w6_label_profile_parks_when_no_label_is_reported(label: str | None) -> None:
+    out = _w6({"fs_label": label}, LABEL_VOLUME)
+    assert isinstance(out, Fail) and out.needs_human_reason == "data_attach_mismatch", out
+    assert out.detail["problems"] == [
+        "fs_label not reported by data_attach (the profile names the filesystem by it)"
+    ]
+
+
+def test_w6_label_profile_parks_when_the_result_has_no_label_key() -> None:
+    """The contract-shaped example carries no ``fs_label``: a repository that does not report it cannot pass."""
+    out = _w6({}, LABEL_VOLUME)
+    assert isinstance(out, Fail) and out.needs_human_reason == "data_attach_mismatch", out
+
+
+def test_w6_uuid_profile_is_checked_by_uuid_only() -> None:
+    ok = _w6({"fs_uuid": "u-1", "fs_label": "anything"}, VOLUME)
+    assert isinstance(ok, Done) and ok.evidence["fs_identity_checked"] == "fs_uuid", ok
+    bad = _w6({"fs_uuid": "u-2", "fs_label": "anything"}, VOLUME)
+    assert isinstance(bad, Fail) and bad.needs_human_reason == "data_attach_mismatch", bad
+    assert bad.detail["problems"] == ["fs_uuid differs from the profile"]
+
+
+def test_w6_both_label_and_marker_problems_are_listed() -> None:
+    out = _w6({"fs_label": "other-data", MARKER_FACT: "0" * 64}, LABEL_VOLUME)
+    assert isinstance(out, Fail), out
+    assert out.detail["problems"] == [
+        "fs_label differs from the profile",
+        "marker checksum differs from W1",
+    ]
+
+
+def test_w6_a_plan_without_a_filesystem_identity_is_not_a_pass() -> None:
+    no_identity = {"volume_id": "vol-1", "mount_point": "/srv/data", "fs_type": "ext4"}
+    out = _w6({"fs_uuid": "u-1"}, no_identity)
+    assert isinstance(out, Fail) and out.needs_human_reason == "data_attach_mismatch", out
+
+
 def test_w8_passes_on_the_same_marker_and_says_it_compared() -> None:
     ctx = _Ctx(_w1_evidence(_contract_result()))
     out = _step(HealthcheckGreen, ctx, _contract_result()).verify(ctx, {})

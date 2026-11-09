@@ -258,7 +258,7 @@ class World:
 
 def _seed(
     admin: Engine, cloud: RenewalFake, *, snapshot: bool, policy: dict[str, Any],
-    blue_fingerprint: str = "SHA256:x", service_units: list[str] | None = None,
+    blue_fingerprint: str = "SHA256:x", service_units: list[str] | None = None, fs_label: str | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:  # fmt: skip
     ext = cloud.add_network("ext", external=True)
     net = cloud.add_network("net")
@@ -282,8 +282,9 @@ def _seed(
     spec = validate_spec({
         "flavor": "m1.small", "image": {"name": "ubuntu-24.04"},
         "network": {"network_id": net, "subnet_id": SUBNET}, "security_groups": ["default"],
-        "data_volume": {"volume_id": vol, "fs_type": "ext4", "fs_uuid": "11111111-2222-3333-4444-555555555555",
-                        "mount_point": "/srv/data", "snapshot_before_handoff": snapshot},
+        "data_volume": {"volume_id": vol, "fs_type": "ext4", "mount_point": "/srv/data",
+                        "snapshot_before_handoff": snapshot,
+                        **({"label": fs_label} if fs_label else {"fs_uuid": "11111111-2222-3333-4444-555555555555"})},
         "automation": {"repo": "https://git.example.invalid/app.git", "sha": "a" * 40,
                        "inventory_vars": {} if service_units == [] else {"service_units": service_units or ["app.service"]}},
         "guest_access": {"ssh_user": "ovlm"},
@@ -391,7 +392,8 @@ def _seed(
 
 def build_world(admin_url: URL, db: str, secrets_dir: Path, *, snapshot: bool = False,
                 policy: dict[str, Any] | None = None, g1: bool = True, blue_fingerprint: str = "SHA256:x",
-                cloud: RenewalFake | None = None, service_units: list[str] | None = None) -> World:  # fmt: skip
+                cloud: RenewalFake | None = None, service_units: list[str] | None = None,
+                fs_label: str | None = None) -> World:  # fmt: skip
     migrate(admin_url, db, secrets_dir)
     admin = create_engine(admin_url.set(database=db))
     worker = create_engine(
@@ -408,6 +410,7 @@ def build_world(admin_url: URL, db: str, secrets_dir: Path, *, snapshot: bool = 
         policy=policy or {},
         blue_fingerprint=blue_fingerprint,
         service_units=service_units,
+        fs_label=fs_label,
     )
     port = FakeCloudPort(
         cloud, datetime.now(UTC) + timedelta(days=30), datetime.now(UTC) + timedelta(hours=8)
