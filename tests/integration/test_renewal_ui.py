@@ -449,6 +449,64 @@ def test_finished_run_stops_polling_and_a_requested_run_says_it_is_waiting(env: 
     assert "no worker has reported yet" in r.text
 
 
+def _downtime_row(
+    env: Env, run: str, kind: str, start: datetime, end: datetime | None, by: str, to: str | None
+) -> None:
+    env.sql(
+        "INSERT INTO run_downtime (id, run_id, kind, started_at, started_by_step, ended_at, ended_by_step) "
+        "VALUES (:i, :r, :k, :s, :b, :e, :t)", i=new_id(), r=run, k=kind, s=start, b=by, e=end, t=to,
+    )  # fmt: skip
+
+
+def _downtime_section(html: str) -> str:
+    m = re.search(r'<section class="panel" aria-labelledby="dt-h">(.*?)</section>', html, re.S)
+    assert m, "no downtime panel"
+    return m.group(1)
+
+
+def test_run_page_lists_every_downtime_interval_and_never_shows_0s(env: Env) -> None:
+    """P0-3 and P2-3: a reverted run shows the window and the restore with their total; a completed demo run whose
+    window lasted 40 ms shows a measured value, not "0s"; an open restore interval reads "ongoing"."""
+    w = World(env)
+    plan = w.approved_plan()
+    t0 = datetime.now(UTC) - timedelta(hours=3)
+    demo = w.seed_run(plan, state="completed", phase="retire", downtime_started_at=t0,
+                      downtime_ended_at=t0 + timedelta(milliseconds=40),
+                      steps=[{"key": "retire_old", "state": "succeeded"}])  # fmt: skip
+    _downtime_row(
+        env, demo, "window", t0, t0 + timedelta(milliseconds=40), "quiesce_old", "verify_external"
+    )
+    t = _downtime_section(w.op.get(f"/renewals/runs/{demo}").text)
+    assert "under 0.1s" in t and "ended" in t and not re.search(r"\b0s\b", t), t
+    api = w.op.get(f"/api/v1/runs/{demo}").json()["downtime"]
+    assert (
+        api["total_seconds"] == 0.04
+        and api["measured"]
+        and [i["kind"] for i in api["intervals"]] == ["window"]
+    )
+
+    env.sql("UPDATE workflow_run SET state = 'completed', finished_at = now()")  # free the service
+    reverted = w.seed_run(plan, state="needs_human", phase="restore", needs_human_reason="old_service_unhealthy",
+                          downtime_started_at=t0, downtime_ended_at=t0 + timedelta(seconds=41))  # fmt: skip
+    _downtime_row(
+        env, reverted, "window", t0, t0 + timedelta(seconds=41), "quiesce_old", "verify_external"
+    )
+    r_start = datetime.now(UTC) - timedelta(seconds=90)
+    _downtime_row(env, reverted, "restore", r_start, None, "quiesce_green", None)
+    t = _downtime_section(w.op.get(f"/renewals/runs/{reverted}").text)
+    for needle in ("in progress", "Renewal window", "41s", "W1", "W10", "Restore to the old VM", "S2", "ongoing",
+                   "2 intervals", "so far"):  # fmt: skip
+        assert needle in t, needle
+    assert not re.search(r"\b0s\b", t), t
+    api = w.op.get(f"/api/v1/runs/{reverted}").json()["downtime"]
+    assert api["ongoing"] and api["intervals"][1]["ongoing"] and api["total_seconds"] >= 41 + 89
+
+    env.sql("UPDATE workflow_run SET state = 'completed', finished_at = now()")
+    legacy = w.seed_run(plan, state="completed", phase="restore")  # no outage recorded at all
+    assert 'aria-labelledby="dt-h"' not in w.op.get(f"/renewals/runs/{legacy}").text
+    assert w.op.get(f"/api/v1/runs/{legacy}").json()["downtime"]["total_seconds"] is None
+
+
 def test_restricted_automation_links_are_for_operators_only(env: Env) -> None:
     w = World(env)
     plan = w.approved_plan()

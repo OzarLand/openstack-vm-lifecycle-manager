@@ -7,7 +7,8 @@ abort or discard, all with TC), ``retire_old`` for blue (G3). A registration rem
 call.
 
 :func:`fenced_write` is how a step writes strategy rows **during** an attempt (the ledger ``intended`` row before
-create, ``downtime_started_at`` in the W1 claim transaction): local fence check first, then, in one transaction, a
+create, ``downtime_started_at`` and the window interval in the W1 claim transaction, the restore interval before S2's
+quiesce play): local fence check first, then, in one transaction, a
 row lock on the step guarded by ``attempt`` and ``state='running'`` (a takeover increments ``attempt``, so a stale
 attempt matches nothing), then the write.
 """
@@ -15,7 +16,8 @@ attempt matches nothing), then the write.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 from sqlalchemy import Connection, Engine, RowMapping, text
@@ -125,8 +127,10 @@ class DbOwnershipRegistry:
         )
 
 
-def fenced_write(engine: Engine, ctx: StepContext, sql: str, params: Mapping[str, Any]) -> int:
-    """Write strategy rows during an attempt, guarded by the attempt (see the module docstring)."""
+@contextmanager
+def fenced_tx(engine: Engine, ctx: StepContext) -> Iterator[Connection]:
+    """One transaction guarded by the attempt (see the module docstring): several strategy writes that must commit
+    together (W1: ``downtime_started_at`` and the window interval)."""
     ctx.gate("commit:strategy")
     with engine.begin() as c:
         owned = c.execute(
@@ -139,6 +143,12 @@ def fenced_write(engine: Engine, ctx: StepContext, sql: str, params: Mapping[str
             raise FencedCommitRejected(
                 f"strategy write of step {ctx.step.id} attempt {ctx.attempt}: not the owner"
             )
+        yield c
+
+
+def fenced_write(engine: Engine, ctx: StepContext, sql: str, params: Mapping[str, Any]) -> int:
+    """Write strategy rows during an attempt, guarded by the attempt (see the module docstring)."""
+    with fenced_tx(engine, ctx) as c:
         return int(c.execute(text(sql), dict(params)).rowcount)
 
 

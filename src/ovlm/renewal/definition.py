@@ -14,6 +14,8 @@ Failure handling (:meth:`BlueGreenFipV1.on_failure`):
   ``downtime_started_at`` (in the transaction that precedes the quiesce play) until ``downtime_ended_at``, no
   transition may lead back to the build phase or to Discarding; :meth:`BlueGreenFipV1._seal` enforces it for every
   transition the definition returns, and a rollback/abort in that state restores blue (S1-S10).
+* Downtime: every interval is a ``run_downtime`` row (:mod:`ovlm.renewal.downtime`): the window (W1 claim to W10, or
+  to S9 after an in-window restore) and a restore after the cutover (S2 to S9). Closed in the W10/S9 success commit.
 * W1-W10: the closed table (:mod:`ovlm.renewal.closed_table`), D-1 = B. One automatic restore per run
   (``workflow_run.auto_restore_used``), audited ``restore.auto`` (system, authority = the G2 approval id).
 * Restore, retention, retirement, Discarding: needs_human.
@@ -42,7 +44,7 @@ from sqlalchemy.orm import Session
 from ovlm import audit
 from ovlm.auth.sod import INTERACTIVE_AUTH, STEPUP_VALIDITY, role_held_at
 from ovlm.openstack.errors import WriteNotAllowedError
-from ovlm.renewal import closed_table, metrics, reprepare
+from ovlm.renewal import closed_table, downtime, metrics, reprepare
 from ovlm.renewal.base import Deps, RStep, project_of, read_truth
 from ovlm.renewal.config import RESTORE_STEPS, WINDOW_STEPS
 from ovlm.renewal.ledger import DbOwnershipRegistry, green_row, plan_resolved, snapshot_row
@@ -270,10 +272,14 @@ class BlueGreenFipV1(WorkflowDefinition):
                     LockSpec("port", ev["port_id"], "green"),
                 ],
             )
+        if key == "quiesce_green":
+            # S2 skipped (volume not on an ACTIVE green) opened nothing before: the service stops at S3 at the latest.
+            downtime.open_interval(c, run.id, kind=downtime.RESTORE, step_key=key)
         if key == "verify_external":
             self._cutover_commit(c, run, resolved, ev)
         if key == "verify_external_old":
             _end_downtime(c, run.id)
+            downtime.close_open(c, run.id, step_key=key)
             if (
                 _role(c, resolved["blue"]["server_id"]) == "retained"
             ):  # revert after cutover: blue current again
@@ -289,8 +295,10 @@ class BlueGreenFipV1(WorkflowDefinition):
     def _cutover_commit(
         self, c: Connection, run: RunView, resolved: Mapping[str, Any], ev: Mapping[str, Any]
     ) -> None:
-        """W10 success, one transaction: ``downtime_ended_at``, roles (green current, blue retained), audit."""
-        seconds = _end_downtime(c, run.id)
+        """W10 success, one transaction: ``downtime_ended_at``, the window interval closed, roles (green current, blue
+        retained), audit."""
+        _end_downtime(c, run.id)
+        downtime.close_open(c, run.id, step_key="verify_external")
         g = green_row(c, run.id)
         if g is None or not g["openstack_id"]:
             raise RuntimeError("cutover without a green in the ledger")
@@ -301,8 +309,6 @@ class BlueGreenFipV1(WorkflowDefinition):
                 s, action="renewal.cutover", target_type="renewal_run", target_id=run.id, principal_type="system",
                 auth_method="none", run_id=UUID(run.id), after={"outcome": "green current", "reason": "W10 ok"},
             )  # fmt: skip
-        if seconds is not None:
-            metrics.DOWNTIME.observe(seconds)
 
     # ---- failures --------------------------------------------------------------------------------------
 
@@ -718,11 +724,15 @@ def _retire_intent(c: Connection, run_id: str) -> bool:
     )
 
 
-def _end_downtime(c: Connection, run_id: str) -> float | None:
-    row = c.execute(
-        text("UPDATE workflow_run SET downtime_ended_at = COALESCE(downtime_ended_at, now()) WHERE id = :r "
-             "RETURNING EXTRACT(EPOCH FROM downtime_ended_at - downtime_started_at)"), {"r": run_id}).first()  # fmt: skip
-    return None if row is None or row[0] is None else float(row[0])
+def _end_downtime(c: Connection, run_id: str) -> None:
+    """End the run's **first** interval on the run row (kept for the budget, the REN-1 seal and the retention timer;
+    the full record is ``run_downtime``, :mod:`ovlm.renewal.downtime`)."""
+    c.execute(
+        text(
+            "UPDATE workflow_run SET downtime_ended_at = COALESCE(downtime_ended_at, now()) WHERE id = :r"
+        ),
+        {"r": run_id},
+    )
 
 
 def _role(c: Connection, server_id: str) -> str | None:

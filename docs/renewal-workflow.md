@@ -4,7 +4,7 @@
 |---|---|
 | Owner | Agent 2 — Chief Architect |
 | Status | **Designed** (Phase 1 proposal; nothing implemented; partly lab-observed by EXP-01 and EXP-01b, see §10) |
-| Last updated | 2026-11-04 |
+| Last updated | 2026-11-09 |
 
 > **Revision 2026-11-04** (after the SRE review, the security review and EXP-01). Addressed: SRE-R-1 (S6 boot-cycle,
 > units-enabled precondition), SRE-R-2 (fence gate, via ADR-0003), SRE-R-3 (`first_use` hard-wired `false`), SRE-R-5,
@@ -24,6 +24,9 @@
 > **Revision 2026-11-04 (image/docs alignment)**: X1 **keeps** the pre-handoff snapshot (§4, X1 row); OVLM never deletes
 > snapshots, orphans are only reported. B8/W10/S9 reference the external-probe identity contract
 > ([automation-contract.md §3.6.1](automation-contract.md)).
+>
+> **Revision 2026-11-09 (P0-3, P2-3)**: every downtime interval of a run is recorded (`run_downtime`): the window and a
+> revert after the cutover (S2 to S9); total = sum; an open interval is ongoing; never "0s" on the run page (§3).
 
 Decision record: [ADR-0004](decisions/ADR-0004-mvp-renewal-strategy.md). Engine semantics (leases, fencing, waits):
 [ADR-0003](decisions/ADR-0003-workflow-engine.md). Ownership: [ADR-0005](decisions/ADR-0005-ownership-and-idempotency.md).
@@ -147,7 +150,8 @@ destructive steps re-validate the evidence's integrity, not its expiry, so an ap
 | W9 | `move_fip` | `PUT /floatingips/{id} {port_id: green_port}` (+`fixed_ip_address` if several, OSI §6.1 SV) | FIP on blue's port **or** already on green's | pure state set; repeat-safe (OSI §3, SV). Map 404 `ExternalGatewayForFloatingIPNotFound` text explicitly | FIP `port_id` = green port; FIP `status` ACTIVE (DU) | `timeouts.fip_status` | 4xx and a GET shows `port_id` unchanged → needs_human + page, or auto restore if a W4 snapshot exists (§4.1, D-1); FIP state unreadable → needs_human | **yes** (cutover) | restore (S8) |
 | W10 | `verify_external` | HTTP probe of `health_check.external` via the FIP from the worker, starting **immediately** after W9 (no settle delay: EXP-01b FIP move 1.1–1.3 s, effective at once, LO); response must prove it comes from green: `X-OVLM-Server-Id`, else JSON `server_id`, else JSON `hostname` ([automation-contract §3.6.1](automation-contract.md)); a plain TCP check cannot pass | W9 ok | read-only | probe ok `external_verify.required_successes` times | `timeouts.external_verify` | exhausted → needs_human + page, or auto restore if a W4 snapshot exists (§4.1, D-1) | no | restore |
 
-W10 success commit (one transaction): `downtime_ended_at`, managed VM roles (green `current`, blue `retained`), audit.
+W10 success commit (one transaction): `downtime_ended_at`, the open `window` downtime interval closed (§3), managed VM
+roles (green `current`, blue `retained`), audit.
 
 ### 2.3 Retention and retirement
 
@@ -220,17 +224,41 @@ step-up records and role bindings coherently can still forge a set that passes; 
 removes its ability to change run and step state, and the audit log-stream mirror makes forgeries visible after the
 fact. Approvals signed with a key the api does not hold (e.g. WebAuthn over the bound hash) are V1.
 
-**Downtime (OVLM-measured)** = `downtime_ended_at − downtime_started_at`, from the first claim of W1 to the first
-successful W10 (or to S9 success on restore). B8's external baseline proves blue served just before. Precision is bounded
-by `external_probe.interval`. It is OVLM's view, not user-perceived: established connections through the old NAT are
-lost (OSI §6.1, AS) and FIP propagation is asynchronous (DU; EXP-01b measured 1.1–1.3 s API time and the first good
-probe ≤ 0.6 s later on a hairpin path, LO, §10). Exported as
-`ovlm_renewal_downtime_seconds` and stored on the run. The window budget `max_window_duration` is a **policy** field,
+**Downtime (OVLM-measured)** = the sum of the run's **downtime intervals** (table `run_downtime`, data-model.md §8;
+roadmap P0-3, lab finding AC: a revert after the cutover took the service down again for 218.4 s by the external
+probe, and OVLM recorded nothing). A run has at most two:
+
+| Interval | Starts (service goes down) | Ends (service proven up through the FIP) |
+|---|---|---|
+| `window` | W1 claim: written in the claim transaction, before the quiesce play on blue (first claim only) | W10 success commit (green serves); or S9 success commit when the window ends in a restore (auto restore, rollback, abort) |
+| `restore` (revert after the cutover, no interval open) | S2: green serves until its quiesce play stops the service, so S2 opens it in a fenced transaction **before** the play; when S2 is skipped (the volume is not on an ACTIVE green: stateless profile, green already stopped) S2's success commit opens it, before S3 stops green | S9 success commit (blue serves through the FIP again) |
+
+S1 (unlock blue) does not affect the service and is outside the interval; S8 moves the FIP but only S9 proves blue
+answers, as W10 does for green. An in-window restore (W1 opened the window interval and it is still open) opens no
+second interval: the window interval runs on until S9. Rules: an interval is opened only when none of the run is open
+(partial unique index), so a retry, a takeover or a W1 re-claim never duplicates it; it is closed with
+`ended_at IS NULL` in the same fenced commit as the step outcome (W10, S9), so a commit rejected for a stale worker
+closes nothing and the next attempt closes it once. The start markers are written in the fenced claim transaction that
+precedes the act (the outcome commit comes after the outage began); a takeover never loses them. An interval left open
+(a run parked in `needs_human`) is shown **ongoing**, with its elapsed time so far; a read never invents an end. Each
+open and close writes an audit row (`renewal.downtime.started`, `renewal.downtime.ended`, system) in the same
+transaction.
+
+`workflow_run.downtime_started_at` / `downtime_ended_at` stay the **first** interval (W1 claim to W10, or to S9): the
+window budget, the REN-1 outage seal and the retention timer read them; they are not changed by a later revert. B8's
+external baseline proves blue served just before. Precision is bounded by `external_probe.interval`. It is OVLM's
+view, not user-perceived: established connections through the old NAT are lost (OSI §6.1, AS) and FIP propagation is
+asynchronous (DU; EXP-01b measured 1.1–1.3 s API time and the first good probe ≤ 0.6 s later on a hairpin path, LO,
+§10). Exported per interval as `ovlm_renewal_downtime_seconds{kind="window"|"restore"}`, returned by the api as the
+run's `downtime` object (api-design.md) and shown on the run page with each interval and the total: a sub-second
+interval reads "under 0.1s" or "0.4s", an interval that was never measured reads "not measured", never "0s"
+(roadmap P2-3). The window budget `max_window_duration` is a **policy** field,
 **required**, enforced as above (SRE-R-6); its suggested value is set after the lab measures real windows.
 
 ## 4. Restore sequence (rollback in window, revert after cutover)
 
-One convergent sequence; each step probes and is **skipped if already satisfied**. Target: volume attached to blue,
+One convergent sequence; each step probes and is **skipped if already satisfied**. A revert after the cutover opens a
+`restore` downtime interval at S2 and closes it at S9 (§3 "Downtime"). Target: volume attached to blue,
 blue ACTIVE and serving, FIP on blue's port, green SHUTOFF and locked. Used by in-window auto restore, operator rollback
 and revert. Restore runs S2 (quiesce green) before any detach.
 
@@ -372,7 +400,7 @@ locks, refreshes the run's **current-truth panel** (§6.1) and shows: the stuck 
 | Failed Ansible configuration | B7 per AC §6: retryable bounded, fatal → BuildFailed. Volume never left blue. |
 | Green ACTIVE but not reachable yet (EXP-01b) | B5/B9 wait on SSH and readiness, never on ACTIVE; T0 is not reached until B9 passes, so the outage is not extended by green's boot. |
 | Console output empty (EXP-01b) | Default `injected` host-key policy does not need the console; under `console`, B5 times out → needs_human "host key unverifiable" before any outage. |
-| Failed health check | W8 exhausted → needs_human + page (D-1 = B); auto restore S2–S10 only if a W4 snapshot was taken. Recorded downtime includes the wait and any restore. |
+| Failed health check | W8 exhausted → needs_human + page (D-1 = B); auto restore S2–S10 only if a W4 snapshot was taken. Recorded downtime includes the wait and any restore (the window interval stays open, ongoing, until S9). |
 | Failed cutover | W9 4xx with FIP unchanged (single transaction, OSI §6.1 SV) → needs_human + page, or auto restore if a W4 snapshot was taken (D-1 = B). W10 failure → same rule; a restore includes S8. Unknown FIP state → needs_human. |
 | Quiesced but still ACTIVE (W1 ok, W2 refused / abort / crash then rollback) | S6 boot-cycles blue (stop, start); fstab remounts; enabled units start; S7 health. Converges without `rollback_hooks` (SRE-R-1). |
 | W1 parked after stopping the units, before the unmount (blue ACTIVE, volume mounted) | S6 sees the units down only when the profile names them (`inventory_vars.service_units`); otherwise it reports blue healthy. S7 runs `start_service` on blue before the health check, so the restore converges either way (lab bug X, 2026-11-07). |

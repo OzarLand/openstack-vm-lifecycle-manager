@@ -3,8 +3,9 @@
 * **W1 claim checks** run in W1's probe (read) and again in the first transaction of ``act``, which also writes
   ``downtime_started_at`` (first claim only) before the quiesce starts: G2 valid now with its evidence re-validated,
   policy window open, B9 younger than ``green_ready.max_age``, write credential and Keystone token valid beyond the
-  worst-case window. A refused claim sends the run back to G2 or B9 with no outage. **A re-claim inside the outage**
-  (``downtime_started_at`` already written: blue may be quiesced) never refuses on expiry, window, B9 age or
+  worst-case window. The same transaction opens the run's ``window`` downtime interval
+  (:mod:`ovlm.renewal.downtime`). A refused claim sends the run back to G2 or B9 with no outage. **A re-claim inside
+  the outage** (``downtime_started_at`` already written: blue may be quiesced) never refuses on expiry, window, B9 age or
   credential horizon; it re-validates G2's integrity and blue's state only, and any problem is needs_human inside
   the window (REN-1).
 * **Budget** (SRE-R-6): before W2-W8, ``now - downtime_started_at > max_window_duration`` fails with trigger
@@ -30,10 +31,10 @@ from sqlalchemy import text
 from ovlm.auth.sod import Gate
 from ovlm.openstack import errors as oe
 from ovlm.openstack.write import SNAPSHOT_RUN_KEY, snapshot_name
-from ovlm.renewal import metrics
+from ovlm.renewal import downtime, metrics
 from ovlm.renewal.base import BLUE_HOST_KEY_UNTRUSTED, RStep, StepRefusal, blue_host_key_problems
 from ovlm.renewal.closed_table import TRIGGER_BUDGET, TRIGGER_EVIDENCE
-from ovlm.renewal.ledger import fenced_write, ledger_intend, ledger_present, snapshot_row
+from ovlm.renewal.ledger import fenced_tx, ledger_intend, ledger_present, snapshot_row
 from ovlm.renewal.plans import load_facts, now_db
 from ovlm.renewal.steps_build import (
     AnsibleStep,
@@ -211,14 +212,18 @@ class QuiesceOld(WindowAnsible):
     def act(self, ctx: StepContext, intent: Mapping[str, Any]) -> None:
         # First claim: G2 must be unexpired in this very transaction. Re-claim inside the outage (the row already
         # carries downtime_started_at): only the approval's integrity (approved, not void) counts (REN-1).
-        claimed = fenced_write(
-            self.d.db,
-            ctx,
-            "UPDATE workflow_run SET downtime_started_at = COALESCE(downtime_started_at, now()), updated_at = now() "
-            "WHERE id = :r AND EXISTS (SELECT 1 FROM approval WHERE id = :a AND decision = 'approved' "
-            "AND void_reason IS NULL AND (expires_at > now() OR workflow_run.downtime_started_at IS NOT NULL))",
-            {"r": ctx.run.id, "a": intent["g2_approval_id"]},
-        )
+        # The window interval opens in the same transaction (run_downtime, P0-3); a re-claim finds it open and adds
+        # nothing.
+        with fenced_tx(self.d.db, ctx) as c:
+            claimed = c.execute(
+                text("UPDATE workflow_run SET downtime_started_at = COALESCE(downtime_started_at, now()), "
+                     "updated_at = now() WHERE id = :r AND EXISTS (SELECT 1 FROM approval WHERE id = :a "
+                     "AND decision = 'approved' AND void_reason IS NULL "
+                     "AND (expires_at > now() OR workflow_run.downtime_started_at IS NOT NULL))"),
+                {"r": ctx.run.id, "a": intent["g2_approval_id"]},
+            ).rowcount  # fmt: skip
+            if claimed == 1:
+                downtime.open_interval(c, ctx.run.id, kind=downtime.WINDOW, step_key=self.key)
         if claimed != 1:
             if intent.get("reclaim"):
                 raise StepRefusal(E.NEEDS_HUMAN, "approval_evidence_invalid",

@@ -4,7 +4,7 @@
 |---|---|
 | Owner | Agent 2 — Chief Architect |
 | Status | **Designed** (Phase 1 proposal; nothing implemented) |
-| Last updated | 2026-11-05 |
+| Last updated | 2026-11-09 |
 
 > **Revision 2026-11-04**: runs start in `requested` and actions are signals the worker validates (SEC-R-1); approval
 > responses show hash inputs, requester set and automation diff, SoD errors (SEC-R-2); automation logs restricted,
@@ -125,7 +125,7 @@ approver). "op" below = operator. SoD (requester ≠ approver; retirement two-pe
 | Method + path | Role | Notes |
 |---|---|---|
 | `GET /runs?kind=&state=&service=` | viewer | |
-| `GET /runs/{id}` | viewer | state, phase, current step, downtime timestamps, locks held, `current_truth` + `current_truth_at`, `available_actions[]` (each with role needed and concrete effect from the current state), worst-case window and budget, links |
+| `GET /runs/{id}` | viewer | state, phase, current step, downtime timestamps (`downtime_started_at`/`_ended_at`: the first interval) and the **`downtime`** object (below), locks held, `current_truth` + `current_truth_at`, `available_actions[]` (each with role needed and concrete effect from the current state), worst-case window and budget, links |
 | `GET /runs/{id}/steps`, `GET /steps/{id}`, `GET /steps/{id}/attempts` | viewer: status, evidence summary, Ansible `result` and per-task changed/ok/failed; **operator/admin**: automation logs, events and diffs (restricted artefacts, "reported by guest" labels, SEC-R-3, SEC-R-31). Running steps show `lease_owner`, `lease_expires_at`, `heartbeat_at`, worker `last_seen_at` | |
 | `POST /runs/{id}/actions/probe` | op | read-only re-probe (read credential + read-only SSH); refreshes `current_truth`; no TC (SRE-R-9) |
 | `POST /runs/{id}/cutover-request` | op | creates the G2 approval request (renewal-workflow.md §3) |
@@ -136,6 +136,15 @@ approver). "op" below = operator. SoD (requester ≠ approver; retirement two-pe
 | `POST /runs/{id}/actions/revert` `{typed_confirmation}` | op, human session + TC | after cutover until retirement: restore sequence (FIP back to blue) |
 | `POST /runs/{id}/actions/reprepare-automation` `{typed_confirmation, stepup_id}` | **approver** (not the run's requester: 403 `sod-violation`), human session + step-up + TC | only on a step parked on a lost/unverifiable automation checkout (else 409 `not-applicable`); authorizes one re-clone of the pinned SHA inside the window (renewal-workflow.md §2, AC §2) |
 | `POST /runs/{id}/actions/mark-resolved` `{step_id, attestation, typed_confirmation}` | op + TC; approver if next step is destructive (security-model.md §3.1) | operator states the manual fix (e.g. admin force-detached); engine re-probes before continuing |
+
+**Run `downtime` object** (roadmap P0-3, P2-3; renewal-workflow.md §3 "Downtime"; data-model.md §8 `run_downtime`):
+`{"measured": bool, "complete": bool, "ongoing": bool, "total_seconds": number|null, "intervals": [{"kind":
+"window"|"restore", "started_at", "started_by_step", "ended_at"|null, "ended_by_step"|null, "ongoing": bool,
+"end_measured": bool, "seconds": number|null}]}`. One interval per outage OVLM caused: the window (W1 claim to W10, or
+to S9 after an in-window restore) and a restore after the cutover (S2 to S9). `seconds` is the measured length, or the
+elapsed time so far (DB clock) for the `ongoing` interval of a live run. `total_seconds` is their sum; it is `null`
+(never `0`) when nothing was measured. An open interval of a terminal run is not ongoing: its `end_measured` is false,
+its `seconds` is `null` and it is left out of the total (`complete: false`).
 
 All action POSTs require `Idempotency-Key`, return **202** with the run, and are audited. A 403 for a missing role names the account: `Signed in as approver-a (approver). This action needs the operator role.` Every web page header shows `username · role (scope)` for each effective binding and a "Sign out / switch account" button (UI-1).
 
