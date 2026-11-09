@@ -1,12 +1,13 @@
 """Renewal metrics (architecture.md section 6). No ids or names as labels.
 
 Paging (D-1 = B, architecture.md 6): ``OvlmPostStartFailure`` fires on ``ovlm_runs_needing_attention{reason=
-"post_start_failure"}`` (engine gauge) and on increases of :data:`POST_START_FAILURES`; see ``alert_rules.yml``.
+"post_start_failure"}`` (engine gauge) and on increases of :data:`POST_START_FAILURES`; the rule file is
+``deploy/prometheus/ovlm-alerts.yml`` (docs/operations.md).
 """
 
 from __future__ import annotations
 
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 
 from ovlm.observability.metrics import REGISTRY
 
@@ -45,4 +46,11 @@ DOWNTIME = Histogram(
     ["kind"],
     registry=REGISTRY,
     buckets=(15, 30, 60, 120, 300, 600, 1800, 3600, 7200),
+)
+DOWNTIME_OPEN = Gauge(
+    "ovlm_renewal_downtime_open_seconds",
+    "Age (DB clock) of the oldest open downtime interval by kind=window|restore; 0 when none is open. An open "
+    "restore interval means the service is down after a revert (alert OvlmRestoreDowntimeOpenTooLong)",
+    ["kind"],
+    registry=REGISTRY,
 )

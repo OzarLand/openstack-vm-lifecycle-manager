@@ -389,7 +389,7 @@ locks, refreshes the run's **current-truth panel** (§6.1) and shows: the stuck 
 | `available_actions[]` | Each action with its concrete effect from the current state, e.g. "rollback will: stop green, attach volume to blue, start blue, keep FIP on blue"; after a W7–W10 failure: "blue will start on data the new VM may have changed; no snapshot exists". A run in `requested` shows "waiting for worker admission; last worker heartbeat T" (SRE-R-25). |
 | Pending signals | An unconsumed `run_signal` shows as "signal pending: rollback requested by X at T" in the run body and the panel (SRE-R-24). |
 | Liveness of running steps | `lease_owner`, `lease_expires_at`, `heartbeat_at`, the worker's `last_seen_at`; UI flags "worker not seen for X, takeover at T". |
-| Alerts | Sample Prometheus rules shipped with the release (architecture.md §6). Notification channel is V1 (SRE-R-20). |
+| Alerts | Sample Prometheus rules shipped with the release: [`deploy/prometheus/ovlm-alerts.yml`](../deploy/prometheus/ovlm-alerts.yml) (architecture.md §6); routing and a runbook per alert in [operations.md](operations.md). Notification channel is V1 (SRE-R-20). |
 
 ## 7. Failure scenarios (mission list)
 

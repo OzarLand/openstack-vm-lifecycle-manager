@@ -1,0 +1,172 @@
+# OVLM sample Prometheus alert rules (architecture.md section 6, SRE-R-9 e). Shipped with each release.
+#
+# Paging is mandatory: route at least OvlmPostStartFailure and OvlmNeedsHumanInWindow to an on-call pager (after a
+# failure past the service start (D-1 = B) the service stays down until a human acts). docs/operations.md explains
+# how to load this file, an Alertmanager route that pages on severity="page", and a runbook per alert.
+#
+# Assumptions:
+# * The api and the worker internal listeners (/metrics, http.metrics_port) are scraped as job="ovlm-api" and
+#   job="ovlm-worker". Rules that need the worker only say so with {job="ovlm-worker"}; adapt the job names if yours
+#   differ.
+# * Gauges read from the database (ovlm_runs_needing_attention, ovlm_runs_requested_overdue, ...) are exported by
+#   every worker, so the rules aggregate them with max(), never sum(), to count each run once.
+# * Thresholds marked "tune" are defaults; keep them in step with your settings (admission.after, signal.after,
+#   worker.heartbeat_interval) and policies (max_window_duration).
+#
+# Validated by tests/unit/test_alert_rules.py (every metric and label exists in OVLM's registry; promtool check rules
+# and promtool test rules with ovlm-alerts.test.yml when promtool is on PATH).
+groups:
+  - name: ovlm-paging
+    rules:
+      - alert: OvlmPostStartFailure
+        # needs_human(reason=post_start_failure); the counter also catches a post-start failure parked under
+        # another reason (approval evidence re-validation failed after W7).
+        expr: >-
+          max by (phase) (ovlm_runs_needing_attention{reason="post_start_failure"}) > 0
+          or on() sum(increase(ovlm_post_start_failures_total[30m])) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "A renewal failed after the service started on green and no snapshot exists: the service is down until a human acts (D-1 = B)."
+          description: "Open the run in needs_human (reason post_start_failure). Choose retry-step, rollback or a manual fix."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmpoststartfailure"
+
+      - alert: OvlmNeedsHumanInWindow
+        expr: max by (reason) (ovlm_runs_needing_attention{phase="window"}) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value }} renewal run(s) in needs_human inside the downtime window (reason {{ $labels.reason }})."
+          description: "The service is down or moving and OVLM stopped; nothing happens without an operator."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmneedshumaninwindow"
+
+      - alert: OvlmApprovalEvidenceInvalidInWindow
+        expr: max(ovlm_runs_needing_attention{phase="window", reason="approval_evidence_invalid"}) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "Approval evidence re-validation failed inside the downtime window (possible forged or tampered approval, SRE-R-23)."
+          description: "Treat as a security event and as a stopped window at the same time."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmapprovalevidenceinvalidinwindow"
+
+      - alert: OvlmWindowBudgetExceeded
+        expr: sum(increase(ovlm_window_budget_exceeded_total[30m])) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "A renewal window ran past its approved budget (max_window_duration)."
+          description: "The outage is longer than the approver accepted. Check the run: it either restored automatically or stopped in needs_human."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmwindowbudgetexceeded"
+
+      - alert: OvlmRestoreDowntimeOpenTooLong
+        # tune: a restore (S2 to S9) normally takes minutes.
+        expr: max(ovlm_renewal_downtime_open_seconds{kind="restore"}) > 1800
+        labels:
+          severity: page
+        annotations:
+          summary: "A restore downtime interval has been open for {{ $value | humanizeDuration }}: the service is down after a revert or rollback."
+          description: "The restore (S2 to S9) has not brought blue back. Check the run for needs_human or a stuck step."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmrestoredowntimeopentoolong"
+
+      - alert: OvlmWorkerDown
+        expr: sum(up{job="ovlm-worker"}) == 0 or absent(up{job="ovlm-worker"})
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "No OVLM worker is being scraped: no step runs, no window finishes, no restore starts."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmworkerdown"
+
+      - alert: OvlmWorkerHeartbeatStale
+        # tune: about 10 x worker.heartbeat_interval (default 5 s). NaN (never beat yet) does not fire.
+        expr: ovlm_worker_heartbeat_age_seconds{job="ovlm-worker"} > 60
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "The worker loop on {{ $labels.instance }} has not beaten for {{ $value | humanizeDuration }} (hung or paused process)."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmworkerheartbeatstale"
+
+  - name: ovlm-ticket
+    rules:
+      - alert: OvlmRunNeedsHumanLong
+        # Approximation of "any run in needs_human > 15 min": a needs_human count stayed above 0 for 15 minutes.
+        expr: max by (phase, reason) (ovlm_runs_needing_attention) > 0
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} run(s) in needs_human for more than 15 minutes (phase {{ $labels.phase }}, reason {{ $labels.reason }})."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmrunneedshumanlong"
+
+      - alert: OvlmApprovalEvidenceInvalid
+        expr: sum by (gate) (increase(ovlm_approval_evidence_invalid_total[1h])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Approval evidence re-validation failed at gate {{ $labels.gate }} (SRE-R-23). Review the security audit events."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmapprovalevidenceinvalid"
+
+      - alert: OvlmFencedCommitRejected
+        expr: sum(increase(ovlm_fenced_commit_rejected_total[1h])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A worker lost ownership of a step and its fenced commit was rejected (ADR-0003). Look for pauses, DB outages or clock trouble."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmfencedcommitrejected"
+
+      - alert: OvlmLeaseTakeover
+        expr: sum(increase(ovlm_lease_takeovers_total[1h])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "A running step was taken over after its lease expired (worker crash, kill or pause)."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmleasetakeover"
+
+      - alert: OvlmRunRequestedOverdue
+        expr: max(ovlm_runs_requested_overdue) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} run(s) waiting for admission longer than admission.after (SRE-R-25)."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmrunrequestedoverdue"
+
+      - alert: OvlmRunSignalPendingOverdue
+        expr: max(ovlm_run_signals_pending_overdue) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} operator signal(s) (abort, rollback, ...) not consumed after signal.after (SRE-R-24)."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmrunsignalpendingoverdue"
+
+      - alert: OvlmStepAccepted
+        expr: sum by (step) (increase(ovlm_step_accepted_total[1h])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "An approver accepted restore step {{ $labels.step }} without running its playbook (accept-step, ADR-0008): review the run's evidence."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmstepaccepted"
+
+      - alert: OvlmAutoRestore
+        expr: sum by (trigger) (increase(ovlm_auto_restore_total[1h])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "OVLM restored a renewal automatically in the window (trigger {{ $labels.trigger }}): the renewal did not happen, find out why."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmautorestore"
+
+      - alert: OvlmCredentialExpiring
+        expr: max by (within) (ovlm_credentials_expiring{within=~"expired|7d"}) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} application credential(s) expired or expiring within 7 days: runs that need them will be refused."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmcredentialexpiring"
+
+      - alert: OvlmCredentialValidationFailing
+        expr: max(ovlm_credentials_failing_validation) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $value }} active credential(s) failed their last Keystone validation: no new run uses them."
+          runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmcredentialvalidationfailing"

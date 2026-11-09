@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,6 +26,9 @@ class Registry:
         self._current: dict[tuple[str, str], WorkflowDefinition] = {}
         self.sweepers: list[StartupSweeper] = []
         self.periodic: list[PeriodicJob] = []
+        #: Strategy gauges refreshed with the engine's (``refresh_metrics``), on its read connection; a failing
+        #: refresher is logged and never stops the others.
+        self.metric_refreshers: list[Callable[[Any], None]] = []
         for d in definitions:
             self.register(d)
 

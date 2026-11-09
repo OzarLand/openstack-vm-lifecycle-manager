@@ -43,6 +43,17 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install "uv==${UV_VERSION}"
       - run: make install
+      # promtool for tests/unit/test_alert_rules.py (promtool check/test rules on deploy/prometheus/), checksum pinned
+      - name: promtool
+        env:
+          PROM_VERSION: "2.53.2"
+          PROM_SHA256: "60c126740c9cf1206b1e72150dd17914f1c3309bb7dc78a31d4670197ed4fa69"
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/prom.tgz" \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz"
+          echo "${PROM_SHA256}  $RUNNER_TEMP/prom.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/prom.tgz" -C "$RUNNER_TEMP" --strip-components=1 "prometheus-${PROM_VERSION}.linux-amd64/promtool"
+          echo "OVLM_PROMTOOL=$RUNNER_TEMP/promtool" >> "$GITHUB_ENV"
       - run: make test-unit
 
   integration:

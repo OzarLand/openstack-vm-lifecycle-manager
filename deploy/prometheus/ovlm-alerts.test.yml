@@ -1,0 +1,98 @@
+# promtool test rules deploy/prometheus/ovlm-alerts.test.yml (run by tests/unit/test_alert_rules.py when promtool is
+# on PATH). Covers the paging alerts and the aggregation choices (max across workers, counter fallback).
+rule_files:
+  - ovlm-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # needs_human(post_start_failure) in the window: both mandatory pages fire; two workers export the same DB count,
+  # which is counted once.
+  - interval: 1m
+    input_series:
+      - series: 'ovlm_runs_needing_attention{job="ovlm-worker",instance="w1",phase="window",reason="post_start_failure"}'
+        values: '0 1 1 1 1'
+      - series: 'ovlm_runs_needing_attention{job="ovlm-worker",instance="w2",phase="window",reason="post_start_failure"}'
+        values: '0 1 1 1 1'
+      - series: 'up{job="ovlm-worker",instance="w1"}'
+        values: '1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: OvlmPostStartFailure
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: OvlmPostStartFailure
+        exp_alerts:
+          - exp_labels: {severity: page, phase: window}
+            exp_annotations:
+              summary: "A renewal failed after the service started on green and no snapshot exists: the service is down until a human acts (D-1 = B)."
+              description: "Open the run in needs_human (reason post_start_failure). Choose retry-step, rollback or a manual fix."
+              runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmpoststartfailure"
+      - eval_time: 2m
+        alertname: OvlmNeedsHumanInWindow
+        exp_alerts:
+          - exp_labels: {severity: page, reason: post_start_failure}
+            exp_annotations:
+              summary: "1 renewal run(s) in needs_human inside the downtime window (reason post_start_failure)."
+              description: "The service is down or moving and OVLM stopped; nothing happens without an operator."
+              runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmneedshumaninwindow"
+      - eval_time: 4m
+        alertname: OvlmWorkerDown
+        exp_alerts: []
+
+  # A post-start failure parked under approval_evidence_invalid: the counter pages OvlmPostStartFailure, and the
+  # in-window evidence page fires as well.
+  - interval: 1m
+    input_series:
+      - series: 'ovlm_post_start_failures_total{job="ovlm-worker",instance="w1"}'
+        values: '0 0 1 1 1'
+      - series: 'ovlm_runs_needing_attention{job="ovlm-worker",instance="w1",phase="window",reason="approval_evidence_invalid"}'
+        values: '0 0 1 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OvlmPostStartFailure
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "A renewal failed after the service started on green and no snapshot exists: the service is down until a human acts (D-1 = B)."
+              description: "Open the run in needs_human (reason post_start_failure). Choose retry-step, rollback or a manual fix."
+              runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmpoststartfailure"
+      - eval_time: 3m
+        alertname: OvlmApprovalEvidenceInvalidInWindow
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "Approval evidence re-validation failed inside the downtime window (possible forged or tampered approval, SRE-R-23)."
+              description: "Treat as a security event and as a stopped window at the same time."
+              runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmapprovalevidenceinvalidinwindow"
+
+  # An open restore interval pages after 30 minutes; no worker scraped pages after 5 minutes; a worker that never beat
+  # (NaN) does not page.
+  - interval: 1m
+    input_series:
+      - series: 'ovlm_renewal_downtime_open_seconds{job="ovlm-worker",instance="w1",kind="restore"}'
+        values: '0+60x40'
+      - series: 'ovlm_worker_heartbeat_age_seconds{job="ovlm-worker",instance="w1"}'
+        values: 'NaN NaN NaN NaN NaN'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: OvlmRestoreDowntimeOpenTooLong
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: OvlmRestoreDowntimeOpenTooLong
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: "A restore downtime interval has been open for 35m 0s: the service is down after a revert or rollback."
+              description: "The restore (S2 to S9) has not brought blue back. Check the run for needs_human or a stuck step."
+              runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmrestoredowntimeopentoolong"
+      - eval_time: 4m
+        alertname: OvlmWorkerHeartbeatStale
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: OvlmWorkerDown
+        exp_alerts:
+          - exp_labels: {severity: page, job: ovlm-worker}
+            exp_annotations:
+              summary: "No OVLM worker is being scraped: no step runs, no window finishes, no restore starts."
+              runbook_url: "https://github.com/OzarLand/openstack-vm-lifecycle-manager/blob/main/docs/operations.md#ovlmworkerdown"

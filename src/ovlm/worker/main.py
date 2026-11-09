@@ -72,7 +72,7 @@ def build_registry(
     ``api_unreachable`` re-probe runs every ``poll.max_interval`` (renewal-workflow.md 5)."""
     registry = Registry()
     if engine is not None:
-        from ovlm.renewal import reprobe
+        from ovlm.renewal import downtime, reprobe
         from ovlm.renewal.definition import BlueGreenFipV1
         from ovlm.renewal.production import credential_store, production_deps
 
@@ -81,6 +81,7 @@ def build_registry(
         registry.register(BlueGreenFipV1(renewal_deps or production_deps(settings, engine, store)))
         registry.register(reprobe.RenewalReprobe(engine))
         registry.periodic.append(reprobe.periodic_job(settings.poll.max_interval))
+        registry.metric_refreshers.append(downtime.refresh_open_metric)
         _register_inventory_jobs(registry, settings, engine, store)
         _register_host_key_scan(registry, settings, engine)
         if store is not None:

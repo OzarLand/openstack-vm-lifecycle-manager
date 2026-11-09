@@ -19,7 +19,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
-from ovlm.renewal import service
+from ovlm.observability.metrics import REGISTRY
+from ovlm.renewal import downtime, service
 from ovlm.workflow import crashpoint
 from ovlm.workflow.crashpoint import CrashPlan
 from tests.integration.renewal.conftest import World, explain, to_cutover
@@ -34,6 +35,16 @@ def api_downtime(w: World) -> dict[str, Any]:
     with Session(bind=w.api) as s:
         body: dict[str, Any] = service.run_body(s, w.run_id)["downtime"]
     return body
+
+
+def open_gauge(kind: str) -> float:
+    value = REGISTRY.get_sample_value("ovlm_renewal_downtime_open_seconds", {"kind": kind})
+    assert value is not None
+    return value
+
+
+def _broken_refresher(c: Any) -> None:
+    c.execute(text("SELECT * FROM no_such_table"))
 
 
 def step_window(w: World, key: str) -> tuple[Any, Any]:
@@ -132,6 +143,12 @@ def test_restore_crash_inside_the_interval_neither_duplicates_nor_loses_it(world
     assert (
         body["ongoing"] and body["intervals"][1]["ongoing"] and body["intervals"][1]["seconds"] >= 0
     )
+    # the open restore interval is visible to the paging alert (OvlmRestoreDowntimeOpenTooLong); a failing
+    # refresher before it does not stop it
+    assert w.engine is not None
+    w.engine.registry.metric_refreshers[:] = [_broken_refresher, downtime.refresh_open_metric]
+    w.engine.refresh_metrics()
+    assert open_gauge("restore") > 0 and open_gauge("window") == 0
 
     w.signal("retry_step", tc=w.blue_tc())
     w.drive()
@@ -139,6 +156,8 @@ def test_restore_crash_inside_the_interval_neither_duplicates_nor_loses_it(world
     rows = intervals(w)
     assert [i["kind"] for i in rows] == ["window", "restore"], rows
     assert rows[1]["started_at"] == opened and rows[1]["ended_by_step"] == "verify_external_old"
+    w.engine.refresh_metrics()
+    assert open_gauge("restore") == 0
 
 
 @pytest.mark.parametrize(
