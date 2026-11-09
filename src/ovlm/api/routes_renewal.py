@@ -57,6 +57,8 @@ class ConfirmIn(BaseModel):
     stepup_id: UUID | None = None
     attestation: str | None = Field(default=None, max_length=2000)
     step_id: UUID | None = None
+    #: accept-step: the id of the OVLM probe the approver read (``current_truth.accept_probe.id``, ADR-0008)
+    probe_id: str | None = Field(default=None, max_length=64)
 
 
 @router.post("/plans", status_code=201)
@@ -185,7 +187,7 @@ def run_action(
     if (done := svc.replay(s, who, idempotency_key, "POST", path, bh)) is not None:
         return done
     out = svc.action(s, who, run_id, name, typed=body.typed_confirmation, stepup_id=body.stepup_id,
-                     attestation=body.attestation)  # fmt: skip
+                     attestation=body.attestation, step_id=body.step_id, probe_id=body.probe_id)  # fmt: skip
     svc.remember(s, who, idempotency_key or "", "POST", path, bh, out)
     s.commit()
     return out

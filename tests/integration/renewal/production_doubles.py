@@ -147,7 +147,19 @@ class SshDouble:
         if cmd[:3] == ("findmnt", "-n", "--"):
             return SshResult(0 if st.mounted else 1, "")
         if cmd[:3] == ("systemctl", "is-active", "--"):
-            return SshResult(0 if st.units else 3, "")
+            state = "active" if st.units else "inactive"
+            return SshResult(0 if st.units else 3, "".join(f"{state}\n" for _ in cmd[3:]))
+        if cmd[:5] == ("lsblk", "-n", "-o", "MOUNTPOINT", "--") and cmd[5].startswith(
+            "/dev/disk/by-id/virtio-"
+        ):
+            vol = next((v for vid, v in self.k.guest.cloud.snapshot()["volumes"].items()
+                        if cmd[5] == "/dev/disk/by-id/virtio-" + vid[:20]), None)  # fmt: skip
+            if vol is None or sid not in vol["attached_to"]:
+                return SshResult(32, "", f"{cmd[5]}: not a block device")
+            lines = (["/srv/data"] if st.mounted else []) + (
+                ["/mnt/other"] if st.mounted_elsewhere else []
+            )
+            return SshResult(0, "\n" + "".join(f"{x}\n" for x in lines))
         if cmd == ("cloud-init", "status"):
             return SshResult(0, "status: done\n")
         return SshResult(127, "", f"not in the fixed command list: {cmd}")

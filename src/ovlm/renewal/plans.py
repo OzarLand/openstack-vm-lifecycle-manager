@@ -489,8 +489,9 @@ def now_db(conn: Connection) -> datetime:
 def tc_target(
     conn: Connection, run_id: str, kind: str, phase: str, resolved: Mapping[str, Any]
 ) -> str:
-    """TC of the VM a run action affects: green in the build phase (once it exists) and for discard; blue
-    otherwise (api-design.md 4). Shared by the api (checked on request) and the worker (re-validated)."""
+    """TC of the VM a run action affects: green in the build phase (once it exists), for discard and for
+    accept-step (S2 targets green, ADR-0008); blue otherwise (api-design.md 4). Shared by the api (checked on
+    request) and the worker (re-validated)."""
     g = (
         conn.execute(
             text(
@@ -508,7 +509,9 @@ def tc_target(
         else None
     )
     phase = effective_phase(phase, *outage_marks(conn, run_id))
-    if kind == "discard" or (kind in ("rollback", "abort") and phase == "build" and green_tc):
+    if kind in ("discard", "accept_step") or (
+        kind in ("rollback", "abort") and phase == "build" and green_tc
+    ):
         return green_tc or ""
     return tc_of(resolved["blue"]["name"], resolved["blue"]["server_id"])
 

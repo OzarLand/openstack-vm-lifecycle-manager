@@ -24,7 +24,10 @@ Signals (re-validated here, SEC-R-1): ``rollback``/``abort``/``revert``/``discar
 consumed step-up ``run.<kind>`` on the run and the TC of the affected VM; ``mark_resolved`` additionally needs the
 approver role when the current step (re-queued by the engine, so its own act comes next) or the following step is
 destructive (REN-5); ``reprepare_automation`` needs the approver role (never the run's requester), the step-up and
-TC, and a step parked on a lost/unverifiable automation checkout (:mod:`ovlm.renewal.reprepare`); ``revert`` is
+TC, and a step parked on a lost/unverifiable automation checkout (:mod:`ovlm.renewal.reprepare`); ``accept_step``
+(ADR-0008, :mod:`ovlm.renewal.accept`) needs an approver who is not the requester, the step-up, the TC of green, an
+attestation, S2 parked in restore because its playbook refused, and OVLM's own fresh probe meeting S2's postcondition
+(:meth:`BlueGreenFipV1.accept_probe`); it closes S2 without running it and the run goes on with S3; ``revert`` is
 refused once X1 has persisted its delete intent (REN-4); ``probe`` refreshes the current-truth panel and, sent by the
 re-probe job for ``api_unreachable``, applies the self-resolution rules of section 5.1.
 """
@@ -33,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -44,7 +48,7 @@ from sqlalchemy.orm import Session
 from ovlm import audit
 from ovlm.auth.sod import INTERACTIVE_AUTH, STEPUP_VALIDITY, role_held_at
 from ovlm.openstack.errors import WriteNotAllowedError
-from ovlm.renewal import closed_table, downtime, metrics, reprepare
+from ovlm.renewal import accept, closed_table, downtime, metrics, reprepare
 from ovlm.renewal.base import Deps, RStep, project_of, read_truth
 from ovlm.renewal.config import RESTORE_STEPS, WINDOW_STEPS
 from ovlm.renewal.ledger import DbOwnershipRegistry, green_row, plan_resolved, snapshot_row
@@ -54,9 +58,11 @@ from ovlm.renewal.plans import (
     STRATEGY_VERSION,
     effective_phase,
     load_facts,
+    now_db,
     outage_marks,
     tc_target,
 )
+from ovlm.renewal.ports import GuestRef
 from ovlm.renewal.steps_after import (
     AttachToOld,
     AwaitDiscard,
@@ -100,6 +106,7 @@ from ovlm.renewal.steps_window import (
     VerifyExternal,
 )
 from ovlm.workflow.contract import (
+    AcceptStep,
     Admission,
     Defer,
     Done,
@@ -117,6 +124,7 @@ from ovlm.workflow.contract import (
     Wake,
     WorkflowDefinition,
 )
+from ovlm.workflow.ids import new_id
 
 log = logging.getLogger("ovlm.renewal")
 
@@ -157,6 +165,12 @@ def phase_of(key: str, current: str | None = None) -> str:
 
 def _no_writes(action: str) -> None:
     raise WriteNotAllowedError(f"read-only re-probe refused {action}")
+
+
+def _elapsed(prepared: Mapping[str, Any]) -> float:
+    """Seconds since the worker started the accept probe in ``prepare_signal`` (monotonic); infinite without one."""
+    t0 = prepared.get("t0")
+    return time.monotonic() - float(t0) if isinstance(t0, (int, float)) else float("inf")
 
 
 class BlueGreenFipV1(WorkflowDefinition):
@@ -470,7 +484,10 @@ class BlueGreenFipV1(WorkflowDefinition):
             approver = role_held_at(s, UUID(sig.actor_id), "approver", scope, now)
         if sig.kind == "reprepare_automation":
             return self._validate_reprepare(ctx, resolved, approver)
-        if not operator and not (sig.kind == "mark_resolved" and approver):
+        if sig.kind == "accept_step":
+            return self._validate_accept(ctx, resolved, approver)
+        # probe is read-only: an approver may refresh the probe an accept-step decision rests on (ADR-0008).
+        if not operator and not (sig.kind in ("mark_resolved", "probe") and approver):
             return "the actor does not hold the operator role in this scope"
         if sig.kind == "probe":
             return None
@@ -545,7 +562,180 @@ class BlueGreenFipV1(WorkflowDefinition):
         phase = effective_phase(run.phase, *outage_marks(c, run.id))
         return _check_confirmation(c, sig, run.id, tc_target(c, run.id, sig.kind, phase, resolved))
 
+    def _validate_accept(
+        self, ctx: TxContext, resolved: Mapping[str, Any], approver: bool
+    ) -> str | None:
+        """``accept_step`` (ADR-0008, :mod:`ovlm.renewal.accept`). Every refusal is also a ``step_acceptance`` row
+        (``refused``, with its code) and an audit row ``run.accept_step.refused``, in this transaction."""
+        refusal = self._accept_refusal(ctx, resolved, approver)
+        if refusal is None:
+            return None
+        code, why = refusal
+        sig, run, step = ctx.signal, ctx.run, ctx.step
+        assert sig is not None and sig.actor_id is not None  # noqa: S101 - checked by the caller
+        error = self._step_error(ctx.conn, step.id) if step is not None else None
+        prepared = ctx.prepared if isinstance(ctx.prepared, Mapping) else {}
+        accept.record(
+            ctx.conn, outcome="refused", run_id=run.id, signal_id=sig.id, approver_id=sig.actor_id,
+            step_id=step.id if step else None, step_key=step.step_key if step else None,
+            attempt=step.attempt if step else None, attestation=str(sig.payload.get("attestation") or ""),
+            pinned_sha=str((resolved.get("automation") or {}).get("sha") or "") or None,
+            parked_reason=(error or {}).get("reason"), refused_sha256=accept.refused_result_sha256(error) if error else None,
+            probe=prepared.get("probe"), probe_id=str(sig.payload.get("probe_id") or "") or None,
+            probe_elapsed=_elapsed(prepared), refusal_code=code, refusal=why,
+        )  # fmt: skip
+        return f"{code}: {why}"
+
+    def _accept_refusal(
+        self, ctx: TxContext, resolved: Mapping[str, Any], approver: bool
+    ) -> tuple[str, str] | None:
+        sig, run, c, step = ctx.signal, ctx.run, ctx.conn, ctx.step
+        assert sig is not None  # noqa: S101 - checked by the caller
+        if not approver:
+            return accept.FORBIDDEN, "accept-step needs the approver role"
+        creator = c.execute(
+            text("SELECT created_by FROM renewal_plan WHERE id = :p"), {"p": run.renewal_plan_id}
+        ).scalar()
+        if sig.actor_id in {run.started_by, str(creator) if creator else None}:
+            return accept.SOD, "separation of duties: the run's requester cannot accept a step"
+        error = self._step_error(c, step.id) if step is not None else None
+        phase = effective_phase(run.phase, *outage_marks(c, run.id))
+        why = accept.not_applicable(
+            run_state=run.state, step_key=step.step_key if step else None,
+            step_state=step.state if step else None, phase=phase, error=error,
+        )  # fmt: skip
+        if why is not None:
+            return accept.NOT_APPLICABLE, why
+        assert step is not None  # noqa: S101 - not_applicable refuses without a parked step
+        if (
+            str(sig.payload.get("step_id") or "") != step.id
+            or sig.payload.get("attempt") != step.attempt
+        ):
+            # compare-and-set on (needs_human, attempt): the request was made against another attempt
+            return (
+                accept.NOT_APPLICABLE,
+                "the parked step changed since the request (another attempt ran)",
+            )
+        if accept.already_accepted(c, run.id, step.step_key):
+            return accept.ALREADY, f"{step.step_key} was already accepted once in this run"
+        if (problem := accept.attestation_problem(sig.payload.get("attestation"))) is not None:
+            return accept.ATTESTATION, problem
+        tc = _check_confirmation(c, sig, run.id, tc_target(c, run.id, sig.kind, phase, resolved))
+        if tc is not None:
+            return (accept.CONFIRMATION if "typed confirmation" in tc else accept.STEPUP), tc
+        # The probe the approver saw: the latest one stored for this step and attempt, fresh, meeting the
+        # postcondition; then the worker's own probe, taken just before this transaction, must agree with it.
+        truth = c.execute(
+            text("SELECT current_truth FROM workflow_run WHERE id = :r"), {"r": run.id}
+        ).scalar()
+        shown = accept.shown_probe(truth)
+        if shown is None or str(shown.get("id")) != str(sig.payload.get("probe_id") or ""):
+            return (
+                accept.PROBE_MISMATCH,
+                "the probe shown to the approver is not the run's latest probe",
+            )
+        if shown.get("step_id") != step.id or shown.get("attempt") != step.attempt:
+            return (
+                accept.PROBE_MISMATCH,
+                "the probe shown to the approver was taken for another step or attempt",
+            )
+        age = accept.probe_age(shown, now_db(c))
+        if age is None or age > accept.FRESH_SECONDS:
+            return (
+                accept.PROBE_STALE,
+                f"the probe is older than {int(accept.FRESH_SECONDS)} s: probe again",
+            )
+        if not shown.get("ok"):
+            return accept.POSTCONDITION, "; ".join(accept.failing(shown))
+        prepared = ctx.prepared if isinstance(ctx.prepared, Mapping) else {}
+        fresh = prepared.get("probe")
+        if not isinstance(fresh, Mapping) or _elapsed(prepared) > accept.FRESH_SECONDS:
+            return (
+                accept.PROBE_STALE,
+                "the worker's own probe is missing or older than the freshness limit",
+            )
+        if not fresh.get("ok"):
+            return accept.POSTCONDITION, "; ".join(accept.failing(fresh))
+        if accept.facts(fresh) != accept.facts(shown):
+            return (
+                accept.PROBE_MISMATCH,
+                "the state changed since the probe shown to the approver: probe again",
+            )
+        return None
+
+    @staticmethod
+    def _step_error(c: Connection, step_id: str) -> Mapping[str, Any] | None:
+        error: Mapping[str, Any] | None = c.execute(
+            text("SELECT error FROM workflow_step WHERE id = :i"), {"i": step_id}
+        ).scalar()
+        return error
+
+    def accept_probe(self, run_id: str) -> dict[str, Any] | None:
+        """OVLM's own read-only probe of S2's postcondition (ADR-0008), for the run's parked step when accept-step
+        may apply to it; ``None`` otherwise. Cloud: read calls through a client whose gate refuses every write.
+        Guest: the fixed OVLM command list on green (never repository code). Network I/O: call it outside any
+        transaction (``prepare_signal``)."""
+        with self.d.db.connect() as c:
+            row = c.execute(
+                text("SELECT r.state AS run_state, r.phase, r.downtime_started_at, r.downtime_ended_at, s.id, "
+                     "s.step_key, s.state, s.attempt, s.error FROM workflow_run r JOIN workflow_step s "
+                     "ON s.run_id = r.id AND s.state = 'needs_human' WHERE r.id = :r"), {"r": run_id},
+            ).mappings().first()  # fmt: skip
+            if row is None:
+                return None
+            phase = effective_phase(
+                row["phase"], row["downtime_started_at"], row["downtime_ended_at"]
+            )
+            if accept.not_applicable(run_state=row["run_state"], step_key=row["step_key"], step_state=row["state"],
+                                     phase=phase, error=row["error"]) is not None:  # fmt: skip
+                return None
+            resolved = plan_resolved(c, run_id)
+            g = green_row(c, run_id)
+        dv = resolved.get("data_volume") or {}
+        units = tuple(resolved.get("service_units") or ())
+        green_id = (
+            g["openstack_id"] if g is not None and g["state"] in ("intended", "present") else None
+        )
+        try:
+            client = self.d.cloud.write_client(
+                DbOwnershipRegistry(self.d.db, run_id), _no_writes, project=project_of(resolved)
+            )
+            truth = read_truth(client, resolved, g)
+            cloud = {
+                "api_reachable": True,
+                "green": truth.get("green"),
+                "volume": truth.get("volume"),
+            }
+        except Exception as exc:  # noqa: BLE001 - an unreachable API is a failed check
+            cloud = {"api_reachable": False, "error": type(exc).__name__}
+        guest: dict[str, Any] = {"reachable": False, "mount_point": dv.get("mount_point")}
+        if green_id is not None and g is not None and dv:
+            det = g["detail"] or {}
+            ref = GuestRef(
+                green_id, det.get("fixed_ip") or "", "new", tuple(det.get("pinned") or ())
+            )
+            try:
+                gp = self.d.guest.probe(run_id, ref, mount_point=dv.get("mount_point"), units=units,
+                                        data_volume_id=dv.get("volume_id"))  # fmt: skip
+                guest |= {
+                    "reachable": gp.reachable, "mount_point_mounted": gp.mounted,
+                    "device": "/dev/disk/by-id/virtio-" + str(dv.get("volume_id"))[:20],
+                    "device_mounted": gp.device_mounted, "device_mountpoints": list(gp.device_mountpoints),
+                    "unit_states": dict(gp.unit_states) if gp.unit_states is not None else None,
+                }  # fmt: skip
+            except Exception as exc:  # noqa: BLE001 - an unreachable guest is a failed check
+                guest["error"] = type(exc).__name__
+        checks = accept.evaluate(cloud=cloud, guest=guest, green_id=green_id, units=units)
+        return {
+            "id": new_id(), "step_id": str(row["id"]), "step_key": row["step_key"], "attempt": row["attempt"],
+            "green_id": green_id, "volume_id": dv.get("volume_id"), "cloud": cloud, "guest": guest,
+            "checks": checks, "ok": all(x["ok"] for x in checks),
+        }  # fmt: skip
+
     def prepare_signal(self, run: RunView, signal: SignalView) -> Any:
+        if signal.kind == "accept_step":
+            t0 = time.monotonic()
+            return {"probe": self.accept_probe(run.id), "t0": t0}
         if signal.kind != "probe":
             return None
         try:
@@ -555,15 +745,23 @@ class BlueGreenFipV1(WorkflowDefinition):
             client = self.d.cloud.write_client(
                 DbOwnershipRegistry(self.d.db, run.id), _no_writes, project=project_of(resolved)
             )
-            return read_truth(client, resolved, g)
+            truth = read_truth(client, resolved, g)
         except Exception as exc:  # noqa: BLE001 - an unreachable API is the result
             return {"api_reachable": False, "error": type(exc).__name__}
+        try:
+            probe = self.accept_probe(run.id)
+        except Exception as exc:  # noqa: BLE001 - the panel still refreshes; no accept probe
+            log.warning("accept probe failed: %s", type(exc).__name__)
+            probe = None
+        if probe is not None:
+            truth[accept.TRUTH_KEY] = probe
+        return truth
 
-    def on_signal(self, ctx: TxContext) -> Transition | Wake | str | None:
+    def on_signal(self, ctx: TxContext) -> Transition | Wake | AcceptStep | str | None:
         res = self._on_signal(ctx)
         return self._seal(ctx, res) if isinstance(res, Transition) else res
 
-    def _on_signal(self, ctx: TxContext) -> Transition | Wake | str | None:
+    def _on_signal(self, ctx: TxContext) -> Transition | Wake | AcceptStep | str | None:
         sig, run, c = ctx.signal, ctx.run, ctx.conn
         if sig is None:
             return None
@@ -578,7 +776,10 @@ class BlueGreenFipV1(WorkflowDefinition):
                 return Wake()
             return "ignored: no gate is waiting"
         if sig.kind == "probe":
-            truth = ctx.prepared or {"api_reachable": False}
+            truth = dict(ctx.prepared or {"api_reachable": False})
+            if isinstance(truth.get(accept.TRUTH_KEY), Mapping):
+                # stored with the DB time: the approver's form and the worker judge its age on the same clock
+                truth[accept.TRUTH_KEY] = {**truth[accept.TRUTH_KEY], "at": now_db(c).isoformat()}
             _write_truth(c, run.id, truth)
             if sig.actor_id is None:
                 return self._self_resolve(ctx, truth)
@@ -590,6 +791,8 @@ class BlueGreenFipV1(WorkflowDefinition):
             aid = reprepare.authorize(c, run_id=run.id, signal_id=sig.id, step_id=step.id, step_key=key,
                                       sha=sha, approver_id=str(sig.actor_id))  # fmt: skip
             return f"re-clone of {sha} authorized once ({aid})"
+        if sig.kind == "accept_step":
+            return self._accept(ctx)
         if sig.kind == "discard":
             return Transition(next_step=self.spec("discard_green"), phase="restore")
         if sig.kind == "rollback":
@@ -602,6 +805,45 @@ class BlueGreenFipV1(WorkflowDefinition):
             return self._restore(c, run, trigger="revert", step_key=key, fail=None, truth=None, auto=False,
                                  actor=sig.actor_id)  # fmt: skip
         return None
+
+    def _accept(self, ctx: TxContext) -> AcceptStep | str:
+        """``accept_step`` validated (:meth:`_validate_accept`): record the acceptance, then close the parked step as
+        if it had reached Done without running its playbook. The transition is :meth:`next`'s for that step, so S2
+        accepted counts as S2 done for the downtime interval it opens (P0-3) and for the REN-1 seal."""
+        sig, run, c, step = ctx.signal, ctx.run, ctx.conn, ctx.step
+        assert sig is not None and sig.actor_id is not None  # noqa: S101 - validated
+        if step is None:
+            return "refused: no parked step"
+        resolved = plan_resolved(c, run.id)
+        error = self._step_error(c, step.id)
+        prepared = ctx.prepared if isinstance(ctx.prepared, Mapping) else {}
+        probe = dict(prepared.get("probe") or {})
+        sha = str((resolved.get("automation") or {}).get("sha") or "") or None
+        refused = accept.refused_result_sha256(error)
+        attestation = str(sig.payload.get("attestation") or "").strip()
+        aid = accept.record(
+            c, outcome="accepted", run_id=run.id, signal_id=sig.id, approver_id=sig.actor_id, step_id=step.id,
+            step_key=step.step_key, attempt=step.attempt, attestation=attestation, pinned_sha=sha,
+            parked_reason=(error or {}).get("reason"), refused_sha256=refused, probe=probe,
+            probe_id=str(sig.payload.get("probe_id")), probe_elapsed=_elapsed(prepared),
+        )  # fmt: skip
+        metrics.STEP_ACCEPTED.labels(step.step_key).inc()
+        at = now_db(c).isoformat()
+        accepted = {
+            "by": sig.actor_id, "at": at, "signal_id": sig.id, "acceptance_id": aid, "attestation": attestation,
+            "attestation_ref": f"step_acceptance:{aid}", "probe_id": str(sig.payload.get("probe_id")),
+            "probe": probe, "playbook_not_run": True, "refused_result_sha256": refused,
+        }  # fmt: skip
+        evidence: dict[str, Any] = {
+            "resolution": "accepted",
+            "playbook_not_run": True,
+            "accepted": accepted,
+        }
+        if step.step_key == "quiesce_green":
+            evidence["marker_comparison"] = "skipped: step accepted, playbook not run"
+        return AcceptStep(
+            transition=self.next(ctx, Done(evidence)), evidence=evidence, attempt=step.attempt
+        )
 
     # ---- REN-1: the outage seal -------------------------------------------------------------------------
 

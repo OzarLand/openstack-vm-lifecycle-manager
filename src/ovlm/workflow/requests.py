@@ -17,6 +17,7 @@ from ovlm.workflow.ids import new_id
 #: ``approve`` (E5-5): an approval decision was recorded; the strategy wakes its gate step, which re-reads and
 #: re-validates the approval itself (the signal carries no authority). ``reprepare_automation``: an approver's
 #: one-shot authorization to re-clone the run's pinned SHA inside the window (``ovlm.renewal.reprepare``).
+#: ``accept_step``: an approver accepts a parked restore step without running its playbook (``ovlm.renewal.accept``).
 SIGNAL_KINDS = frozenset(
     {
         "admit",
@@ -29,6 +30,7 @@ SIGNAL_KINDS = frozenset(
         "discard",
         "approve",
         "reprepare_automation",
+        "accept_step",
     }
 )
 

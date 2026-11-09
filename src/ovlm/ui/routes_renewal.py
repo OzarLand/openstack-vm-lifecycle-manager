@@ -40,6 +40,7 @@ from ovlm.readiness import service as readiness
 from ovlm.registry import service as registry
 from ovlm.registry.errors import DomainError
 from ovlm.renewal import service as svc
+from ovlm.renewal.accept import attestation_problem
 from ovlm.renewal.config import RenewalConfig
 from ovlm.renewal.evidence import APPROVAL_STEPUP_ACTION, CUTOVER_STEPUP_ACTION
 from ovlm.renewal.plans import blast_radius, load_facts, tc_of, tc_target
@@ -502,7 +503,10 @@ _ACTION_LABEL = {
     "probe": "Probe", "retry-step": "Retry step", "abort": "Abort", "rollback": "Roll back",
     "revert": "Revert to the old VM", "discard": "Discard the new VM", "mark-resolved": "Mark resolved",
     "reprepare-automation": "Re-prepare automation (one re-clone)",
+    "accept-step": "Accept the step without running its playbook",
 }  # fmt: skip
+#: Actions only an approver (never the run's requester) may take.
+_APPROVER_ACTIONS = frozenset({"reprepare-automation", "accept-step"})
 
 
 def _attempts(
@@ -578,13 +582,15 @@ def _run_context(db: Session, who: Principal, run_id: UUID) -> dict[str, Any]:
     for a in body["available_actions"]:
         name = a["action"]
         confirmed = name in CONFIRMED
-        if name == "reprepare-automation":
+        if name in _APPROVER_ACTIONS:
             usable, needed = is_appr, "approver"
         else:
-            usable = is_op or (name == "mark-resolved" and is_appr)
-            needed = "operator or approver" if name == "mark-resolved" else "operator"
+            usable = is_op or (name in ("mark-resolved", "probe") and is_appr)
+            needed = "operator or approver" if name in ("mark-resolved", "probe") else "operator"
         why = None
-        if not usable:
+        if a.get("available") is False:
+            why = a["effect"]
+        elif not usable:
             why = who.needs_role_message(needed)
         elif confirmed and not who.is_human:
             why = "API tokens cannot confirm this; use a human session in the web interface."
@@ -615,6 +621,7 @@ def _run_context(db: Session, who: Principal, run_id: UUID) -> dict[str, Any]:
         ),
         "key": uuid4().hex,
         "restore": rv.restore_table(resolved), "blast": blast_radius(resolved, "cutover"),
+        "accepted": {a["step_id"]: a for a in body["accepted_steps"]},
     }  # fmt: skip
 
 
@@ -764,6 +771,7 @@ def _action_context(
         "tc_target": rv.typed_target(target) if target else None, "parked": body.get("needs_human_reason"),
         "key": uuid4().hex, "is_token": not who.is_human, "step_text": rv.step_title((body["current_step"] or {}).get("step_key", ""))[1],
         "phase_text": rv.PHASE_TEXT.get(body["phase"] or "build", ""),
+        "accept": rv.accept_form(body) if name == "accept-step" else None,
     }, target  # fmt: skip
 
 
@@ -785,7 +793,8 @@ def run_action(
     request: Request, run_id: str, name: str, db: Db, settings: Cfg, hasher: Hasher, vault: Vault,
     typed_confirmation: Annotated[str, Form()] = "", password: Annotated[str, Form()] = "",
     totp_code: Annotated[str, Form()] = "", attestation: Annotated[str, Form()] = "",
-    idempotency_key: Annotated[str, Form()] = "", who: Principal = VIEWER,
+    idempotency_key: Annotated[str, Form()] = "", step_id: Annotated[str, Form()] = "",
+    probe_id: Annotated[str, Form()] = "", who: Principal = VIEWER,
 ) -> Response:  # fmt: skip
     rid = _uuid(run_id)
     if rid is None:
@@ -794,7 +803,8 @@ def run_action(
     form = {"attestation": attestation}
     try:
         path = request.url.path
-        bh = svc.body_hash({"typed_confirmation": typed_confirmation, "attestation": attestation})
+        bh = svc.body_hash({"typed_confirmation": typed_confirmation, "attestation": attestation,
+                            **({"step_id": step_id, "probe_id": probe_id} if name == "accept-step" else {})})  # fmt: skip
         if svc.replay(db, who, idempotency_key, "POST", path, bh) is not None:
             # The same form submitted twice: the first request is on record. Do not ask for a second code.
             return RedirectResponse(f"/renewals/runs/{rid}?notice=request-sent", status_code=303)
@@ -806,6 +816,8 @@ def run_action(
                 )
             if name == "mark-resolved" and not attestation.strip():
                 raise DomainError(422, "attestation-required", "Say what you did", "Describe the manual fix: the engine re-probes before it continues, and the audit row keeps your words.")  # fmt: skip
+            if name == "accept-step" and (problem := attestation_problem(attestation)) is not None:
+                raise DomainError(422, "attestation-invalid", "Attestation required", problem)
             if not expected or not hmac.compare_digest(
                 " ".join(typed_confirmation.split()), expected
             ):
@@ -824,7 +836,7 @@ def run_action(
             )
         out = svc.action(
             db, who, rid, name, typed=typed_confirmation or None, stepup_id=stepup,
-            attestation=attestation or None,
+            attestation=attestation or None, step_id=step_id or None, probe_id=probe_id or None,
         )  # fmt: skip
         svc.remember(db, who, idempotency_key, "POST", path, bh, out)
         db.commit()

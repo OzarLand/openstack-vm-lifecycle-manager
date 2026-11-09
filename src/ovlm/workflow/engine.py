@@ -68,6 +68,7 @@ from ovlm.workflow.clock import Clock, SystemClock
 from ovlm.workflow.contract import (
     OPEN_STEP_STATES,
     TERMINAL_RUN_STATES,
+    AcceptStep,
     Defer,
     Done,
     ErrorClass,
@@ -1472,11 +1473,14 @@ class WorkflowEngine:
                 return f"{recorded}; step {step.step_key} re-queued", True
             return f"step {step.step_key} re-queued for verification (mark_resolved)", True
 
+        if sig.kind == "accept_step":
+            return self._accept_step(c, defn, ctx)
+
         # Strategy-specific kinds and wake-ups need a step boundary.
         if step is not None and step.state == "running":
             raise _LeavePending
         res = defn.on_signal(ctx)
-        if res is None:
+        if res is None or isinstance(res, AcceptStep):
             return f"unsupported signal {sig.kind} for this strategy", False
         if isinstance(res, str):
             return res, True
@@ -1494,6 +1498,43 @@ class WorkflowEngine:
         if self._close_and_transition(c, run, step, "cancelled", res, defn):
             return f"{sig.kind}: lock conflict; step kept open, run parked", True
         return f"{sig.kind} applied", True
+
+    def _accept_step(
+        self, c: Connection, defn: WorkflowDefinition, ctx: TxContext
+    ) -> tuple[str, bool]:
+        """``accept_step`` (ADR-0008): the parked step is closed ``succeeded`` with ``resolution = accepted``
+        **without being run**, and the run moves on. The strategy has re-validated the signal and records its own
+        rows in this transaction (:meth:`WorkflowDefinition.on_signal` returns :class:`AcceptStep`). The close is a
+        compare-and-set on ``(state = needs_human, attempt)``; it also retires the parked attempt's fencing token (a
+        fresh ``fencing_seq`` value), so a late outcome or heartbeat of that attempt, or of any older one, matches 0
+        rows and is discarded (S2). No lease is taken: no attempt runs while the step is parked."""
+        run, step = ctx.run, ctx.step
+        if run.state != "needs_human" or step is None or step.state != "needs_human":
+            return "refused: no step in needs_human", True
+        res = defn.on_signal(ctx)
+        if isinstance(res, str):
+            return res, True
+        if not isinstance(res, AcceptStep):
+            return "unsupported signal accept_step for this strategy", False
+        try:
+            with c.begin_nested():
+                n = c.execute(
+                    text(
+                        "UPDATE workflow_step SET state = 'succeeded', resolution = 'accepted', "
+                        "fencing_token = nextval('fencing_seq'), lease_owner = NULL, lease_expires_at = NULL, "
+                        "not_before = NULL, finished_at = now(), updated_at = now(), "
+                        "evidence = COALESCE(evidence, '{}'::jsonb) || CAST(:ev AS jsonb) "
+                        "WHERE id = :id AND state = 'needs_human' AND attempt = :att"
+                    ),
+                    {"id": step.id, "att": res.attempt, "ev": _j(res.evidence) or "{}"},
+                ).rowcount
+                if n != 1:
+                    raise _LeavePending  # the step moved under us: re-validated (and refused) on a later pass
+                self._apply_transition(c, run, res.transition, defn)
+        except LockConflict as exc:
+            # Nothing of the accept may stay half-applied (its rows are outside the savepoint): retry later.
+            raise _LeavePending from exc
+        return f"step {step.step_key} accepted without running it", True
 
     def _close_open_step(
         self,
