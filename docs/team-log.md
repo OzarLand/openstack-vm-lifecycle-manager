@@ -1045,3 +1045,30 @@ the new "no root process in the worker" check:
   delaying takeover by one lease. This was the intermittent integration failure seen since PR #18. Root-caused, fixed,
   with a deterministic test.
 - Lab kit bug P: the guard diff now always counts the set-aside floating IP as the lab's own.
+
+## MVP done: primary scenario and three failure scenarios passed on Felcloud, lab torn down (2026-11-07 to 2026-11-09)
+
+- **ACC-01c failed at the cutover.** Bug W: the quiesce busy check used `fuser -vm`. Bug X: the restore never restarted
+  the service. Both were fixed in [#31](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/31).
+- **ACC-01d passed (run `01a1b752`).**
+  - The maintainer decided G1 and G2 in OVLM. `lab-agent-a` decided G3 (D-7b).
+  - Downtime: 134.7 s measured by OVLM, 112.8 s by the probe.
+  - Guard: PASS.
+- **Failure scenarios.** The maintainer kept three. They ran with two lab accounts (D-7).
+  - **LAB-04** passed. The docs were aligned to the B7 design.
+  - **LAB-01, first attempt.** The worker takeover worked. Then three defects appeared:
+    - **Z:** a worker restart emptied the checkout. Fixed in [#34](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/34), and a `reprepare-automation` exit was added in [#35](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/35).
+    - **AA:** restore S2 refused a green that had never mounted the volume. Fixed in [#37](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/37).
+    - **AB:** OVLM read the data marker under the wrong field name, so its marker comparison was skipped. Fixed in [#38](https://github.com/OzarLand/openstack-vm-lifecycle-manager/pull/38).
+  - The stranded run was restored with one manual mount on green (D-8, D-8b). The lab service was down for about 13 h.
+  - **LAB-01 re-run (`01a1bce5`) passed with no manual action.**
+    - The worker was killed at W3.
+    - The checkout was re-adopted from the cache, and the marker comparison found the marker equal.
+    - Downtime: 225.6 s measured by OVLM, 199.7 s by the probe.
+  - **The operator rollback after the cutover passed on the same run.** S1–S10 passed first time, and S7 started the service.
+- **Teardown (D-9).**
+  - The lab accounts were disabled (OVLM has no hard delete), with an audit export.
+  - The 443 rule and the TLS relay were removed.
+  - `destroy-lab.sh` left 0 `ovlm-*` resources. The floating IPs stay allocated.
+  - Guard: PASS against the first baseline.
+- In total the lab found 24 defects that CI could not see. They are listed in the [MVP report](mvp-report.md).
