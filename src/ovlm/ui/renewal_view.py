@@ -451,23 +451,84 @@ def duration(seconds: Any) -> str:
     return f"{secs}s"
 
 
-def downtime(run: Mapping[str, Any], now: datetime | None = None) -> dict[str, Any] | None:
-    """The downtime timer: elapsed against the budget the approver accepted. ``None`` before the window opens."""
+def downtime_duration(seconds: Any) -> str:
+    """A measured downtime: ``None`` is "not measured", a sub-second value is shown as such, never as ``0s`` (P2-3:
+    a demo run on the fake cloud measured 0.04 s and the page said "0s", which reads as "no downtime")."""
+    if seconds is None:
+        return "not measured"
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return "not measured"
+    if value < 0.1:
+        return "under 0.1s"
+    if value < 1:
+        return f"{value:.1f}s"
+    return duration(value)
+
+
+#: interval kind -> plain words
+DOWNTIME_KIND_TEXT = {
+    "window": "Renewal window",
+    "restore": "Restore to the old VM",
+}
+
+
+def _intervals_from_columns(run: Mapping[str, Any], now: datetime) -> list[dict[str, Any]]:
     start = parse_ts(run.get("downtime_started_at"))
     if start is None:
-        return None
+        return []
     end = parse_ts(run.get("downtime_ended_at"))
+    return [{"kind": "window", "started_at": start, "started_by_step": "quiesce_old", "ended_at": end,
+             "ended_by_step": None, "ongoing": end is None, "end_measured": True,
+             "seconds": ((end or now) - start).total_seconds()}]  # fmt: skip
+
+
+def downtime(run: Mapping[str, Any], now: datetime | None = None) -> dict[str, Any] | None:
+    """The downtime panel: every interval the run recorded (window, restore after a revert), their total, and the
+    window's elapsed time against the budget the approver accepted. ``None`` before the first outage. Reads the run
+    representation's ``downtime`` object; a run dict without it is read through the first-interval columns."""
     now = now or datetime.now(UTC)
-    elapsed = int(((end or now) - start).total_seconds())
+    body = run.get("downtime")
+    if isinstance(body, Mapping):
+        items = [dict(i) for i in body.get("intervals") or []]
+    else:
+        items = _intervals_from_columns(run, now)
+    if not items:
+        return None
+    rows: list[dict[str, Any]] = []
+    for it in items:
+        started = parse_ts(it.get("started_at"))
+        ended = parse_ts(it.get("ended_at"))
+        seconds = it.get("seconds")
+        if it.get("ongoing") and started is not None:
+            seconds = max(float(seconds or 0), (now - started).total_seconds())
+        rows.append({
+            "kind": it.get("kind"), "kind_text": DOWNTIME_KIND_TEXT.get(str(it.get("kind")), str(it.get("kind"))),
+            "started": started, "ended": ended, "ongoing": bool(it.get("ongoing")),
+            "end_measured": it.get("end_measured", True) is not False,
+            "started_by": step_title(str(it.get("started_by_step") or ""))[0] or None,
+            "ended_by": step_title(str(it.get("ended_by_step") or ""))[0] or None,
+            "seconds": None if seconds is None else float(seconds),
+            "text": downtime_duration(seconds),
+        })  # fmt: skip
+    measured = [r["seconds"] for r in rows if r["seconds"] is not None]
+    total = sum(measured) if measured else None
+    running = any(r["ongoing"] for r in rows)
+    window = rows[0]
+    elapsed = window["seconds"]
     budget = run.get("max_window_duration_seconds")
-    worst = run.get("worst_case_window_seconds")
     cap = int(budget) if budget else 0
-    over = bool(cap) and elapsed > cap
+    over = bool(cap) and elapsed is not None and elapsed > cap
+    window_running = window["ongoing"]
     return {
-        "running": end is None, "elapsed": elapsed, "budget": budget, "worst_case": worst, "over": over,
-        "remaining": (cap - elapsed) if cap and end is None else None,
-        "percent": min(100, round(100 * elapsed / cap)) if cap else None,
-        "started": start,
+        "running": running, "intervals": rows, "total": total, "total_text": downtime_duration(total),
+        "complete": all(r["end_measured"] for r in rows),
+        "elapsed": elapsed, "budget": budget, "worst_case": run.get("worst_case_window_seconds"), "over": over,
+        "window_running": window_running,
+        "remaining": int(cap - elapsed) if cap and window_running and elapsed is not None else None,
+        "percent": min(100, round(100 * elapsed / cap)) if cap and elapsed is not None else None,
+        "started": window["started"],
     }  # fmt: skip
 
 
@@ -585,6 +646,7 @@ def typed_target(tc: str) -> dict[str, str]:
 # --- filters -------------------------------------------------------------------------------------------------------
 
 templates.env.filters["duration"] = duration
+templates.env.filters["downtime_duration"] = downtime_duration
 templates.env.filters["step_code"] = lambda k: step_title(str(k))[0]
 templates.env.filters["step_text"] = lambda k: step_title(str(k))[1]
 templates.env.filters["step_badge"] = lambda s: STEP_BADGE.get(str(s), "")

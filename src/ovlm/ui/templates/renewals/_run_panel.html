@@ -28,13 +28,24 @@
 
   {% if downtime %}
   <section class="panel" aria-labelledby="dt-h">
-    <h2 id="dt-h">Downtime {% if downtime.running %}<span class="badge err">in progress</span>{% else %}<span class="badge ok">ended</span>{% endif %}</h2>
-    <p class="timer"><strong>{{ downtime.elapsed | duration }}</strong>
+    <h2 id="dt-h">Downtime {% if downtime.running %}<span class="badge err">in progress</span>{% elif downtime.complete %}<span class="badge ok">ended</span>{% else %}<span class="badge warn">end not measured</span>{% endif %}</h2>
+    <p class="timer">Total <strong>{{ downtime.total_text }}</strong>{% if downtime.running %} so far{% endif %}
+      <span class="muted">({{ downtime.intervals | length }} interval{{ "s" if downtime.intervals | length != 1 }}, measured by OVLM from the step that stopped the service to the external check through the floating IP)</span></p>
+    {% if downtime.window_running %}
+    <p>Renewal window: <strong>{{ downtime.elapsed | downtime_duration }}</strong>
       {% if downtime.budget %}of the {{ downtime.budget | duration }} budget the approver accepted{% endif %}
-      {% if downtime.running and downtime.remaining is not none %}{% if downtime.remaining >= 0 %}, {{ downtime.remaining | duration }} left{% else %}, <span class="badge err">over budget by {{ (0 - downtime.remaining) | duration }}</span>{% endif %}{% endif %}
+      {% if downtime.remaining is not none %}{% if downtime.remaining >= 0 %}, {{ downtime.remaining | duration }} left{% else %}, <span class="badge err">over budget by {{ (0 - downtime.remaining) | duration }}</span>{% endif %}{% endif %}
       <span class="muted">(started {{ downtime.started | timestamp }}; worst case {{ downtime.worst_case | duration }})</span></p>
     {% if downtime.percent is not none %}<progress max="100" value="{{ downtime.percent }}" aria-label="Share of the downtime budget used">{{ downtime.percent }}%</progress>{% endif %}
-    {% if downtime.over and downtime.running %}<p role="alert" class="banner error">The budget is spent. Nothing continues by itself past it: an operator decides.</p>{% endif %}
+    {% if downtime.over %}<p role="alert" class="banner error">The budget is spent. Nothing continues by itself past it: an operator decides.</p>{% endif %}
+    {% endif %}
+    <table class="downtime-intervals"><thead><tr><th scope="col">Interval</th><th scope="col">Started</th><th scope="col">Ended</th><th scope="col">Duration</th></tr></thead>
+    <tbody>{% for i in downtime.intervals %}<tr>
+      <td>{{ i.kind_text }}</td>
+      <td>{{ i.started | timestamp }}{% if i.started_by %} <span class="muted">at {{ i.started_by }}</span>{% endif %}</td>
+      <td>{% if i.ongoing %}<span class="badge err">ongoing</span>{% elif not i.end_measured %}not measured{% else %}{{ i.ended | timestamp }}{% if i.ended_by %} <span class="muted">at {{ i.ended_by }}</span>{% endif %}{% endif %}</td>
+      <td>{{ i.text }}{% if i.ongoing %} so far{% endif %}</td>
+    </tr>{% endfor %}</tbody></table>
   </section>
   {% endif %}
 

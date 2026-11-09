@@ -19,8 +19,9 @@ from sqlalchemy import text
 from ovlm.auth.sod import Gate
 from ovlm.openstack.allowlist import LOCK_REASON_PREFIX
 from ovlm.openstack.errors import DuplicateResourceError, NotFoundError
+from ovlm.renewal import downtime
 from ovlm.renewal.base import RStep, StepRefusal
-from ovlm.renewal.ledger import snapshot_row
+from ovlm.renewal.ledger import fenced_tx, snapshot_row
 from ovlm.renewal.steps_build import AnsibleStep, gate_check, phase_outcome
 from ovlm.renewal.steps_window import ExternalVerify, WindowAnsible
 from ovlm.workflow.contract import Act, Decision, Done, ErrorClass, Fail, Outcome, StepContext, Wait
@@ -282,7 +283,11 @@ class QuiesceGreen(WindowAnsible):
     record" is a safe end state (nothing to stop or unmount), so S2 alone passes ``quiesce_allow_unmounted`` and the
     playbook reports success with ``was_mounted: false`` and no marker checksum. W1 on blue never passes it and
     keeps refusing that state as unknown. Restore compares no marker (S7's healthcheck on blue gets none), so a
-    missing checksum here changes nothing downstream; the evidence says so explicitly."""
+    missing checksum here changes nothing downstream; the evidence says so explicitly.
+
+    Downtime (P0-3): when no interval is open (a revert after the cutover: green serves), S2 opens the ``restore``
+    interval in a fenced transaction before the play; a skipped S2 opens it in its success commit
+    (:meth:`ovlm.renewal.definition.BlueGreenFipV1.next`), before S3 stops green."""
 
     key = "quiesce_green"
     phase = "quiesce"
@@ -312,6 +317,10 @@ class QuiesceGreen(WindowAnsible):
         return Act({"phase": "quiesce"})
 
     def act(self, ctx: StepContext, intent: Mapping[str, Any]) -> None:
+        # The service goes down on green with this play: open the restore interval first (no-op while the window
+        # interval of an in-window restore is still open, and on a retry or takeover of S2).
+        with fenced_tx(self.d.db, ctx) as c:
+            downtime.open_interval(c, ctx.run.id, kind=downtime.RESTORE, step_key=self.key)
         dv = self.resolved(ctx).get("data_volume") or {}
         self.run(ctx, data_volume={"id": dv["volume_id"], "mount_point": dv["mount_point"], "fs_type": dv["fs_type"],
                                    "expected_serial": dv["volume_id"], "first_use": False},

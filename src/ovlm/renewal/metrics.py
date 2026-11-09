@@ -34,7 +34,9 @@ POST_START_FAILURES = Counter(
 )
 DOWNTIME = Histogram(
     "ovlm_renewal_downtime_seconds",
-    "OVLM-measured downtime (first W1 claim to W10 or S9 success)",
+    "OVLM-measured length of one downtime interval (renewal-workflow.md 3): kind=window (W1 claim to W10, or to S9 "
+    "after an in-window restore) or kind=restore (S2 to S9 of a revert after the cutover)",
+    ["kind"],
     registry=REGISTRY,
     buckets=(15, 30, 60, 120, 300, 600, 1800, 3600, 7200),
 )
