@@ -18,7 +18,11 @@ import pytest
 from ovlm.automation import checkout as co
 from ovlm.automation.checkout import CloneOptions, tree_digest
 from ovlm.automation.model import AutomationSpec, RunnerConfig
-from ovlm.automation.runner import AutomationRunner, sweep_checkout_cache
+from ovlm.automation.runner import (
+    AutomationRunner,
+    sweep_checkout_cache,
+    sweep_run_root_checkouts,
+)
 from ovlm.automation.types import AutomationError, Classification, Phase
 from tests.unit.automation.test_checkout import make_repo
 from tests.unit.automation.test_runner import FILES
@@ -309,6 +313,83 @@ def test_sweep_removes_old_entries_of_finished_runs_only(tmp_path: Path) -> None
     assert removed == [cache / "done-old"]
     assert sorted(p.name for p in cache.iterdir()) == ["done-new", "live", "stray-file"]
     assert sweep_checkout_cache(tmp_path / "missing", 1, keep=set()) == []
+
+
+def test_sweep_removes_the_entry_of_a_terminal_run_at_once(tmp_path: Path) -> None:
+    """Terminal is final: no age guard for a run the database reads terminal (roadmap P0-1)."""
+    cache = tmp_path / "cache"
+    for name in ("live", "done", "unknown"):
+        (cache / name / "_checkout").mkdir(parents=True)
+        co.make_read_only(cache / name / "_checkout")
+    removed = sweep_checkout_cache(cache, 3600, keep={"live"}, terminal={"done", "live"})
+    assert removed == [cache / "done"]
+    assert sorted(p.name for p in cache.iterdir()) == ["live", "unknown"]
+
+
+def _run_root_checkout(run_root: Path, name: str, *, age: float = 0.0) -> Path:
+    entry = run_root / name
+    (entry / "_checkout" / "playbooks").mkdir(parents=True)
+    (entry / "_checkout" / "playbooks" / "quiesce.yml").write_text("- hosts: all\n")
+    co.make_read_only(entry / "_checkout")
+    (entry / "_checkout.sha").write_text("a" * 40 + "\n")
+    if age:
+        then = time.time() - age
+        os.utime(entry, (then, then))
+    return entry
+
+
+def test_run_root_sweep_removes_checkouts_of_terminal_and_old_unknown_runs_only(
+    tmp_path: Path,
+) -> None:
+    """Roadmap P0-1: the run-level checkouts on the tmpfs run_root follow the checkout cache rules."""
+    root = tmp_path / "run"
+    live = _run_root_checkout(root, "live", age=10_000)
+    done = _run_root_checkout(root, "done")  # just finished: removed at once
+    old = _run_root_checkout(root, "old-unknown", age=10_000)
+    young = _run_root_checkout(root, "young-unknown")  # may be a run admitted after keep was read
+    (old / "_checkout.adopt").mkdir()  # an interrupted adoption goes with it
+    os.utime(old, (time.time() - 10_000,) * 2)
+    for dot in (".ca", ".cp", ".ssh-1234abcd"):
+        (root / dot).mkdir()
+        os.utime(root / dot, (0, 0))
+    removed = sweep_run_root_checkouts(root, 3600, keep={"live"}, terminal={"done"})
+    assert sorted(removed) == sorted([done, old])
+    assert not done.exists() and not old.exists()
+    assert (live / "_checkout").is_dir() and (live / "_checkout.sha").is_file()
+    assert (young / "_checkout").is_dir()
+    assert sorted(p.name for p in root.iterdir()) == [
+        ".ca", ".cp", ".ssh-1234abcd", "live", "young-unknown",
+    ]  # fmt: skip
+    assert sweep_run_root_checkouts(tmp_path / "missing", 1, keep=()) == []
+
+
+def test_run_root_sweep_leaves_step_run_directories_to_the_orphan_sweeper(tmp_path: Path) -> None:
+    """A step run dir (secrets, maybe a live process) is never removed here: only the checkout goes."""
+    root = tmp_path / "run"
+    entry = _run_root_checkout(root, "done")
+    (entry / "step1" / "1" / "env").mkdir(parents=True)
+    (entry / "nothing-here").mkdir()
+    assert sweep_run_root_checkouts(root, 3600, keep=(), terminal={"done"}) == [entry]
+    assert sorted(p.name for p in entry.iterdir()) == ["nothing-here", "step1"]
+    # an entry without a checkout is not reported
+    assert sweep_run_root_checkouts(root, 3600, keep=(), terminal={"done"}) == []
+
+
+def test_the_terminal_sweep_of_both_roots_leaves_nothing_of_a_prepared_run(cached: Any) -> None:
+    """``prepare_automation`` writes ``<run_root>/<id>/_checkout`` + ``_checkout.sha`` and the cache copy; the
+    terminal sweep of both roots leaves nothing of the run, and a live run's are kept."""
+    runner, prepared, cache = cached
+    run_root = runner.cfg.run_root
+    assert (
+        prepared.checkout == run_root / "wf1" / "_checkout"
+        and (run_root / "wf1" / "_checkout.sha").is_file()
+    )
+    assert sweep_run_root_checkouts(run_root, 0, keep={"wf1"}, terminal={"wf1"}) == []
+    assert sweep_checkout_cache(cache, 0, keep={"wf1"}, terminal={"wf1"}) == []
+    assert prepared.checkout.is_dir() and (cache / "wf1" / "_checkout").is_dir()
+    assert sweep_run_root_checkouts(run_root, 3600, keep=(), terminal={"wf1"}) == [run_root / "wf1"]
+    assert sweep_checkout_cache(cache, 3600, keep=(), terminal={"wf1"}) == [cache / "wf1"]
+    assert not (run_root / "wf1").exists() and not (cache / "wf1").exists()
 
 
 def test_settings_wire_the_cache_and_refuse_bad_paths() -> None:

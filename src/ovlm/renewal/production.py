@@ -614,8 +614,13 @@ class RunnerGuestPort:
         equals the one B6 recorded in its step evidence (lab finding Z). If no verified copy is left, re-clone only
         **outside** the downtime window: nothing contacts the git host inside it (automation-contract.md 2); inside
         it the step stops for a human (``automation_checkout_lost`` / ``automation_checkout_unverifiable``), and the
-        only way on is an approver's one-shot ``reprepare-automation`` authorization (:meth:`_reprepare`)."""
+        only way on is an approver's one-shot ``reprepare-automation`` authorization (:meth:`_reprepare`).
+
+        A checkout remembered in this process but no longer on disk (released by the worker's checkout sweep once
+        its run was terminal, or lost with the tmpfs) is forgotten and adopted again as above (roadmap P0-1)."""
         with self._lock:
+            for rid in [r for r, p in self._prepared.items() if not p.checkout.is_dir()]:
+                del self._prepared[rid]
             prepared = self._prepared.get(run_id)
         if prepared is not None:
             return prepared

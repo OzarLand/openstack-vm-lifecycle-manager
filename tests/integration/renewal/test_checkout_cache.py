@@ -11,6 +11,7 @@ import json
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -114,34 +115,165 @@ def test_a_b6_without_a_recorded_digest_cannot_adopt_the_cache(
     assert "no recorded tree digest" in exc.value.detail["message"]
 
 
-def test_the_worker_sweeps_cached_checkouts_of_finished_runs_only(
+def _worker_settings(admin_url: Any, fresh_db: str, secrets_dir: Path, cfg_or_tmp: Any) -> Any:
+    from ovlm.config import Settings
+    from tests.integration.conftest import settings_for
+
+    run_root, cache = (
+        (cfg_or_tmp.run_root, cfg_or_tmp.checkout_cache)
+        if isinstance(cfg_or_tmp, RunnerConfig)
+        else (cfg_or_tmp / "run", cfg_or_tmp / "cache")
+    )
+    base = settings_for("worker", admin_url, fresh_db, secrets_dir).model_dump()
+    base["automation"] |= {
+        "run_root": str(run_root),
+        "checkout_cache": str(cache),
+        "run_user": None,
+    }
+    return Settings(**base)
+
+
+def test_the_worker_sweeps_checkouts_of_finished_runs_only(
     world: World, admin_url: Any, fresh_db: str, secrets_dir: Path, tmp_path: Path
 ) -> None:
-    """The cache must not grow forever: the worker removes the entries of terminal or unknown runs once they are
-    older than the orphan max age; a live run keeps its copy whatever its age (it may wait days at a gate)."""
+    """Neither the cache nor the tmpfs run_root may grow forever (roadmap P0-1): the worker removes the entries of
+    terminal runs at once and those of unknown runs once older than the orphan max age, in both places; a live run
+    keeps its own whatever their age (it may wait days at a gate)."""
     import os
     import time
 
-    from ovlm.config import Settings
     from ovlm.worker.main import Worker
-    from tests.integration.conftest import settings_for
 
     w = world
     done = w.start()
     w.x("UPDATE workflow_run SET state = 'completed', finished_at = now() WHERE id = :r", r=done)
     live = w.start()  # one active renewal per service: the finished run first
-    base = settings_for("worker", admin_url, fresh_db, secrets_dir).model_dump()
-    base["automation"] |= {
-        "run_root": str(tmp_path / "run"),
-        "checkout_cache": str(tmp_path / "cache"),
-    }
-    settings = Settings(**base)
-    cache = tmp_path / "cache"
+    settings = _worker_settings(admin_url, fresh_db, secrets_dir, tmp_path)
     old = time.time() - 365 * 86400
-    for name in (live, done, str(uuid.uuid4())):
-        (cache / name / "_checkout").mkdir(parents=True)
-        co.make_read_only(cache / name / "_checkout")
-        os.utime(cache / name, (old, old))
-    (cache / "fresh").mkdir()  # an unknown run, but just written: kept until it is old
-    Worker(settings, w.worker)._sweep_checkout_cache()  # noqa: SLF001
-    assert sorted(p.name for p in cache.iterdir()) == sorted([live, "fresh"])
+    unknown_old, unknown_new = str(uuid.uuid4()), str(uuid.uuid4())
+    for root in (tmp_path / "cache", tmp_path / "run"):
+        for name in (live, unknown_old, unknown_new, done):
+            (root / name / "_checkout").mkdir(parents=True)
+            co.make_read_only(root / name / "_checkout")
+            if name in (live, unknown_old):
+                os.utime(root / name, (old, old))
+    (tmp_path / "cache" / "fresh").mkdir()  # an unknown run, but just written: kept until it is old
+    (tmp_path / "run" / ".ca").mkdir()  # the worker's own files on run_root are never swept
+    Worker(settings, w.worker)._sweep_checkouts()  # noqa: SLF001
+    assert sorted(p.name for p in (tmp_path / "cache").iterdir()) == sorted(
+        [live, unknown_new, "fresh"]
+    )
+    assert sorted(p.name for p in (tmp_path / "run").iterdir()) == sorted(
+        [live, unknown_new, ".ca"]
+    )
+
+
+def _prepared_run(w: World, tmp_path: Path) -> tuple[str, RunnerConfig]:
+    """A live run whose B6 left its verified checkout on run_root and its copy in the cache (real runner)."""
+    port, _b6, run_id, cfg = _setup(w, tmp_path)
+    assert port._prepared_for(run_id).checkout.is_dir()  # noqa: SLF001  (adopted back onto run_root)
+    return run_id, cfg
+
+
+def test_a_run_reaching_a_terminal_state_releases_its_checkout(
+    world: World, admin_url: Any, fresh_db: str, secrets_dir: Path, tmp_path: Path
+) -> None:
+    """Roadmap P0-1: the run's last step, through the worker's step thread, frees the run-level checkout on the
+    tmpfs run_root and its cached copy as soon as the run is terminal in the database. Before that both stay."""
+    from ovlm.worker.main import Worker
+
+    w = world
+    run_id, cfg = _prepared_run(w, tmp_path)
+    assert cfg.checkout_cache is not None
+    on_disk = [cfg.run_root / run_id, cfg.checkout_cache / run_id]
+    state = {"next": "running"}
+
+    class Wf:
+        worker_id = "w"
+
+        def execute(self, claim: Any) -> str:
+            # a terminal state comes with finished_at, as the engine writes it
+            w.x("UPDATE workflow_run SET state = :s, finished_at = CASE WHEN :s = 'completed' THEN now() END "
+                "WHERE id = :r", s=state["next"], r=claim.run.id)  # fmt: skip
+            return "succeeded"
+
+    worker = Worker(_worker_settings(admin_url, fresh_db, secrets_dir, cfg), w.worker, Wf())  # type: ignore[arg-type]
+    claim = SimpleNamespace(run=SimpleNamespace(id=run_id))
+    worker._run_step(claim)  # type: ignore[arg-type]  # noqa: SLF001  (a step of a live run: nothing released)
+    assert all(p.is_dir() for p in on_disk)
+    assert (cfg.run_root / run_id / "_checkout").is_dir()
+    state["next"] = "completed"
+    worker._run_step(claim)  # type: ignore[arg-type]  # noqa: SLF001  (its last step)
+    assert not any(p.exists() for p in on_disk), (
+        "the finished run's checkout is gone from run_root and the cache"
+    )
+
+
+def test_the_start_up_sweep_keeps_a_live_run_and_removes_orphans(
+    world: World, admin_url: Any, fresh_db: str, secrets_dir: Path, tmp_path: Path
+) -> None:
+    """Before the first claim, the worker removes run_root checkouts left by runs that ended while it was down (and
+    unknown ones once old), never the checkout or the cached copy of a run still live (a run in its window)."""
+    import os
+    import time
+
+    from ovlm.worker.main import Worker
+
+    w = world
+    run_id, cfg = _prepared_run(w, tmp_path)
+    assert cfg.checkout_cache is not None
+    orphan = str(uuid.uuid4())
+    (cfg.run_root / orphan / "_checkout").mkdir(parents=True)
+    (cfg.run_root / orphan / "_checkout.sha").write_text("a" * 40 + "\n")
+    os.utime(cfg.run_root / orphan, (time.time() - 365 * 86400,) * 2)
+
+    class Wf:
+        worker_id = "w"
+        registry = SimpleNamespace(sweepers=[])
+
+        def register_worker(self, _v: str) -> None: ...
+
+    worker = Worker(_worker_settings(admin_url, fresh_db, secrets_dir, cfg), w.worker, Wf())  # type: ignore[arg-type]
+    worker._start_workflow()  # noqa: SLF001
+    assert not (cfg.run_root / orphan).exists()
+    assert (cfg.run_root / run_id / "_checkout").is_dir() and (
+        cfg.checkout_cache / run_id / "_checkout"
+    ).is_dir()
+    # the same run, once terminal (it ended while this worker was down): removed at the next start-up
+    w.x(
+        "UPDATE workflow_run SET state = 'rolled_back', finished_at = now() WHERE id = :r", r=run_id
+    )
+    again = Worker(_worker_settings(admin_url, fresh_db, secrets_dir, cfg), w.worker, Wf())  # type: ignore[arg-type]
+    again._start_workflow()  # noqa: SLF001
+    assert not (cfg.run_root / run_id).exists() and not (cfg.checkout_cache / run_id).exists()
+
+
+def test_a_live_run_that_loses_its_run_root_checkout_in_the_window_re_adopts_it_from_the_cache(
+    world: World,
+    admin_url: Any,
+    fresh_db: str,
+    secrets_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for lab finding Z with the P0-1 sweeps in place: the worker's sweeps keep a live run's cached copy,
+    and the guest port that already used the run's checkout does not hand out the vanished one; it re-adopts the
+    cached copy by B6's recorded digest, with no git host contact inside the window."""
+    from ovlm.worker.main import Worker
+
+    w = world
+    port, b6, run_id, cfg = _setup(w, tmp_path)
+    first = port._prepared_for(run_id)  # noqa: SLF001
+    assert first.checkout.is_dir() and port._in_outage(run_id)  # noqa: SLF001
+    co.remove_tree(cfg.run_root)  # run_root lost mid-window (tmpfs emptied)
+    worker = Worker(_worker_settings(admin_url, fresh_db, secrets_dir, cfg), w.worker)
+    worker._sweep_checkouts()  # noqa: SLF001
+    worker._sweep_checkouts(run_id)  # noqa: SLF001
+    assert cfg.checkout_cache is not None and (cfg.checkout_cache / run_id / "_checkout").is_dir()
+    git: list[Any] = []
+    monkeypatch.setattr(co, "_git", lambda *a, **k: git.append(a))
+    monkeypatch.setattr(co, "clone_verified", lambda *a, **k: git.append(a))
+    again = port._prepared_for(run_id)  # noqa: SLF001
+    assert git == [], "no git host contact inside the downtime window"
+    assert again is not first and again.checkout.is_dir() and again.tree_digest == b6.tree_digest
+    assert port.has_phase(run_id, "data_attach")

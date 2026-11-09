@@ -769,28 +769,86 @@ class AutomationRunner:
 # ---- module-level helpers -------------------------------------------------------------------------------
 
 
-def sweep_checkout_cache(
-    cache: Path, max_age: float, *, keep: Container[str], now: float | None = None
+#: What the run-level checkout leaves in ``<run_root>/<workflow_id>`` (the checkout, its commit record, an adoption
+#: in progress). The step run directories next to them belong to the orphan sweeper (``rundir.sweep_orphans``).
+_RUN_ROOT_CHECKOUT_PARTS = ("_checkout", "_checkout.sha", "_checkout.adopt")
+
+
+def _sweepable(
+    root: Path,
+    max_age: float,
+    keep: Container[str],
+    terminal: Container[str],
+    now: float | None,
 ) -> list[Path]:
-    """Remove cached checkouts (``<cache>/<workflow_id>``) of runs not in ``keep`` (the non-terminal runs) that
-    were last written more than ``max_age`` seconds ago. Run by the worker at start-up and periodically, so the
-    cache does not grow forever. Returns the removed entries."""
+    """The ``<root>/<workflow_id>`` entries the sweep may remove: never a run in ``keep`` (the non-terminal runs);
+    a run in ``terminal`` (read terminal in the database; terminal is final) at once; any other (unknown) entry only
+    once it was last written more than ``max_age`` seconds ago, so a run admitted after ``keep`` was read is safe."""
     import time
 
     now = time.time() if now is None else now
-    removed: list[Path] = []
-    if not cache.is_dir():
-        return removed
-    for entry in sorted(cache.iterdir()):
+    found: list[Path] = []
+    if not root.is_dir():
+        return found
+    for entry in sorted(root.iterdir()):
         if entry.name in keep or entry.is_symlink() or not entry.is_dir():
             continue
-        try:
-            age = now - entry.lstat().st_mtime
-        except OSError:
-            continue
-        if age < max_age:
-            continue
+        if entry.name not in terminal:
+            try:
+                age = now - entry.lstat().st_mtime
+            except OSError:
+                continue
+            if age < max_age:
+                continue
+        found.append(entry)
+    return found
+
+
+def sweep_checkout_cache(
+    cache: Path,
+    max_age: float,
+    *,
+    keep: Container[str],
+    terminal: Container[str] = (),
+    now: float | None = None,
+) -> list[Path]:
+    """Remove cached checkouts (``<cache>/<workflow_id>``) of runs not in ``keep`` (the non-terminal runs): at once
+    for a run in ``terminal``, otherwise once last written more than ``max_age`` seconds ago. Run by the worker at
+    start-up, periodically and after a run's last step, so the cache does not grow forever. Returns the removed
+    entries."""
+    removed = _sweepable(cache, max_age, keep, terminal, now)
+    for entry in removed:
         co.remove_tree(entry)
+    return removed
+
+
+def sweep_run_root_checkouts(
+    run_root: Path,
+    max_age: float,
+    *,
+    keep: Container[str],
+    terminal: Container[str] = (),
+    now: float | None = None,
+) -> list[Path]:
+    """The same rules as :func:`sweep_checkout_cache` for the run-level checkouts on ``run_root`` (tmpfs: RAM).
+    Only the checkout, its commit record and an interrupted adoption are removed, then ``<run_root>/<workflow_id>``
+    if it is left empty; step run directories (secrets, maybe processes) stay with the orphan sweeper. Entries that
+    cannot be a workflow id (``.ca``, ``.cp``, ``.ssh-*``) are never touched. Returns the entries whose checkout was
+    removed."""
+    removed: list[Path] = []
+    for entry in _sweepable(run_root, max_age, keep, terminal, now):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", entry.name):
+            continue
+        parts = [entry / name for name in _RUN_ROOT_CHECKOUT_PARTS]
+        if not any(p.exists() or p.is_symlink() for p in parts):
+            continue
+        for part in parts:
+            if part.is_dir() and not part.is_symlink():
+                co.remove_tree(part)
+            else:
+                part.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            entry.rmdir()  # only if empty
         removed.append(entry)
     return removed
 

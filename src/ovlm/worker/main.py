@@ -15,6 +15,8 @@ import signal
 import sys
 import threading
 import uuid
+from collections.abc import Callable
+from pathlib import Path
 from types import FrameType
 from typing import Any
 
@@ -44,8 +46,18 @@ log = logging.getLogger("ovlm.worker")
 
 #: Refresh the workflow gauges every N loop iterations.
 METRICS_EVERY = 6
-#: Sweep the checkout cache of finished runs about this often (seconds; also once at start-up).
+#: Sweep the checkouts (run_root and checkout cache) of finished runs about this often (seconds; also once at
+#: start-up and after each step this worker executes, for that step's run).
 CACHE_SWEEP_SECONDS = 3600.0
+
+
+def _as_uuid(value: str) -> uuid.UUID | None:
+    """``value`` as a run id (canonical UUID text, as the run directories are named), else ``None``."""
+    try:
+        parsed = uuid.UUID(value)
+    except ValueError:
+        return None
+    return parsed if str(parsed) == value else None
 
 
 def build_registry(
@@ -172,36 +184,86 @@ class Worker:
             return
         if removed:
             log.warning("removed orphan automation run directories", extra={"count": len(removed)})
-        self._sweep_checkout_cache()
+        self._sweep_checkouts()
 
-    def _sweep_checkout_cache(self) -> None:
-        """Remove cached checkouts (``automation.checkout_cache``) of runs that are terminal or unknown, once older
-        than the orphan max age, so the persistent cache does not grow forever. Live runs keep theirs whatever their
-        age (a run may wait days at a gate). Skipped when the active runs cannot be read. Never fatal."""
-        cache = self.settings.automation.checkout_cache
-        if cache is None:
-            return
+    def _sweep_checkouts(self, run_id: str | None = None) -> None:
+        """Remove the run-level checkouts on ``automation.run_root`` (tmpfs: RAM) and their copies in
+        ``automation.checkout_cache`` (persistent) of runs that are terminal or unknown (roadmap P0-1, lab finding Z).
+
+        Without ``run_id`` (start-up and every ``CACHE_SWEEP_SECONDS``): a non-terminal run keeps both whatever their
+        age (it may wait days at a gate, and the cache copy is what a restarted container re-adopts); a run read
+        terminal in the database loses them at once (terminal is final: no step of it can run again); an entry of no
+        known run only once older than the orphan max age (a run admitted after the active runs were read is not
+        swept). With ``run_id`` (after each step this worker executed): only that run's, and only if the database
+        says it is terminal, whoever committed that and whatever this attempt's fate (fenced or not). Each worker
+        sweeps its own ``run_root``. Skipped when the runs cannot be read. Never fatal."""
         from ovlm.automation.config import orphan_max_age, runner_config
-        from ovlm.automation.runner import sweep_checkout_cache
+        from ovlm.automation.runner import sweep_checkout_cache, sweep_run_root_checkouts
         from ovlm.workflow.contract import TERMINAL_RUN_STATES
 
+        a = self.settings.automation
+        sweeps: list[tuple[Path, Callable[..., list[Path]]]] = [
+            (a.run_root, sweep_run_root_checkouts)
+        ]
+        if a.checkout_cache is not None:
+            sweeps.append((a.checkout_cache, sweep_checkout_cache))
+        states = sorted(TERMINAL_RUN_STATES)
+        removed: list[Path] = []
         try:
-            with self.engine.connect() as conn:
-                active = {
-                    str(r[0])
-                    for r in conn.execute(
-                        text("SELECT id FROM workflow_run WHERE NOT (state = ANY(:t))"),
-                        {"t": sorted(TERMINAL_RUN_STATES)},
+            if run_id is not None:
+                if _as_uuid(run_id) is None or not any(
+                    (root / run_id).is_dir() for root, _sweep in sweeps
+                ):
+                    return
+                with self.engine.connect() as conn:
+                    terminal = (
+                        conn.execute(
+                            text(
+                                "SELECT 1 FROM workflow_run WHERE id = CAST(:i AS uuid) AND state = ANY(:t)"
+                            ),
+                            {"i": run_id, "t": states},
+                        ).first()
+                        is not None
                     )
-                }
-            removed = sweep_checkout_cache(
-                cache, orphan_max_age(runner_config(self.settings)), keep=active
-            )
+                if not terminal:
+                    return
+                for root, sweep in sweeps:
+                    removed += sweep(root, float("inf"), keep=(), terminal={run_id})
+            else:
+                names = {e.name for root, _sweep in sweeps if root.is_dir() for e in root.iterdir()}
+                if not names:
+                    return
+                ids = sorted(n for n in names if _as_uuid(n) is not None)
+                with self.engine.connect() as conn:
+                    active = {
+                        str(r[0])
+                        for r in conn.execute(
+                            text("SELECT id FROM workflow_run WHERE NOT (state = ANY(:t))"),
+                            {"t": states},
+                        )
+                    }
+                    finished = (
+                        {
+                            str(r[0])
+                            for r in conn.execute(
+                                text(
+                                    "SELECT id FROM workflow_run WHERE id = ANY(CAST(:ids AS uuid[])) "
+                                    "AND state = ANY(:t)"
+                                ),
+                                {"ids": ids, "t": states},
+                            )
+                        }
+                        if ids
+                        else set()
+                    )
+                max_age = orphan_max_age(runner_config(self.settings))
+                for root, sweep in sweeps:
+                    removed += sweep(root, max_age, keep=active, terminal=finished)
         except Exception:
-            log.exception("checkout cache sweep failed")
+            log.exception("checkout sweep failed")
             return
         if removed:
-            log.info("removed cached checkouts of finished runs", extra={"count": len(removed)})
+            log.info("removed checkouts of finished runs", extra={"count": len(removed)})
 
     def _workflow_tick(self) -> None:
         wf = self.workflow
@@ -219,7 +281,7 @@ class Worker:
             % max(1, int(CACHE_SWEEP_SECONDS / self.settings.worker.heartbeat_interval))
             == 0
         ):
-            self._sweep_checkout_cache()
+            self._sweep_checkouts()
         if self._iterations % METRICS_EVERY == 0:
             wf.sweep_worker_rows(SWEEP_AFTER_BEATS * self.settings.worker.heartbeat_interval)
             wf.refresh_metrics()
@@ -244,6 +306,8 @@ class Worker:
             self.workflow.execute(claim)
         except Exception:
             log.exception("step execution failed outside the step contract")
+        # the run's last step: free its checkout now rather than at the next periodic sweep (roadmap P0-1)
+        self._sweep_checkouts(claim.run.id)
 
     def tick(self) -> None:
         """One loop iteration: ping the DB, beat, run the engine."""

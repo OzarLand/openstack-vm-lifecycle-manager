@@ -12,6 +12,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -508,16 +509,21 @@ def test_bootstrap_user_data_holds_the_guest_key_and_a_fresh_host_key() -> None:
 
 
 class _Runner:
-    def __init__(self, on_disk: bool) -> None:
+    def __init__(self, on_disk: bool, checkout: Path = Path(__file__).parent) -> None:
         self.on_disk, self.cloned, self.adopted = on_disk, 0, 0
+        # where the "verified checkout" lives (an existing directory by default)
+        self.checkout = checkout
+
+    def _prepared(self) -> Any:
+        return SimpleNamespace(checkout=self.checkout)
 
     def prepare_automation(self, spec: Any, workflow_id: str, **_: Any) -> Any:
         self.cloned += 1
-        return object()
+        return self._prepared()
 
     def adopt_checkout(self, spec: Any, workflow_id: str, **_: Any) -> Any:
         self.adopted += 1
-        return object() if self.on_disk else None
+        return self._prepared() if self.on_disk and self.checkout.is_dir() else None
 
 
 class _CheckoutPort(RunnerGuestPort):
@@ -554,6 +560,25 @@ def test_a_restarted_worker_reuses_the_checkout_and_clones_only_outside_the_outa
     port = _CheckoutPort(runner, outage)
     first = port._prepared_for("run")  # noqa: SLF001
     assert port._prepared_for("run") is first and runner.cloned == cloned and runner.adopted == 1  # noqa: SLF001
+
+
+def test_a_remembered_checkout_gone_from_disk_is_adopted_again(tmp_path: Path) -> None:
+    """Roadmap P0-1: the worker's checkout sweep (or a lost tmpfs) may remove a checkout this process remembers. The
+    port must not hand out the vanished one: it forgets it and adopts again (here: the copy is back on disk)."""
+    checkout = tmp_path / "run" / "_checkout"
+    checkout.mkdir(parents=True)
+    runner = _Runner(on_disk=True, checkout=checkout)
+    port = _CheckoutPort(runner, outage=True)
+    first = port._prepared_for("run")  # noqa: SLF001
+    assert port._prepared_for("run") is first and runner.adopted == 1  # noqa: SLF001
+    checkout.rmdir()
+    # nothing left, inside the window
+    with pytest.raises(StepRefusal, match="automation_checkout_lost"):
+        port._prepared_for("run")  # noqa: SLF001
+    assert runner.adopted == 2 and runner.cloned == 0
+    checkout.mkdir()
+    again = port._prepared_for("run")  # noqa: SLF001
+    assert again is not first and runner.adopted == 3 and runner.cloned == 0
 
 
 def test_no_git_host_contact_inside_the_downtime_window() -> None:
