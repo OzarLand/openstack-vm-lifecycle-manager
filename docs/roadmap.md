@@ -146,7 +146,7 @@ Ordered by risk. P0 must be closed before OVLM runs for long periods or on any c
 | P1-3 | Backup/restore and upgrade procedure for OVLM itself (PostgreSQL, KEK), tested | SRE review | To do |
 | P1-4 | SF-2 (jump host binding), SF-6 (`/readyz` KEK mismatch), SF-10 optional step-up on host-key confirm | Security follow-ups above | To do |
 | P1-5 | Worker egress proxy checked on a cloud that requires it (E5-8) | E5-8 | To do |
-| P1-6 | Independent security and SRE review of the post-MVP code (#31–#38: checkout cache, reprepare exit, AA, AB) | Process | To do |
+| P1-6 | Independent security and SRE review of the post-MVP code (#31–#49: checkout cache, reprepare exit, AA, AB, checkout sweep, downtime intervals, result contract, accept-step, heartbeat fence, W6 label) | Process | **Review done: 10 findings** ([review-post-mvp.md](reviews/review-post-mvp.md)): 1 Medium (PMR-1, accept probe SSH blocks the worker's signal loop; fix before a pilot), 5 Low (PMR-2 reprepare authorization not bound to step or fence, PMR-3 cache sweep removes non-run entries, PMR-4 probe freshness stamp and 60 s budget, PMR-5 AB detected only inside the window, PMR-6 cache mismatch evidence and `automation_reprepare` trigger), 4 Info. No High, no vetoed operation. Fixes to do |
 | P1-7 | Install guide for a real cloud (today: evaluation only) | README | To do |
 
 ### P2 — Operator experience
