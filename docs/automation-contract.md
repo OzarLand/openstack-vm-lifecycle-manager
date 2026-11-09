@@ -157,6 +157,32 @@ Written by the playbook to `{{ ovlm_result_path }}` (OVLM passes the path; ASSUM
   "checks": [{"name":"mount","ok":true,"detail":"..."}], "message": "short, no secrets" }
 ```
 The marker key is `marker_sha256` in every phase; OVLM reads no other spelling (a `marker_checksum` fact is ignored, so W1 parks). `tests/unit/test_marker_contract.py` ties this name to OVLM and the reference roles.
+
+#### 3.7.1 Facts per phase
+
+The `facts` keys this contract defines. OVLM interprets only the keys marked with the steps that read them; every
+other fact a playbook reports is kept as guest-reported evidence and never interpreted. "Optional" means OVLM works
+without the key (it takes the documented default); every other key OVLM reads is required in the case named.
+Phase `*` means every phase.
+
+| Phase | Key | Requirement | Read by |
+|---|---|---|---|
+| `quiesce` | `marker_sha256` | required whenever the renewal has a data volume (3.4); `null` only in the S2 "never mounted" case | W1, S2 |
+| `quiesce` | `was_mounted` | optional (bool); `false` together with a `null` marker is the S2 "never mounted" case (3.4) | S2 |
+| `data_attach` | `fs_uuid` | required when the profile names the filesystem by `fs_uuid`: the UUID of the mounted filesystem | W6 |
+| `data_attach` | `marker_sha256` | required whenever W1 recorded a marker: SHA-256 of the data marker file on the mounted volume | W6 |
+| `data_attach` | `device` | optional, evidence only: the `/dev/disk/by-id/...` path used | none |
+| `healthcheck` | `marker_sha256` | required whenever W1 recorded a marker: the service's view of the marker (3.6) | W8 |
+| `healthcheck` | `fs_uuid` | optional, evidence only: the filesystem UUID the service reports | none |
+| `healthcheck` | `health_state` | optional: `healthy`, `unhealthy` or `degraded`; only `degraded` with `classification: retryable` means something to OVLM (`accept_degraded`, 3.6) | result classification |
+| `*` | `error_kind` | optional, failed results only: `planned` (the playbook classified the failure) or `automation_error` | none |
+| `*` | `test_mode` | optional (bool), reference workload only: `true` in CI runs without a real mount | none |
+
+OVLM's reads are pinned by `tests/unit/test_result_contract.py`: it parses OVLM's source for every `facts` key it
+reads and fails when a key is not in this table for that phase, when the reference playbook and roles for that phase
+do not report it (unless the row says "optional"), or when the renewal test doubles report a key this table does not
+define. The same test ties the top-level fields, the `checks[]` fields and the classification values of the example
+above to the parser (`ovlm.automation.result`) and to the reference result writer.
 OVLM must treat a missing or malformed result as `classification = needs_human` for data phases and `retryable` (bounded) for `configure`/`healthcheck`. `result.json` is size-limited (64 KiB, ASSUMPTION) and redacted again by OVLM.
 
 ### 3.8 `rollback_hooks` (optional)

@@ -131,10 +131,11 @@ Ordered by risk. P0 must be closed before OVLM runs for long periods or on any c
 
 | ID | Task | Source | Status | Acceptance / tests |
 |---|---|---|---|---|
-| P0-1 | Release the run checkout in the tmpfs `run_root` when a run ends (nothing calls `release()`), and sweep leftovers at start-up | Lab, Z fix review | Integration tested (this PR) | Test: run ends → checkout gone; worker memory stable over N runs |
+| P0-1 | Release the run checkout in the tmpfs `run_root` when a run ends (nothing calls `release()`), and sweep leftovers at start-up | Lab, Z fix review | Integration tested (#43) | Test: run ends → checkout gone; worker memory stable over N runs |
 | P0-2 | An OVLM exit when a step's own (pinned) playbook refuses a state the operator has made safe: an audited, approver-only "accept step as done" with attestation, limited to restore steps that change no cloud resource, or a pin bump for restore phases only. Design first (ADR) | D-8b | To do | ADR accepted by SRE and security reviewers; integration test reproducing D-8 converges without a manual guest action |
-| P0-3 | Record every downtime interval of a run (window and revert), not only the first | AC (LAB-01b / rollback) | **Integration tested (this branch)**: `run_downtime` (`renewal_0003`), window W1→W10/S9 and restore S2→S9, api `downtime` object, run page, metric `{kind}`, audit | Run with a revert after the cutover shows both intervals; metric and UI |
-| P0-4 | Contract tests for every phase result field OVLM reads, against the reference roles' real output (AB class of defect) | AB | Partly (marker done in #38) | Static test fails on any field OVLM reads that no role emits |
+| P0-3 | Record every downtime interval of a run (window and revert), not only the first | AC (LAB-01b / rollback) | **Integration tested (#44)**: `run_downtime` (`renewal_0003`), window W1→W10/S9 and restore S2→S9, api `downtime` object, run page, metric `{kind}`, audit | Run with a revert after the cutover shows both intervals; metric and UI |
+| P0-4 | Contract tests for every phase result field OVLM reads, against the reference roles' real output (AB class of defect) | AB, AD | Unit tested (this branch): `tests/unit/test_result_contract.py` pins every facts key OVLM reads to contract 3.7.1, the reference playbooks/roles and the renewal doubles; found and fixed AD (S2 read `marker_checksum`) | Static test fails on any field OVLM reads that no role emits |
+| P0-5 | W6 checks the filesystem by label when the profile names it by label (today W6 checks neither UUID nor label in that case; the role already reports `fs_label`) | P0-4 review | To do | Integration test: label mismatch on green parks W6 |
 
 ### P1 — Before a production pilot
 

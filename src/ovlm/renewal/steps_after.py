@@ -23,7 +23,7 @@ from ovlm.renewal import downtime
 from ovlm.renewal.base import RStep, StepRefusal
 from ovlm.renewal.ledger import fenced_tx, snapshot_row
 from ovlm.renewal.steps_build import AnsibleStep, gate_check, phase_outcome
-from ovlm.renewal.steps_window import ExternalVerify, WindowAnsible
+from ovlm.renewal.steps_window import MARKER_FACT, ExternalVerify, WindowAnsible
 from ovlm.workflow.contract import Act, Decision, Done, ErrorClass, Fail, Outcome, StepContext, Wait
 
 E = ErrorClass
@@ -329,9 +329,9 @@ class QuiesceGreen(WindowAnsible):
     def verify(self, ctx: StepContext, intent: Mapping[str, Any]) -> Outcome:
         res = self.memo(ctx)["result"]
         out = phase_outcome(self, ctx, res, data_phase=True)
-        never_mounted = str(res.facts.get("was_mounted")).lower() == "false" and not (
-            res.facts.get("marker_sha256") or res.facts.get("marker_checksum")
-        )
+        # Contract 3.4/3.7.1: the marker travels as ``marker_sha256`` only; another spelling is not a marker (AD).
+        marker = res.facts.get(MARKER_FACT)
+        never_mounted = str(res.facts.get("was_mounted")).lower() == "false" and not marker
         if isinstance(out, Done) and never_mounted:
             return Done({**dict(out.evidence), "green_was_mounted": False, "marker_checksum": None,
                          "marker_comparison": "skipped: green never mounted the data volume, so it wrote nothing "
