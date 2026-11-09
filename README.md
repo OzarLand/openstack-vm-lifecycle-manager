@@ -179,7 +179,9 @@ make down      # stop and delete the local stack
 ```
 
 Create the first admin with `ovlm admin create --enrol-link` inside the api container, then open the enrolment link.
-An [install guide for evaluation](docs/install-guide.md) exists. It says plainly what is missing. There is no guide for real clouds yet, on purpose: it comes after lab validation.
+An [install guide for evaluation](docs/install-guide.md) exists. It says plainly what is missing. For a real cloud,
+the [real-cloud install guide](docs/install-guide-real-cloud.md) covers the cloud administrator's part, production-mode
+settings, a first renewal, paging, backup and a security checklist. It is docs only and not validated on a second cloud.
 
 ## 🧪 Where OVLM is tested
 
@@ -205,6 +207,7 @@ Felcloud provides cloud credit for OzarLand's labs and has no say over the conte
 | [Renewal workflow](docs/renewal-workflow.md) · [ADR-0004](docs/decisions/ADR-0004-mvp-renewal-strategy.md) | The state machine, rollback and failure handling |
 | [Security model](docs/security-model.md) · [OpenStack integration](docs/openstack-integration.md) | Credentials, least privilege, verified API behaviour |
 | [Automation contract](docs/automation-contract.md) · [ansible/](ansible/README.md) | What your Ansible content must provide |
+| [Install: evaluation](docs/install-guide.md) · [Install: real cloud](docs/install-guide-real-cloud.md) | Running OVLM on a throw-away host, then next to a real OpenStack project |
 | [Operations: alerts and paging](docs/operations.md) | Prometheus rules, Alertmanager routing, a runbook per alert |
 | [Backup, restore and upgrade](docs/backup-restore-upgrade.md) | What to back up (database, KEK, TOTP key), restore, upgrade preflight |
 | [Testing strategy](docs/testing-strategy.md) · [ADR-0007](docs/decisions/ADR-0007-lab-on-felcloud.md) | How claims become "lab validated" on Felcloud |

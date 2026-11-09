@@ -4,7 +4,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Implemented, partly integration tested.** The stack in this guide starts and passes `make smoke` in CI. A TLS-fronted install and a real cloud connection are **not** lab validated. |
+| Status | **Implemented, partly integration tested.** The stack in this guide starts and passes `make smoke` in CI. A TLS-fronted, production-mode install is **not** lab validated; the Felcloud lab connected a real cloud with this development stack. For a real cloud, see [install-guide-real-cloud.md](install-guide-real-cloud.md). |
 | Audience | An operator who wants to evaluate OVLM on a throw-away host |
 | Last updated | 2026-11-04 |
 
@@ -18,6 +18,11 @@
 > that endpoint needs a step-up and invalidates the credentials. It has not yet been used against a real cloud.
 >
 > This guide shows what works today and where the gaps are. It does not describe a finished product.
+
+> [!TIP]
+> **Installing next to a real OpenStack project?** Use [install-guide-real-cloud.md](install-guide-real-cloud.md):
+> the cloud administrator's part (roles, application credentials, quotas, network paths), production-mode settings,
+> the configuration file, the first renewal, paging, backup and a security checklist. It builds on this guide.
 
 ## 1. What you get
 
@@ -277,11 +282,11 @@ Least-privilege checklist:
 - [ ] You asked the cloud administrator which policy defaults apply (`enforce_new_defaults`). If the cloud differs
       from what the design assumes, please [tell us](../.github/ISSUE_TEMPLATE/cloud-behaviour-report.yml).
 
-🛑 **Where the credentials go today.** OVLM has nowhere to store them yet. Do not put the member credential into
-the database, an environment value or `compose.yaml`. The interim for lab use is a worker-only file source
-(`renewal.credentials_dir`), documented in the code of `src/ovlm/renewal/production.py`. It is opt-in, owner and
-permission checked, and a **reported deviation from the design**, not the finished store. Do not use it outside a
-disposable lab.
+🛑 **Where the credentials go.** Upload them to OVLM's encrypted credential store (sealed by the api, unsealed only
+by the worker): [credential-store.md §3](credential-store.md#3-registering-a-project), step by step in
+[install-guide-real-cloud.md §6](install-guide-real-cloud.md#6-ovlm-side-connect-the-project-and-register-a-vm).
+Never put a credential into an environment value or `compose.yaml`. The worker-only file source
+`renewal.credentials_dir` is for development only: settings refuse it unless `development_mode` is on.
 
 ## 7. Inventory sync
 
@@ -323,11 +328,12 @@ connection, with the credential from the encrypted store.
 
 | Gap | Status |
 |---|---|
-| Encrypted credential store (seal in the api, unseal in the worker) | 🟡 Implemented, reviewed, fixes verified; not lab validated. Worker container hardening (CS-6) still open |
-| Registering a cloud project from the UI or API | 🟡 Implemented with the credential store; not lab validated |
-| Inventory sync by the worker (on request and periodic, with the stored read credential) | 🟡 Implemented, unit and integration tested with a fake cloud; not lab validated |
-| Blue's SSH host key: scan at registration, operator confirmation | 🟡 Implemented, integration tested with an `ssh-keyscan` double; not lab validated |
-| End-to-end renewal on a real cloud | ⬜ Not started. Not lab validated |
+| Encrypted credential store (seal in the api, unseal in the worker) | 🟡 Implemented, reviewed, fixes verified; used on Felcloud (credentials validated against Keystone). Worker container hardening (CS-6) fixed as SF-1 |
+| Registering a cloud project through the API | 🟡 Implemented with the credential store; used on Felcloud. No UI page |
+| Inventory sync by the worker (on request and periodic, with the stored read credential) | 🟡 Integration tested; ran on Felcloud (read-only) |
+| Blue's SSH host key: scan at registration, operator confirmation | 🟡 Integration tested, reviewed; used on Felcloud |
+| End-to-end renewal on a real cloud | 🟢 Lab validated on Felcloud only (ACC-01d and three failure scenarios, [mvp-report.md](mvp-report.md)); not production validated |
+| A guide for a real cloud | 🟡 [install-guide-real-cloud.md](install-guide-real-cloud.md): docs only, not validated on a second cloud |
 | TLS proxy example configuration | ⬜ Not provided. Bring your own |
 | Backup and restore of the database and the key | 🟡 Procedure and `make backup` / `make restore`: [backup-restore-upgrade.md](backup-restore-upgrade.md). Integration tested, not lab validated |
 | Upgrades between versions | 🟡 Procedure with a read-only preflight that refuses mid-window: [backup-restore-upgrade.md §4](backup-restore-upgrade.md#4-upgrade). No upgrade between two real releases tested yet |
