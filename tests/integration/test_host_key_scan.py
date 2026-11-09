@@ -347,3 +347,122 @@ def test_ui_confirm_makes_the_operator_paste_the_fingerprint(env: Env) -> None:
     assert str(row.actor_id) == str(env.operator_id) and row.project_scope
     assert row.after["source"] == "ssh-keygen" and row.after["via"] == "ui"
     assert row.after["fingerprint"] == ed.fingerprint
+
+
+def _totp_operator(env: Env) -> tuple[Any, str]:
+    """An operator who enrolled TOTP (operators may; approvers and admins must)."""
+    from tests.integration.test_registry_api import Session
+
+    client, secret = env.auth.user_client("op-totp", [("operator", "global")], totp=True)
+    assert secret is not None
+    return Session(client, client.get("/api/v1/session").json()["user_id"]), secret
+
+
+def test_sf10_an_operator_with_totp_confirms_with_a_stepup_bound_to_the_vm(env: Env) -> None:
+    """Review IS-2, roadmap SF-10: an operator with TOTP enrolled confirms a host key only with a password+TOTP
+    step-up for ``host_key.confirm`` and **this** VM, spent with the confirmation and recorded in the audit row. A
+    missing step-up, one for another VM or another action, and a spent one are refused and leave the VM
+    unconfirmed."""
+    from tests.integration.lifecycle_support import stepup
+
+    guest = Guest()
+    key = _key()
+    guest.keys["10.0.0.5"] = [key]
+    vm = _register(env)
+    _drive(env, guest)
+    op, secret = _totp_operator(env)
+    url = f"/api/v1/managed-vms/{vm['id']}/host-key/confirm"
+
+    def confirm(**extra: Any) -> Any:
+        return op.post(url, json={"fingerprint": key.fingerprint, "source": "console", **extra})
+
+    missing = confirm()
+    assert missing.status_code == 403 and missing.json()["code"] == "stepup-required", missing.text
+    other_vm = stepup(env, op, secret, "host_key.confirm", str(uuid4()))
+    assert confirm(stepup_id=other_vm).json()["code"] == "stepup-invalid"
+    other_action = stepup(env, op, secret, "run.abort", vm["id"])
+    assert confirm(stepup_id=other_action).json()["code"] == "stepup-invalid"
+    assert env.client.get(f"/api/v1/managed-vms/{vm['id']}").json()["host_key_confirmed_at"] is None
+
+    # a fingerprint mismatch refuses before the step-up is spent: the same step-up still works afterwards
+    good = stepup(env, op, secret, "host_key.confirm", vm["id"])
+    wrong = op.post(url, json={"fingerprint": _key().fingerprint, "stepup_id": good})
+    assert wrong.status_code == 409 and wrong.json()["code"] == "host-key-mismatch"
+    ok = confirm(stepup_id=good)
+    assert ok.status_code == 200 and ok.json()["already_confirmed"] is False, ok.text
+    assert ok.json()["host_key_confirmed_by"] == str(op.user_id)
+    [spent] = env.auth.sql("SELECT consumed_at FROM stepup WHERE id = :i", i=good)
+    assert spent.consumed_at is not None
+    [row] = env.auth.sql(
+        "SELECT actor_id, after FROM audit_event WHERE action = 'managed_vm.host_key_confirm'"
+    )
+    assert str(row.actor_id) == str(op.user_id)
+    assert row.after["stepup_id"] == good and row.after["auth_method"] == "password+totp"
+    assert row.after["source"] == "console"
+    refused = env.auth.sql(
+        "SELECT after FROM audit_event WHERE action = 'auth.stepup.refused' ORDER BY id"
+    )
+    assert [r.after["action"] for r in refused] == ["host_key.confirm", "host_key.confirm"]
+
+
+def test_sf10_a_spent_stepup_cannot_confirm_again(env: Env) -> None:
+    from tests.integration.lifecycle_support import stepup
+
+    guest = Guest()
+    key = _key()
+    guest.keys["10.0.0.5"] = [key]
+    vm = _register(env)
+    _drive(env, guest)
+    op, secret = _totp_operator(env)
+    url = f"/api/v1/managed-vms/{vm['id']}/host-key/confirm"
+    sid = stepup(env, op, secret, "host_key.confirm", vm["id"])
+    assert op.post(url, json={"fingerprint": key.fingerprint, "stepup_id": sid}).status_code == 200
+    # a second confirmation of the same (now unconfirmed again) VM cannot reuse the spent step-up
+    env.auth.sql(
+        "UPDATE managed_vm SET host_key_confirmed_at = NULL, host_key_confirmed_by = NULL WHERE id = :i",
+        i=vm["id"],
+    )
+    r = op.post(url, json={"fingerprint": key.fingerprint, "stepup_id": sid})
+    assert r.status_code == 403 and r.json()["code"] == "stepup-invalid"
+    assert env.client.get(f"/api/v1/managed-vms/{vm['id']}").json()["host_key_confirmed_at"] is None
+
+
+def test_sf10_ui_asks_an_operator_with_totp_for_password_and_code(env: Env) -> None:
+    from tests.integration.auth_support import PASSWORD
+
+    guest = Guest()
+    key = _key()
+    guest.keys["10.0.0.5"] = [key]
+    vm = _register(env)
+    _drive(env, guest)
+    op, secret = _totp_operator(env)
+    server = env.observed_id(env.ids["blue"])
+    detail = page(op, f"/inventory/servers/{server}")
+    assert 'name="totp_code"' in detail.text and 'name="password"' in detail.text
+    # an operator without TOTP is not asked (operators have no mandatory TOTP)
+    plain = page(env.users["operator"], f"/inventory/servers/{server}")
+    assert "Confirm the SSH host key" in plain.text and 'name="totp_code"' not in plain.text
+
+    url = f"/inventory/servers/{server}/host-key/confirm"
+    env.auth.clock.advance()
+    bad = form_post(op, url, {"fingerprint": key.fingerprint, "source": "console", "password": "wrong",
+                              "totp_code": env.auth.code(secret)})  # fmt: skip
+    assert bad.status_code == 401 and "Password or code not accepted" in bad.text
+    assert env.client.get(f"/api/v1/managed-vms/{vm['id']}").json()["host_key_confirmed_at"] is None
+
+    env.auth.clock.advance()
+    done = form_post(op, url, {"fingerprint": key.fingerprint, "source": "ssh-keygen", "password": PASSWORD,
+                               "totp_code": env.auth.code(secret)})  # fmt: skip
+    assert done.status_code == 303, done.text
+    [row] = env.auth.sql(
+        "SELECT after FROM audit_event WHERE action = 'managed_vm.host_key_confirm'"
+    )
+    assert row.after["via"] == "ui" and row.after["auth_method"] == "password+totp"
+    [st] = env.auth.sql(
+        "SELECT action, target_id, consumed_at FROM stepup WHERE id = CAST(:i AS uuid)",
+        i=row.after["stepup_id"],
+    )
+    assert (st.action, st.target_id) == (
+        "host_key.confirm",
+        vm["id"],
+    ) and st.consumed_at is not None

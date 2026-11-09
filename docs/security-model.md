@@ -383,7 +383,18 @@ by design); the out-of-band comparison and the audit row are the controls (revie
 it is confirmed: the operator pastes the fingerprint read **on the VM** (its console, or `ssh-keygen -lf` there) and
 says which source it came from; OVLM compares it with the scan and refuses a mismatch (409). The audit row
 `managed_vm.host_key_confirm` records the source (`console`, `ssh-keygen`) and `via: ui` (the API accepts the same
-optional `source`). No TOTP step-up is required for this confirmation (accepted for the lab, review IS-2).
+optional `source`).
+
+**Step-up on the confirmation** (review IS-2, roadmap SF-10, P1-4). An operator who has TOTP enrolled confirms only with a
+password+TOTP step-up for the action `host_key.confirm` and **this managed VM's id** (`POST /session/reauth`, then
+`stepup_id` in the body; the UI form asks for password and code itself). It is spent in the confirmation's
+transaction (a fingerprint mismatch or another refusal leaves it unspent), single-use, bound to the session, and
+refused (`403 stepup-required` / `stepup-invalid`, the refusal audited as `auth.stepup.refused`) when missing, for
+another VM or another action, already spent, or not password+TOTP. The audit row `managed_vm.host_key_confirm`
+records `stepup_id` and `auth_method`. Operators have no mandatory TOTP (§2.1): one who has not enrolled still
+confirms with the session alone, and the audit row shows the session's `auth_method` with no `stepup_id`. So the
+step-up is optional per operator, and it is what a stolen session of an enrolled operator lacks. The residual above
+(a compromised api holds the column grant) is unchanged.
 
 **Which address is scanned** (review IS-3). The scan and the renewal use one rule (`src/ovlm/registry/ssh_target.py`):
 `fixed_ips[0]` of the port the **service floating IP** is attached to. The scan finds that floating IP in the latest
