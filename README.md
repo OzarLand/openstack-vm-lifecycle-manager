@@ -8,7 +8,7 @@
 
 <p>
   <img src="https://img.shields.io/badge/stage-pre--alpha-orange.svg" alt="Stage: pre-alpha">
-  <img src="https://img.shields.io/badge/status-not%20lab%20validated-9ca3af.svg" alt="Not lab validated">
+  <img src="https://img.shields.io/badge/status-MVP%20lab%20validated%20on%20Felcloud-16a34a.svg" alt="MVP lab validated on Felcloud">
   <img src="https://img.shields.io/badge/OpenStack-Nova%20·%20Cinder%20·%20Neutron%20·%20Glance%20·%20Keystone-ED1944.svg" alt="OpenStack services">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
 </p>
@@ -27,7 +27,8 @@ Part of [OzarLand](https://github.com/OzarLand/ozarland): *a shared land for bet
 
 > [!WARNING]
 > **Pre-alpha. Do not use against a production cloud.** The design is reviewed and large parts are implemented and
-> tested in CI, but the renewal workflow has **not** run end to end on a real cloud yet. See [Status](#-status).
+> tested in CI, and the MVP renewal (one data volume, floating IP) is **lab validated on Felcloud**, with its three kept
+> failure scenarios. It is **not** production validated. See [Status](#-status) and the [MVP report](docs/mvp-report.md).
 
 ## 🧭 What OVLM does
 
@@ -78,7 +79,8 @@ implemented → unit tested → integration tested → lab validated → product
 | OpenStack write client, RBAC, Ansible runner, readiness | ✅ Integration tested, reviewed, in `main` |
 | Renewal strategy (blue/green steps, gates, restore) and operator UI pages | ✅ Integration tested, reviewed, in `main` |
 | Encrypted credential store and project connections | ✅ Integration tested, reviewed, fixes verified (one Low item open) |
-| End-to-end renewal on Felcloud (a real OpenStack cloud), acceptance and failure scenarios | 🟡 Lab being prepared: OVLM runs on Felcloud (`make smoke` passed); no renewal run yet |
+| End-to-end renewal on Felcloud (a real OpenStack cloud) | ✅ Lab validated: primary scenario ACC-01d (build, cutover, retirement) |
+| Failure scenarios on Felcloud: configure failure (LAB-04), worker kill in the window (LAB-01), operator rollback after the cutover | ✅ Lab validated (LAB-01 after fixes Z, AA, AB); other failure scenarios integration tested only |
 | Production validated | ⬜ No |
 
 The detailed backlog is in [docs/roadmap.md](docs/roadmap.md), and the day-by-day record of the team's work is in
