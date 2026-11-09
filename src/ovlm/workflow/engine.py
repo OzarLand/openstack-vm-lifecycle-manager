@@ -26,8 +26,9 @@ is in phase ``window`` or ``restore``, first waits ``worker.takeover_delay`` (he
 
 **S5 - crash anywhere is recoverable.** Nothing is committed in ``finally`` blocks or exception handlers that
 could run after a crash; a crash leaves the step ``running`` with a lease that expires, after which another claim
-(attempt + 1, new token) re-probes. Admission, transitions, lock acquisition/release, signal consumption and
-their audit events each commit in a single transaction.
+(attempt + 1, new token) re-probes. An attempt that leaves ``execute`` (returned or raised) has closed its fence
+and joined its heartbeat first, so no extension of its lease lands afterwards. Admission, transitions, lock
+acquisition/release, signal consumption and their audit events each commit in a single transaction.
 
 **S6 - signals.** ``run_signal.consumed_at``/``outcome`` are written in the same transaction as the effect
 (SRE-R-24). Signals needing a step boundary are left pending while a step runs and applied afterwards.
@@ -68,6 +69,7 @@ from ovlm.workflow.clock import Clock, SystemClock
 from ovlm.workflow.contract import (
     OPEN_STEP_STATES,
     TERMINAL_RUN_STATES,
+    AcceptStep,
     Defer,
     Done,
     ErrorClass,
@@ -317,6 +319,10 @@ class _StepContext:
 # ---- heartbeat and watchdog threads -----------------------------------------------------------------------
 
 
+class _LateBeat(Exception):  # noqa: N818 - control flow only, never escapes ``WorkflowEngine.heartbeat``
+    """Rolls back a lease extension whose attempt ended while the UPDATE was in flight."""
+
+
 class _Heartbeater:
     """Extends the lease every ``heartbeat_interval``; a 0-row result revokes the fence at once.
 
@@ -338,8 +344,28 @@ class _Heartbeater:
         self._wd.start()
 
     def stop(self) -> None:
-        # No DB write here: this runs in ``finally`` (S5).
+        """Stop and fence the heartbeat before the attempt leaves ``execute``, however it leaves it.
+
+        Setting the stop event alone is not enough: a beat already past its interval wait would still go out and
+        extend the lease of an attempt that has ended (returned ``commit_unknown``, or raised: a bug outside the
+        step contract that the worker loop logs, an interrupt, a simulated crash), delaying the takeover by up to
+        one lease. So the fence is closed first (a beat not yet sent is refused by
+        :meth:`WorkflowEngine.heartbeat`), then both threads are joined: a beat in flight lands before the attempt
+        is gone, never after. The join is bounded by the worst case of one beat (pool checkout,
+        ``statement_timeout``). No DB write here: this runs in ``finally`` (S5).
+        """
+        self._fence.close("attempt ended")
         self._stop.set()
+        cfg = self._engine.config
+        bound = cfg.fence_margin + max(cfg.heartbeat_interval, 1.0)
+        for t in (self._hb, self._wd):
+            if t.is_alive() and t is not threading.current_thread():
+                t.join(bound)
+                if t.is_alive():
+                    log.warning(
+                        "heartbeat thread still running after the attempt ended",
+                        extra={"step_id": self._claim.step.id, "thread": t.name},
+                    )
 
     def _beat_loop(self) -> None:
         interval = self._engine.config.heartbeat_interval
@@ -567,6 +593,12 @@ class WorkflowEngine:
                         "owner": claim.lease_owner,
                     },
                 ).first()
+                if row is not None and fence.revoked is not None:
+                    # The attempt ended (or fenced itself) while the UPDATE was on its way: roll it back. Normally
+                    # ``_Heartbeater.stop`` waits for this beat; this covers a beat that outlived that bounded wait.
+                    raise _LateBeat
+        except _LateBeat:
+            return False
         except SQLAlchemyError:
             log.warning(
                 "step heartbeat failed; ownership unknown", extra={"step_id": claim.step.id}
@@ -1472,11 +1504,14 @@ class WorkflowEngine:
                 return f"{recorded}; step {step.step_key} re-queued", True
             return f"step {step.step_key} re-queued for verification (mark_resolved)", True
 
+        if sig.kind == "accept_step":
+            return self._accept_step(c, defn, ctx)
+
         # Strategy-specific kinds and wake-ups need a step boundary.
         if step is not None and step.state == "running":
             raise _LeavePending
         res = defn.on_signal(ctx)
-        if res is None:
+        if res is None or isinstance(res, AcceptStep):
             return f"unsupported signal {sig.kind} for this strategy", False
         if isinstance(res, str):
             return res, True
@@ -1494,6 +1529,43 @@ class WorkflowEngine:
         if self._close_and_transition(c, run, step, "cancelled", res, defn):
             return f"{sig.kind}: lock conflict; step kept open, run parked", True
         return f"{sig.kind} applied", True
+
+    def _accept_step(
+        self, c: Connection, defn: WorkflowDefinition, ctx: TxContext
+    ) -> tuple[str, bool]:
+        """``accept_step`` (ADR-0008): the parked step is closed ``succeeded`` with ``resolution = accepted``
+        **without being run**, and the run moves on. The strategy has re-validated the signal and records its own
+        rows in this transaction (:meth:`WorkflowDefinition.on_signal` returns :class:`AcceptStep`). The close is a
+        compare-and-set on ``(state = needs_human, attempt)``; it also retires the parked attempt's fencing token (a
+        fresh ``fencing_seq`` value), so a late outcome or heartbeat of that attempt, or of any older one, matches 0
+        rows and is discarded (S2). No lease is taken: no attempt runs while the step is parked."""
+        run, step = ctx.run, ctx.step
+        if run.state != "needs_human" or step is None or step.state != "needs_human":
+            return "refused: no step in needs_human", True
+        res = defn.on_signal(ctx)
+        if isinstance(res, str):
+            return res, True
+        if not isinstance(res, AcceptStep):
+            return "unsupported signal accept_step for this strategy", False
+        try:
+            with c.begin_nested():
+                n = c.execute(
+                    text(
+                        "UPDATE workflow_step SET state = 'succeeded', resolution = 'accepted', "
+                        "fencing_token = nextval('fencing_seq'), lease_owner = NULL, lease_expires_at = NULL, "
+                        "not_before = NULL, finished_at = now(), updated_at = now(), "
+                        "evidence = COALESCE(evidence, '{}'::jsonb) || CAST(:ev AS jsonb) "
+                        "WHERE id = :id AND state = 'needs_human' AND attempt = :att"
+                    ),
+                    {"id": step.id, "att": res.attempt, "ev": _j(res.evidence) or "{}"},
+                ).rowcount
+                if n != 1:
+                    raise _LeavePending  # the step moved under us: re-validated (and refused) on a later pass
+                self._apply_transition(c, run, res.transition, defn)
+        except LockConflict as exc:
+            # Nothing of the accept may stay half-applied (its rows are outside the savepoint): retry later.
+            raise _LeavePending from exc
+        return f"step {step.step_key} accepted without running it", True
 
     def _close_open_step(
         self,

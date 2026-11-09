@@ -151,6 +151,17 @@ class Wake:
 
 
 @dataclass(frozen=True)
+class AcceptStep:
+    """``on_signal`` result for ``accept_step``: close the run's parked step ``succeeded`` with ``resolution =
+    accepted`` **without running it**, merge ``evidence``, retire the parked attempt's fencing token, then apply
+    ``transition``. The engine closes the step by compare-and-set on ``(state = needs_human, attempt)``."""
+
+    transition: Transition
+    evidence: Mapping[str, Any]
+    attempt: int
+
+
+@dataclass(frozen=True)
 class Admission:
     first_step: StepSpec
     locks: Sequence[LockSpec] = ()
@@ -386,11 +397,11 @@ class WorkflowDefinition(ABC):
         """Network I/O needed to apply a signal, done before the transaction opens (SRE-R-28 b)."""
         return None
 
-    def on_signal(self, ctx: TxContext) -> Transition | Wake | str | None:
+    def on_signal(self, ctx: TxContext) -> Transition | Wake | AcceptStep | str | None:
         """Kinds the engine does not apply generically (``rollback``, ``revert``, ``discard``, ``probe``,
         ``admit``). Return a Transition (applied; the open step is cancelled), :class:`Wake` (the waiting step
-        becomes ready and re-probes), a string outcome (consumed without a state change) or None
-        (``unsupported``)."""
+        becomes ready and re-probes), :class:`AcceptStep` (``accept_step`` only: the parked step is closed as
+        accepted, not run), a string outcome (consumed without a state change) or None (``unsupported``)."""
         return None
 
 

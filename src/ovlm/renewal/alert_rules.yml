@@ -21,6 +21,11 @@ groups:
       - alert: OvlmWindowBudgetExceeded
         expr: increase(ovlm_window_budget_exceeded_total[10m]) > 0
         labels: {severity: page}
+      - alert: OvlmStepAccepted
+        expr: increase(ovlm_step_accepted_total[10m]) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: "An approver accepted a restore step without running its playbook (accept-step, ADR-0008): review the run's evidence."
       - alert: OvlmAutoRestore
         expr: increase(ovlm_auto_restore_total[10m]) > 0
         labels: {severity: ticket}

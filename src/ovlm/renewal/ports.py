@@ -73,6 +73,10 @@ class PhaseResult:
     reason: str
     facts: Mapping[str, Any] = field(default_factory=dict)
     evidence: Mapping[str, Any] = field(default_factory=dict)
+    #: The classification the playbook itself reported in a valid ``result.json`` when it failed (``needs_human``,
+    #: ``fatal``, ``retryable``): the playbook ran and refused. ``None``: no valid failed result (ok, timeout, killed,
+    #: unreachable, missing result, host key). ``accept-step`` applies only to a refusal (ADR-0008).
+    reported: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -101,13 +105,22 @@ class HostKeyResult:
 @dataclass(frozen=True)
 class GuestProbe:
     """Result of the fixed read-only command list (``findmnt``, ``systemctl is-active``, ``systemctl is-enabled``,
-    ``cloud-init status``, ``systemctl is-system-running``). ``reachable=False``: SSH failed."""
+    ``cloud-init status``, ``systemctl is-system-running`` and, when a data volume is named, ``lsblk`` on its by-id
+    device). ``reachable=False``: SSH failed.
+
+    ``unit_states``: one state per unit as ``systemctl is-active`` printed it (``active``, ``inactive``, ``failed``,
+    ...), read line by line: the exit code alone does not say "none active" (ADR-0008). ``device_mounted``: the data
+    volume's by-id device (or a partition of it) is mounted somewhere; ``None`` when unknown (device absent, command
+    failed). ``device_mountpoints``: where, as the guest reported it (untrusted text)."""
 
     reachable: bool
     mounted: bool | None = None
     units_active: bool | None = None
     cloud_init_done: bool | None = None
     system_state: str | None = None
+    unit_states: Mapping[str, str] | None = None
+    device_mounted: bool | None = None
+    device_mountpoints: tuple[str, ...] = ()
 
     def as_json(self) -> dict[str, Any]:
         return {
@@ -174,8 +187,17 @@ class GuestPort(Protocol):
         ...
 
     def probe(
-        self, run_id: str, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...]
-    ) -> GuestProbe: ...
+        self,
+        run_id: str,
+        target: GuestRef,
+        *,
+        mount_point: str | None,
+        units: tuple[str, ...],
+        data_volume_id: str | None = None,
+    ) -> GuestProbe:
+        """The fixed read-only command list on ``target``. ``data_volume_id``: also read where the volume's by-id
+        device (``/dev/disk/by-id/virtio-<first 20 characters>``) is mounted (``accept-step``, ADR-0008)."""
+        ...
 
     def external_probe(
         self, address: str, check: Mapping[str, Any], candidates: Mapping[str, str | None]

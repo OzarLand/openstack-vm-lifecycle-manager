@@ -18,6 +18,8 @@
       {% if run.auto_restore_used %}<dt>Automatic restore</dt><dd>OVLM already restored automatically once in this run. It will not do it again.</dd>{% endif %}
       {% if run.abort_requested %}<dt>Abort</dt><dd><span class="badge warn">requested</span> It is honoured at the next step boundary.</dd>{% endif %}
       {% if run.end_reason %}<dt>Ended because</dt><dd>{{ run.end_reason }}</dd>{% endif %}
+      {% for a in run.accepted_steps %}<dt>Accepted step</dt><dd><span class="badge warn accepted-step">{{ a.step_key | step_code }} accepted by {{ a.approver or a.approver_id }} at {{ a.created_at | timestamp }}, playbook not run</span>
+        <span class="muted">a weaker proof than a step that ran: OVLM verified the postcondition with its own read-only probe</span></dd>{% endfor %}
     </dl>
     {% if run.pending_signals %}
     <p role="status" class="banner info"><strong>Pending:</strong>
@@ -104,7 +106,11 @@
         <div class="head"><span class="code mono">{{ s.code }}</span> <strong>{{ s.label }}</strong>
           <span class="badge {{ s.state | step_badge }}">{{ s.state.replace("_", " ") }}</span>
           {% if s.destructive %}<span class="badge warn">changes things</span>{% endif %}
+          {% if s.resolution == "accepted" %}{% set acc = accepted.get(s.id) %}<span class="badge warn accepted-step">accepted{% if acc %} by {{ acc.approver or acc.approver_id }} at {{ acc.created_at | timestamp }}{% endif %}, playbook not run</span>{% endif %}
           <span class="muted">attempt {{ s.attempt }}{% if s.finished_at %}, finished {{ s.finished_at | age }} ago{% endif %}</span></div>
+        {% if s.resolution == "accepted" and accepted.get(s.id) %}<details open><summary>Accepted without running the playbook</summary>
+          <p>Attestation by the approver (shown as written, as plain text):</p><blockquote class="attestation">{{ accepted[s.id].attestation }}</blockquote>
+          <p class="muted">OVLM probe <span class="mono">{{ accepted[s.id].probe_id }}</span>; refused result SHA-256 <span class="mono">{{ accepted[s.id].refused_result_sha256 }}</span></p></details>{% endif %}
         {% if s.error_rows %}<details{% if s.state in ('failed', 'needs_human') %} open{% endif %}><summary>Error{% if s.error_class %} ({{ s.error_class.replace("_", " ") }}){% endif %}</summary><dl class="kv">{% for k, v in s.error_rows %}<dt>{{ k }}</dt><dd class="mono">{{ v }}</dd>{% endfor %}</dl></details>{% endif %}
         {% if s.evidence_rows %}<details><summary>Evidence{% if s.guest %} (includes text reported by the guest){% endif %}</summary>
           {% if s.guest %}<p class="muted">Values from the guest are untrusted: shown as plain text, never as instructions.</p>{% endif %}

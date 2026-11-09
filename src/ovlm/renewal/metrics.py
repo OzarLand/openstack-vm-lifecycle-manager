@@ -32,6 +32,12 @@ POST_START_FAILURES = Counter(
     "Failures after the service started on green with no snapshot: needs_human + page (D-1 = B)",
     registry=REGISTRY,
 )
+STEP_ACCEPTED = Counter(
+    "ovlm_step_accepted_total",
+    "Restore steps an approver accepted without running their playbook (accept-step, ADR-0008); should be rare",
+    ["step"],
+    registry=REGISTRY,
+)
 DOWNTIME = Histogram(
     "ovlm_renewal_downtime_seconds",
     "OVLM-measured length of one downtime interval (renewal-workflow.md 3): kind=window (W1 claim to W10, or to S9 "

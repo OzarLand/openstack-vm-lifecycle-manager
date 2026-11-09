@@ -59,6 +59,8 @@ class GuestState:
     down: bool = False
     #: marker checksum the last quiesce recorded on this guest's root disk (survives reboots, like the real record)
     quiesce_record: str | None = None
+    #: the data device is mounted at another path than the profile's mount point (only the by-id probe sees it)
+    mounted_elsewhere: bool = False
 
 
 @dataclass
@@ -81,6 +83,11 @@ class FakeGuest:
     quiesce_calls: list[tuple[str, bool]] = field(default_factory=list)
     #: (phase, expected_marker) of every phase call that reached the guest: what OVLM asked the playbook to compare
     expected_markers: list[tuple[str, str | None]] = field(default_factory=list)
+    #: The pinned repository predates lab fix AA: its quiesce role does not know ``quiesce_allow_unmounted`` and
+    #: refuses "not mounted, no earlier quiesce record" on green too (lab finding D-8).
+    pre_aa_role: bool = False
+    #: (server id, data_volume_id) of every read-only probe: the fixed command list, never a mutation
+    probes: list[tuple[str, str | None]] = field(default_factory=list)
 
     def g(self, sid: str) -> GuestState:
         return self.state.setdefault(sid, GuestState())
@@ -90,7 +97,7 @@ class FakeGuest:
         for sid, s in snap["servers"].items():
             st = self.g(sid)
             if s["status"] == "SHUTOFF":
-                st.mounted = st.units = False
+                st.mounted = st.units = st.mounted_elsewhere = False
                 st.down = True
             elif s["status"] == "ACTIVE" and st.down:
                 st.down = False
@@ -133,7 +140,12 @@ class FakeGuest:
             self.hooks.pop(phase)()
         forced = self._fail(phase)
         if forced:
-            return PhaseResult(forced, f"injected {forced}")  # type: ignore[arg-type]
+            # an injected failure models the playbook's own failed result.json (it ran and reported this class)
+            return PhaseResult(
+                forced,  # type: ignore[arg-type]
+                f"injected {forced}",
+                reported=forced if forced != "ok" else None,
+            )
         if not self._active(target.server_id):
             return PhaseResult(
                 "retryable" if phase not in ("quiesce", "data_attach") else "needs_human",
@@ -155,12 +167,12 @@ class FakeGuest:
                 return PhaseResult(
                     "ok", "quiesced", {"marker_sha256": st.quiesce_record, "was_mounted": False}
                 )
-            if quiesce_allow_unmounted and target.role == "new":
+            if quiesce_allow_unmounted and target.role == "new" and not self.pre_aa_role:
                 return PhaseResult(
                     "ok", "nothing to quiesce", {"marker_sha256": None, "was_mounted": False}
                 )
             return PhaseResult("needs_human", "not mounted and no earlier quiesce record: state is unknown",
-                               {"error_kind": "planned"})  # fmt: skip
+                               {"error_kind": "planned"}, reported="needs_human")  # fmt: skip
         if phase == "data_attach":
             assert data_volume is not None and data_volume["first_use"] is False
             vol = self.cloud.snapshot()["volumes"][data_volume["id"]]
@@ -203,16 +215,31 @@ class FakeGuest:
         return HostKeyResult(True, "ok", accept or ("ssh-ed25519 AAAArotated",), "rotated")
 
     def probe(
-        self, run_id: str, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...]
-    ) -> GuestProbe:
+        self, run_id: str, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...],
+        data_volume_id: str | None = None,
+    ) -> GuestProbe:  # fmt: skip
         self.sync()
+        self.probes.append((target.server_id, data_volume_id))
         if not self._active(target.server_id):
             return GuestProbe(False)
         st = self.g(target.server_id)
+        device_mounted: bool | None = None
+        where: tuple[str, ...] = ()
+        if data_volume_id is not None:
+            vol = self.cloud.snapshot()["volumes"].get(data_volume_id) or {}
+            # no by-id device in the guest without the attachment: unknown
+            if target.server_id in (vol.get("attached_to") or []):
+                mounts = (
+                    (mount_point or "/srv/data", st.mounted),
+                    ("/mnt/other", st.mounted_elsewhere),
+                )
+                where = tuple(p for p, on in mounts if on)
+                device_mounted = bool(where)
         # Like production: no unit names, no ``systemctl is-active`` call, so the unit state is unknown (None).
         return GuestProbe(
-            True, st.mounted if mount_point else None, st.units if units else None, True, "running"
-        )
+            True, st.mounted if mount_point else None, st.units if units else None, True, "running",
+            {u: ("active" if st.units else "inactive") for u in units} if units else None, device_mounted, where,
+        )  # fmt: skip
 
     def external_probe(
         self, address: str, check: Mapping[str, Any], candidates: Mapping[str, str | None]
