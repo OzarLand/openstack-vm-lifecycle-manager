@@ -65,6 +65,86 @@ On one real OpenStack cloud, the best-case downtime of this window was measured 
 **Not in scope:** VMware connectors, Kubernetes, patch management, migrating any arbitrary application. OVLM targets
 Linux workloads whose configuration can be reproduced with Ansible.
 
+## 🏗️ Architecture
+
+One codebase, two long-running processes and PostgreSQL, run with Docker Compose. No broker, no Kubernetes.
+
+```mermaid
+flowchart LR
+    op["Operator / approver<br/>browser"] -->|"HTTPS (TLS proxy)"| api["OVLM api<br/>REST API + operator UI"]
+    api <--> db[("PostgreSQL<br/>state, runs, approvals, audit")]
+    worker["OVLM worker<br/>workflow engine"] <--> db
+    worker -->|"project connections<br/>read and write credentials"| os["OpenStack APIs<br/>Nova · Cinder · Neutron · Glance · Keystone"]
+    worker -->|"git clone at a pinned SHA,<br/>once per run"| repo["Ansible automation repo"]
+    worker -->|"Ansible over SSH"| vms["Managed VMs<br/>blue (old) and green (new)"]
+```
+
+The api never calls OpenStack, never touches a VM and cannot decrypt credentials: all outbound work runs in the
+worker, which talks to the api only through the database. Details in [architecture.md](docs/architecture.md) and the
+[security model](docs/security-model.md).
+
+## 🔁 How a renewal works
+
+Strategy `bluegreen_fip_v1`, step by step as in [renewal-workflow.md](docs/renewal-workflow.md). Every step probes,
+acts, then verifies, so a worker crash resumes safely.
+
+```mermaid
+flowchart TD
+    G1{"G1 plan approval"} --> B12
+    subgraph build["Build: no service impact"]
+        B12["B1–B2 re-check plan, mark resources as managed"] --> B35["B3–B5 create green, wait ACTIVE,<br/>pin its SSH host key"]
+        B35 --> B67["B6–B7 fetch automation at the pinned SHA,<br/>configure green (no data)"]
+        B67 --> B8["B8 re-check cutover preconditions"]
+    end
+    B8 --> G2{"G2 cutover approval (TOTP)<br/>and maintenance window open"}
+    G2 --> B9["B9 prove green ready"]
+    B9 --> W12
+    subgraph window["Downtime window"]
+        W12["W1–W2 stop the service and blue"] --> W35["W3–W5 detach data volume (optional W4 snapshot),<br/>attach it to green"]
+        W35 --> W68["W6–W8 mount, start service, health check on green"]
+        W68 --> W910["W9–W10 move floating IP, verify from outside"]
+    end
+    W910 --> R["R1–R2 retention: blue locked and stopped,<br/>revert possible"]
+    R --> G3{"G3 retirement approval<br/>(a second person)"}
+    G3 --> X1["X1 delete blue<br/>(data volume and floating IP kept)"]
+    window -. "rollback or automatic restore<br/>(closed list of cases)" .-> S["Restore S1–S10: volume and floating IP<br/>back to blue, green stopped and locked"]
+    R -. "revert" .-> S
+    window -. "any other failure, or after<br/>the service ran on green" .-> NH(["needs_human: the run parks with its locks<br/>until an operator acts"])
+    S -. "restore step fails" .-> NH
+```
+
+A failure late in the window, once the service may have written new data on green, parks the run for a human instead
+of rolling back blindly ([§4.1](docs/renewal-workflow.md#41-automatic-restore-in-the-window--closed-table-sec-r-30-sre-q5)).
+
+## 🖼️ Screenshots
+
+Taken from a local run of the real api and UI. The data is fictional: a simulated cloud from the integration tests,
+documentation IP ranges, made-up names. Timings in these screenshots mean nothing.
+
+**Inventory**: servers as seen by the last sync, with age, volumes and floating IPs.
+
+![Inventory page listing demo servers with age, volumes and floating IPs](docs/images/inventory.png)
+
+**Rebuild readiness**: rule-based checks with evidence and a recommendation for each one.
+
+![VM details page with the rebuild readiness assessment](docs/images/readiness.png)
+
+**Renewals**: deadlines from the policy, readiness, runs and plans.
+
+![Renewals page with upcoming renewals, runs and plans](docs/images/renewals.png)
+
+**A run waiting at G2**: green is built and configured; nothing has touched the service yet.
+
+![Renewal run with the build steps done, waiting for the cutover approval](docs/images/renewal-run-g2.png)
+
+**A completed run**: every step from B1 to X1, with the steps that change things marked.
+
+![Steps of a completed renewal run, B1 to X1](docs/images/renewal-run-completed.png)
+
+**Audit**: the append-only trail of one run.
+
+![Audit page filtered on one renewal run](docs/images/audit.png)
+
 ## 📊 Status
 
 Statuses follow [docs/agent-team.md](docs/agent-team.md#status-vocabulary-used-in-every-document): designed →
