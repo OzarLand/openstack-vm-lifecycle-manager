@@ -32,7 +32,9 @@ def test_empty_database_and_database_at_head_pass(script: ScriptDirectory) -> No
 def test_an_older_revision_lists_the_pending_migrations_in_order(script: ScriptDirectory) -> None:
     (f,) = migration_findings("renewal_0003", script)
     assert (f.level, f.code) == ("info", "migrations-pending")
-    assert f.message.endswith("renewal_0004, renewal_0005")
+    # renewal_0004 and renewal_0005 come next, in order; later releases append after them.
+    assert "renewal_0004, renewal_0005" in f.message
+    assert f.message.index("renewal_0004") < f.message.index("renewal_0005")
     assert exit_code([f]) == 0
 
 

@@ -19,9 +19,14 @@ from ovlm.auth.principal import Principal
 
 
 def consume_stepup(
-    db: Session, principal: Principal, stepup_id: UUID, *, action: str, target_id: str
-) -> UUID:
+    db: Session, principal: Principal, stepup_id: UUID, *, action: str, target_id: str,
+    signal_id: str | None = None,
+) -> UUID:  # fmt: skip
     """Spend the step-up or raise ``403 stepup-invalid``. Returns ``stepup_id`` for the caller to store.
+
+    ``signal_id``: the ``run_signal`` the caller inserts in this transaction for a confirmed run action; it is
+    recorded on the step-up (``consumed_by_signal``, write-once) and the worker accepts the signal only with a step-up
+    bound to it (review PMR-8, REN-10).
 
     Unknown, expired, already used, issued to another user or session, or bound to another action or target: all
     the same answer, so nothing is revealed about step-ups the caller does not own.
@@ -31,7 +36,7 @@ def consume_stepup(
         row = db.execute(
             text(
                 """
-                UPDATE stepup SET consumed_at = now()
+                UPDATE stepup SET consumed_at = now(), consumed_by_signal = CAST(:sig AS uuid)
                 WHERE id = :id AND user_id = :u AND session_id_hash = :s AND action = :a
                   AND target_id = :t AND consumed_at IS NULL AND expires_at > now()
                 RETURNING id
@@ -43,6 +48,7 @@ def consume_stepup(
                 "s": principal.session_hash,
                 "a": action,
                 "t": target_id,
+                "sig": signal_id,
             },
         ).one_or_none()
     if row is None:

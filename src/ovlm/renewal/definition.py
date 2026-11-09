@@ -682,8 +682,14 @@ class BlueGreenFipV1(WorkflowDefinition):
         """OVLM's own read-only probe of S2's postcondition (ADR-0008), for the run's parked step when accept-step
         may apply to it; ``None`` otherwise. Cloud: read calls through a client whose gate refuses every write.
         Guest: the fixed OVLM command list on green (never repository code). Network I/O: call it outside any
-        transaction (``prepare_signal``)."""
+        transaction (``prepare_signal``).
+
+        ``at`` is the database time read **before** the probe starts and ``duration_s`` how long it took (review
+        PMR-4): the freshness the approver and the worker judge is that of the oldest fact in it, not the time the
+        worker stored it."""
         with self.d.db.connect() as c:
+            taken_at = now_db(c)
+            t0 = time.monotonic()
             row = c.execute(
                 text("SELECT r.state AS run_state, r.phase, r.downtime_started_at, r.downtime_ended_at, s.id, "
                      "s.step_key, s.state, s.attempt, s.error FROM workflow_run r JOIN workflow_step s "
@@ -737,7 +743,8 @@ class BlueGreenFipV1(WorkflowDefinition):
         return {
             "id": new_id(), "step_id": str(row["id"]), "step_key": row["step_key"], "attempt": row["attempt"],
             "green_id": green_id, "volume_id": dv.get("volume_id"), "cloud": cloud, "guest": guest,
-            "checks": checks, "ok": all(x["ok"] for x in checks),
+            "checks": checks, "ok": all(x["ok"] for x in checks), "at": taken_at.isoformat(),
+            "duration_s": round(time.monotonic() - t0, 3),
         }  # fmt: skip
 
     def _bounded_guest_probe(
@@ -827,9 +834,11 @@ class BlueGreenFipV1(WorkflowDefinition):
             return "ignored: no gate is waiting"
         if sig.kind == "probe":
             truth = dict(ctx.prepared or {"api_reachable": False})
-            if isinstance(truth.get(accept.TRUTH_KEY), Mapping):
-                # stored with the DB time: the approver's form and the worker judge its age on the same clock
-                truth[accept.TRUTH_KEY] = {**truth[accept.TRUTH_KEY], "at": now_db(c).isoformat()}
+            shown = truth.get(accept.TRUTH_KEY)
+            if isinstance(shown, Mapping) and not shown.get("at"):
+                # PMR-4: the probe carries the DB time read before it started; a probe without one (an older
+                # worker's) gets the commit time, the latest it can be
+                truth[accept.TRUTH_KEY] = {**shown, "at": now_db(c).isoformat()}
             _write_truth(c, run.id, truth)
             if sig.actor_id is None:
                 return self._self_resolve(ctx, truth)
@@ -1127,7 +1136,10 @@ def _abort_actor(c: Connection, run_id: str) -> str | None:
 def _check_confirmation(
     c: Connection, sig: SignalView, run_id: str, expected_tc: str
 ) -> str | None:
-    """Re-validate the step-up (``run.<kind>`` on this run, consumed, interactive, of the actor) and the TC."""
+    """Re-validate the step-up (``run.<kind>`` on this run, consumed **by this signal**, interactive, of the actor)
+    and the TC. The api spends the step-up and inserts the signal in one transaction and records the signal's id on
+    the step-up (``consumed_by_signal``, write-once by trigger): a second signal replaying a spent ``stepup_id`` is
+    refused (review PMR-8 for ``accept_step`` and ``reprepare_automation``, REN-10 for every confirmed kind)."""
     import hmac
 
     typed = " ".join(str(sig.payload.get("typed_confirmation") or "").split())
@@ -1138,7 +1150,8 @@ def _check_confirmation(
         return "no step-up"
     row = c.execute(
         text(
-            "SELECT user_id, action, target_id, auth_method, created_at, consumed_at FROM stepup WHERE id = :i"
+            "SELECT user_id, action, target_id, auth_method, created_at, consumed_at, consumed_by_signal "
+            "FROM stepup WHERE id = :i"
         ),
         {"i": sid},
     ).first()
@@ -1151,6 +1164,8 @@ def _check_confirmation(
         and row.auth_method == INTERACTIVE_AUTH
         and row.consumed_at is not None
         and row.created_at <= row.consumed_at <= row.created_at + STEPUP_VALIDITY
+        and row.consumed_by_signal is not None
+        and str(row.consumed_by_signal) == str(sig.id)
     )
     return None if ok else "step-up evidence invalid"
 

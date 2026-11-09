@@ -1,0 +1,19 @@
+{# OVLM's accept probe on the accept-step form (review PMR-4). Polled in place, so a Re-probe never leaves the page: the
+   attestation typed so far stays in the form. No typed field inside; the probe id the form sends lives here, next to
+   the probe it names, and is swapped with it. #}
+<section class="panel" aria-labelledby="probe-h" id="accept-probe" hx-get="/renewals/runs/{{ run.id }}/actions/accept-step/probe" hx-trigger="every 5s" hx-swap="outerHTML">
+  <h2 id="probe-h">OVLM's own probe of the postcondition
+    {% if accept.available %}<span class="badge ok">met</span>{% else %}<span class="badge err">not usable</span>{% endif %}</h2>
+  {% if accept.probe %}
+    <p class="muted">Probe <span class="mono">{{ accept.probe_id }}</span>, taken {{ accept.probe_at | timestamp }}{% if accept.probe_duration is not none %} (the probe took {{ accept.probe_duration }} s){% endif %}. Read-only: OpenStack read calls and OVLM's fixed command list on the new VM, never repository code. It must be at most 60 s old, counted from when it started, when the worker applies your decision, and the worker probes again: any change refuses the request.</p>
+    <table><thead><tr><th scope="col">Check</th><th scope="col">Result</th><th scope="col">Detail</th></tr></thead>
+    <tbody>{% for name, ok, detail in accept.checks %}<tr><td>{{ name.replace("_", " ") }}</td><td><span class="badge {{ 'ok' if ok else 'err' }}">{{ "met" if ok else "not met" }}</span></td><td class="mono">{{ detail }}</td></tr>{% endfor %}</tbody></table>
+  {% else %}<p class="empty">No probe yet.</p>{% endif %}
+  {% if not accept.available and accept.why %}<p role="alert" class="banner warn">{{ accept.why }}</p>{% endif %}
+  {% if accept.probe_pending %}<p role="status" class="banner info">A probe is pending: this panel shows the new one as soon as the worker has stored it.</p>{% endif %}
+  {% if not is_token %}
+  <input type="hidden" name="probe_id" value="{{ accept.probe_id }}" form="action-form">
+  <p><button type="submit" form="action-form" formaction="/renewals/runs/{{ run.id }}/actions/accept-step/reprobe" formnovalidate>Re-probe</button>
+    <span class="muted">stays on this page and keeps what you typed; the new probe appears here</span></p>
+  {% endif %}
+</section>

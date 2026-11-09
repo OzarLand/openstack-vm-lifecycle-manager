@@ -39,6 +39,15 @@
             {% for key, label in host_key_sources.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
           </select>
         </label>
+        {% if who.totp_confirmed %}
+        <p class="muted">You have TOTP enrolled: confirm with your password and a current code (a step-up for this VM only).</p>
+        <label>Password
+          <input type="password" name="password" required autocomplete="current-password">
+        </label>
+        <label>Authenticator code
+          <input name="totp_code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required>
+        </label>
+        {% endif %}
         <button type="submit">Confirm host key</button>
       </form>
       {% endif %}

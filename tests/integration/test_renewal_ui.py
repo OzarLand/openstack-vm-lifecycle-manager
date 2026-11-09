@@ -992,7 +992,10 @@ def test_accept_step_is_offered_to_an_approver_with_the_probe_and_an_escaped_ref
         "<b>not mounted</b>" not in t and "&lt;b&gt;not mounted&lt;/b&gt;" in t
     )  # guest text escaped
     assert 'name="attestation"' in t and "app01-ovlm-new" in t and "00abcd" in t  # TC of green
-    assert forms_carry_csrf(t, w.csrf(w.ap)) == 2  # re-probe and confirm
+    assert (
+        forms_carry_csrf(t, w.csrf(w.ap)) == 1
+    )  # confirm (Re-probe submits it elsewhere, review PMR-4)
+    assert 'formaction="/renewals/runs/' + run + '/actions/accept-step/reprobe"' in t
     url = f"/renewals/runs/{run}/actions/accept-step"
     base = {"typed_confirmation": "app01-ovlm-new 00abcd", "step_id": s2, "probe_id": probe_id}
     short = w.post(
@@ -1020,6 +1023,69 @@ def test_accept_step_is_offered_to_an_approver_with_the_probe_and_an_escaped_ref
     # the requester (who created the plan and started the run) cannot use it: not an approver here, and never SoD
     assert w.post(w.op, url, {**base, "idempotency_key": "acc-key-0004", "attestation": attestation,
                               "password": PASSWORD}).status_code == 403  # fmt: skip
+
+
+def test_pmr4_reprobe_keeps_the_attestation_and_the_probe_refreshes_in_place(env: Env) -> None:
+    """Review PMR-4 (b): Re-probe used to post a separate form and redirect to the run page, losing the attestation
+    typed so far. It now submits the accept form to its own endpoint, which asks the worker for a probe and returns
+    the form with the attestation kept (never the password); the probe panel is polled in place and carries the probe
+    id the form sends."""
+    w = World(env)
+    run, s2, probe_id = _parked_s2(w)
+    url = f"/renewals/runs/{run}/actions/accept-step"
+    form = w.ap.get(url).text
+    assert 'id="accept-probe"' in form and f'hx-get="{url}/probe"' in form
+    assert f'name="probe_id" value="{probe_id}" form="action-form"' in form
+    draft = "Checked on green by hand: lsblk <b>shows</b> the device mounted nowhere"
+    r = w.post(w.ap, f"{url}/reprobe", {"attestation": draft, "typed_confirmation": "app01-ovlm-new 00abcd",
+                                        "step_id": s2, "probe_id": probe_id, "idempotency_key": "k-1",
+                                        "password": PASSWORD, "totp_code": "123456"})  # fmt: skip
+    assert r.status_code == 200, r.text
+    assert "Probe requested" in r.text
+    # the draft comes back escaped in the textarea; the password and the code never do
+    assert (
+        "Checked on green by hand: lsblk &lt;b&gt;shows&lt;/b&gt;" in r.text
+        and "<b>shows</b>" not in r.text
+    )
+    assert PASSWORD not in r.text and 'value="123456"' not in r.text
+    [(kind, actor)] = env.sql("SELECT kind, actor_id FROM run_signal WHERE run_id = :r", r=run)
+    assert kind == "probe" and str(actor) == w.ap.get("/api/v1/session").json()["user_id"]
+    # the panel says a probe is pending until the worker stored it; a second click is refused, draft still kept
+    panel = w.ap.get(f"{url}/probe")
+    assert (
+        panel.status_code == 200
+        and "A probe is pending" in panel.text
+        and "<html" not in panel.text
+    )
+    again = w.post(w.ap, f"{url}/reprobe", {"attestation": draft})
+    assert (
+        again.status_code == 409
+        and "pending" in again.text
+        and "lsblk &lt;b&gt;shows" in again.text
+    )
+    # the worker stores a new probe: the polled panel shows it, with its id for the form
+    new_probe = new_id()
+    truth = env.sql("SELECT current_truth FROM workflow_run WHERE id = :r", r=run)[0][0]
+    truth["accept_probe"] |= {
+        "id": new_probe,
+        "at": datetime.now(UTC).isoformat(),
+        "duration_s": 2.5,
+    }
+    env.sql(
+        "UPDATE workflow_run SET current_truth = CAST(:t AS jsonb) WHERE id = :r",
+        t=json.dumps(truth),
+        r=run,
+    )
+    env.sql(
+        "UPDATE run_signal SET consumed_at = now(), outcome = 'current truth refreshed' WHERE run_id = :r",
+        r=run,
+    )
+    panel = w.ap.get(f"{url}/probe").text
+    assert f'name="probe_id" value="{new_probe}" form="action-form"' in panel
+    assert "the probe took 2.5 s" in panel and "A probe is pending" not in panel
+    # a user who cannot see the run gets a 404 and sends nothing
+    assert w.post(w.other, f"{url}/reprobe", {"attestation": draft}).status_code == 404
+    assert len(env.sql("SELECT id FROM run_signal WHERE run_id = :r", r=run)) == 1
 
 
 @pytest.mark.parametrize("case", ["no_probe", "stale", "unmet"])

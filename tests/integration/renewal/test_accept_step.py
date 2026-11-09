@@ -418,6 +418,92 @@ def test_worker_refuses_when_the_state_changed_since_the_probe_shown(world: Worl
     _refused(w, sig, "probe-mismatch")
 
 
+def test_pmr4_the_shown_probe_is_timestamped_when_taken_not_when_stored(world: World) -> None:
+    """Review PMR-4 (a): the probe's ``at`` was the commit time of the probe signal, after the cloud reads and the
+    SSH commands; the approver read a probe older than its timestamp by the probe's duration. ``at`` is now the
+    database time read before the probe starts, and its duration is stored next to it."""
+    w = world
+    park_s2(w)
+    w.guest.probe_hang = 1.5  # a slow green: each guest probe takes 1.5 s (well under the budget)
+    sig = w.signal("probe", user="ap2")
+    w.drive()
+    assert outcome(w, sig) == "current truth refreshed"
+    p = w.run()["current_truth"]["accept_probe"]
+    [stored] = w.q("SELECT consumed_at FROM run_signal WHERE id = :i", i=sig)
+    taken = datetime.fromisoformat(p["at"])
+    assert (stored["consumed_at"] - taken).total_seconds() >= 1.4, (taken, stored["consumed_at"])
+    assert p["duration_s"] >= 1.4, p
+    # its age is judged from when it started: aged by the probe's duration already
+    with Session(w.api) as s:
+        now = s.execute(text("SELECT now()")).scalar_one()
+    from ovlm.renewal import accept
+
+    age = accept.probe_age(p, now)
+    assert age is not None and age >= 1.4
+
+
+def test_pmr8_a_replayed_stepup_does_not_authorize_another_accept_signal(world: World) -> None:
+    """Review PMR-8 (REN-10 for the new kinds): the worker accepts an ``accept_step`` signal only with a step-up spent
+    by **that** signal. A second signal carrying the step-up of an earlier one (a replay only a compromised api could
+    write: the api's consume is single-use) is refused, and so is a step-up spent before the binding existed."""
+    w = world
+    park_s2(w)
+    probe(w)
+    # the approver's first request is refused (too short an attestation): its step-up is spent by that signal
+    first = worker_accept(w, attestation="looks fine")
+    _refused(w, first, "attestation-invalid")
+    [payload] = [r["payload"] for r in w.q("SELECT payload FROM run_signal WHERE id = :i", i=first)]
+    spent = payload["stepup_id"]
+    [bound] = w.q("SELECT consumed_by_signal FROM stepup WHERE id = :i", i=spent)
+    assert str(bound["consumed_by_signal"]) == first
+    # replayed on a new, otherwise valid signal: refused, nothing accepted
+    replay = worker_accept(w, stepup_id=spent)
+    _refused(w, replay, "stepup-invalid")
+    # a consumed step-up bound to no signal (spent before the binding, or by another path): refused too
+    unbound = w.stepup("ap2", "run.accept_step", w.run_id)
+    _refused(w, worker_accept(w, stepup_id=unbound), "stepup-invalid")
+    assert not any(a["outcome"] == "accepted" for a in acceptances(w))
+    # the same request with its own step-up goes through
+    ok = worker_accept(w)
+    w.drive()
+    assert any(a["outcome"] == "accepted" and str(a["signal_id"]) == ok for a in acceptances(w)), (
+        outcome(w, ok)
+    )
+
+
+def test_pmr8_the_api_binds_the_stepup_to_its_signal_and_cannot_rebind_it(world: World) -> None:
+    w = world
+    park_s2(w)
+    probe(w)
+    api_accept(w)
+    [sig] = w.q(
+        "SELECT id, payload FROM run_signal WHERE run_id = :r AND kind = 'accept_step'", r=w.run_id
+    )
+    [step] = w.q(
+        "SELECT consumed_at, consumed_by_signal FROM stepup WHERE id = :i",
+        i=sig["payload"]["stepup_id"],
+    )
+    assert step["consumed_at"] is not None and str(step["consumed_by_signal"]) == str(sig["id"])
+    # write-once, whoever writes: the api role (which holds UPDATE on stepup) and the owner cannot rebind or re-arm
+    for engine in (w.api, w.admin):
+        for sql in (
+            "UPDATE stepup SET consumed_by_signal = gen_random_uuid() WHERE id = :i",
+            "UPDATE stepup SET consumed_by_signal = NULL WHERE id = :i",
+            "UPDATE stepup SET consumed_at = NULL WHERE id = :i",
+        ):
+            with pytest.raises(sqlalchemy.exc.DBAPIError), engine.begin() as c:
+                c.execute(text(sql), {"i": sig["payload"]["stepup_id"]})
+    # a step-up binds at most one signal
+    other = w.stepup("ap3", "run.accept_step", w.run_id, consumed=False)
+    with pytest.raises(sqlalchemy.exc.IntegrityError), w.api.begin() as c:
+        c.execute(
+            text("UPDATE stepup SET consumed_at = now(), consumed_by_signal = :s WHERE id = :i"),
+            {"s": str(sig["id"]), "i": other},
+        )
+    w.drive()
+    assert any(a["outcome"] == "accepted" for a in acceptances(w)), explain(w)
+
+
 def test_refused_when_s2_parked_on_an_interrupted_data_phase(world: World) -> None:
     """Maintainer decision Q3: S2 parked on data_phase_interrupted keeps retry-step as its exit."""
     w = world
