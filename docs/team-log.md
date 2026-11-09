@@ -1072,3 +1072,29 @@ the new "no root process in the worker" check:
   - `destroy-lab.sh` left 0 `ovlm-*` resources. The floating IPs stay allocated.
   - Guard: PASS against the first baseline.
 - In total the lab found 24 defects that CI could not see. They are listed in the [MVP report](mvp-report.md).
+
+## Production hardening after the MVP, then pause — 2026-11-09
+
+The maintainer asked to resume the roadmap after the MVP. The roadmap got a post-MVP plan (P0 to P3, milestones M7
+production hardening and M8 production pilot) in #42.
+
+- **P0, all closed:**
+  - checkout release (#43);
+  - `accept-step` with ADR-0008, accepted by the maintainer: S2 only, one approver, playbook refusals only (#45, #47);
+  - every downtime interval recorded (#44);
+  - result-field contract test, which found defect AD (#46);
+  - W6 label check (#49).
+- **Engine defect:** found behind intermittent CI failures. An attempt that left `execute` by an exception could still
+  renew its lease (#48).
+- **P1-6 independent review (#50):** 10 findings, no authorization bypass. Fixed: PMR-1, -2, -3, -6 (#51) and PMR-4,
+  -8 (#54).
+- **P1-2 paging (#52), P1-3 backup/restore/upgrade (#53), P1-4 security follow-ups (#54).** P1-3's tests found two real
+  restore defects: lost database grants and revoked sessions coming back.
+- **P1-7 real-cloud install guide (#55).** Writing it found five install gaps, now P1-8 to P1-12.
+- **P1-9 production Compose file (#56) and P1-8 timeout defaults (#57).** P1-8 lowered the runner timeout of the four
+  outage/restore Ansible phases from 300 s to 120 s, so the default worst case fits a 1 h Keystone token.
+- **Cleanup:**
+  - README diagrams and screenshots (#41);
+  - the lab's floating IPs released;
+  - a branch cleanup script handed to the maintainer, because this session cannot delete branches.
+- **Paused** at the maintainer's request. The state for resuming is in [HANDOFF.md](HANDOFF.md).

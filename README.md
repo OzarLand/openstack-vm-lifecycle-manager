@@ -161,10 +161,11 @@ implemented → unit tested → integration tested → lab validated → product
 | Encrypted credential store and project connections | ✅ Integration tested, reviewed, fixes verified (one Low item open) |
 | End-to-end renewal on Felcloud (a real OpenStack cloud) | ✅ Lab validated: primary scenario ACC-01d (build, cutover, retirement) |
 | Failure scenarios on Felcloud: configure failure (LAB-04), worker kill in the window (LAB-01), operator rollback after the cutover | ✅ Lab validated (LAB-01 after fixes Z, AA, AB); other failure scenarios integration tested only |
-| Production validated | ⬜ No |
+| Production hardening after the MVP (milestone M7) | 🟡 In progress: all P0 items done; paging, backup/restore/upgrade, security follow-ups, independent review fixes, real-cloud install guide, production Compose file and timeout defaults merged; setup UI/CLI (P1-10), P1-11, P1-12 and two lab items to do |
+| Production validated | ⬜ No (milestone M8: a pilot on a real service) |
 
-The detailed backlog is in [docs/roadmap.md](docs/roadmap.md), and the day-by-day record of the team's work is in
-[docs/team-log.md](docs/team-log.md).
+The detailed backlog is in [docs/roadmap.md](docs/roadmap.md), the day-by-day record of the team's work is in
+[docs/team-log.md](docs/team-log.md), and where to resume is in [docs/HANDOFF.md](docs/HANDOFF.md).
 
 ## 🚀 Try it locally (developers)
 
