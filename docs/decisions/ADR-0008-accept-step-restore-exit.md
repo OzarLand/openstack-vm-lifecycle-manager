@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Proposed — needs maintainer decision** (open questions at the end). Not implemented. |
+| Status | **Accepted by the maintainer, 2026-11-09** (decisions at the end). Implementation: roadmap P0-2. |
 | Date | 2026-11-09 |
 | Deciders | Maintainer (decision); Agent 2 (Chief Architect, workflow and API); Agent 7 (SRE) and Agent 8 (Security) review, as for every state-changing operation |
 | Evidence | D-8 and D-8b ([mvp-report.md](../mvp-report.md) §4), LAB-01 first attempt, run `01a1b9e7`, Felcloud, 2026-11-08 (**LAB-OBSERVED**). Behaviour of the existing signals: `src/ovlm/workflow/engine.py` (retry-step, mark-resolved, reprepare-automation all re-queue the step) and `src/ovlm/renewal/definition.py` (**SOURCE-VERIFIED**) |
@@ -115,10 +115,11 @@ Notes:
 - **A** does not let a human override OVLM's own checks. It lets OVLM's own read-only checks, confirmed by an approver,
   replace a repository playbook that refused. The human attests; OVLM verifies; neither alone is enough.
 
-## Decision (proposed)
+## Decision
 
 **A, `accept-step`, for restore steps only, plus C as the normal repository fix and D only for steps outside the
-allowlist.** B and E are rejected for now (open question Q5 for B).
+allowlist.** B and E are rejected. The allowlist is **S2 only**, one approver, playbook refusals only (maintainer
+decisions below).
 
 ### Guard rails
 
@@ -129,10 +130,9 @@ allowlist.** B and E are rejected for now (open question Q5 for B).
 | Typed confirmation | Name + last 6 characters of the ID of the VM the step targets: green for S2, blue for S7 |
 | Attestation | Free text, 20 to 2,000 characters, required: what the human checked and why the refusal is wrong. Stored as data, displayed escaped |
 | Phase | `restore` (effective phase) only. Never in build, window, retained or retire: there the exit is rollback or revert |
-| Steps | Allowlist in code: **S2 `quiesce_green`**; **S7 `recover_old_service`** pending Q2. Never W1, W6 (marker proof of the data), any step that moves the volume or the FIP (S4, S5, S8), any OpenStack step (S1, S3, S6, S10) |
-| Parked reason | The step is in `needs_human` because **its playbook ran and refused** (phase result `needs_human` / `fatal`, or exhausted retries on the playbook's failure). Refused for `automation_checkout_lost` / `_unverifiable` (use reprepare-automation), `data_phase_interrupted` (pending Q3), `approval_evidence_invalid`, ownership violations, lock or fence errors, `api_unreachable` |
+| Steps | Allowlist in code: **S2 `quiesce_green`**; S7 is **not** in the allowlist (maintainer decision Q2; may be revisited with lab evidence). Never W1, W6 (marker proof of the data), any step that moves the volume or the FIP (S4, S5, S8), any OpenStack step (S1, S3, S6, S10) |
+| Parked reason | The step is in `needs_human` because **its playbook ran and refused** (phase result `needs_human` / `fatal`, or exhausted retries on the playbook's failure). Refused for `automation_checkout_lost` / `_unverifiable` (use reprepare-automation), `data_phase_interrupted` (maintainer decision Q3: retry-step is the exit), `approval_evidence_invalid`, ownership violations, lock or fence errors, `api_unreachable` |
 | OVLM postcondition, S2 | Cloud (write client, read calls): green `ACTIVE`, no `task_state`; data volume `in-use` with exactly one attachment, on green. Guest (fixed read-only probe on green): reachable, data device (by-id, 20-char serial prefix) mounted nowhere, `<mount_point>` not a mount, every unit in `service_units` `inactive` or `failed` |
-| OVLM postcondition, S7 (if Q2 = yes) | Cloud: blue `ACTIVE`, volume attached to blue only. Guest on blue: data device mounted at `<mount_point>`, every unit `active`. S9's external probe (identity must equal blue) still runs after; accept never skips S9 |
 | Freshness | The worker runs the probe in `prepare_signal` (outside the transaction, as the `probe` signal does) and refuses if it is older than 60 s at commit or differs from the probe shown to the approver (the request carries its `probe_id`) |
 | Once | At most one accept per (run, step). Unique row in `step_acceptance`. One pending accept per run |
 | Effect | The step is closed `done` with `resolution = accepted`, the playbook is **not run**. Compare-and-set on `(state = needs_human, attempt)`; the fencing token of the parked attempt is retired, so a late outcome from it is discarded. The run continues with the next restore step (S3 after S2), which probes as usual |
@@ -199,7 +199,9 @@ allowlist.** B and E are rejected for now (open question Q5 for B).
 - Roadmap P0-2 acceptance stays as written: ADR accepted by SRE and security reviewers; T4 converges without a manual
   guest action.
 
-## Open questions for the maintainer
+## Maintainer decisions (2026-11-09)
+
+The questions as asked, then the answers:
 
 1. **Choice**: accept A (accept-step) with C and D as complements, and reject B and E for now?
 2. **S7**: include `recover_old_service` in the allowlist (S9's external probe still checks blue afterwards), or S2 only
@@ -214,3 +216,15 @@ allowlist.** B and E are rejected for now (open question Q5 for B).
    there.
 7. **Probe trust**: accept that a guest-reported "not mounted" (OVLM's own command) unblocks S3/S4, at the same trust
    level as the playbook result today?
+
+Answers:
+
+1. **A accepted**, with C (the normal repository fix) and D (runbook for steps outside the allowlist) as complements.
+   B and E rejected.
+2. **S2 only.** S7 stays out; it can be revisited with lab evidence.
+3. **Playbook refusals only.** An S2 parked on `data_phase_interrupted` keeps retry-step as its exit.
+4. **One approver** (not the requester), with step-up, typed confirmation and attestation; same level as
+   reprepare-automation.
+5. B is not pursued (not on the V1 list).
+6. Confirmed: no window step ever gets accept-step; rollback is the exit there.
+7. Accepted: OVLM's own read-only guest probe is trusted at the same level as a playbook result today.
