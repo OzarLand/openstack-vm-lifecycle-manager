@@ -453,6 +453,9 @@ class HostKeyConfirm(BaseModel):
     fingerprint: str = Field(min_length=1, max_length=100)
     #: Where the operator read the fingerprint on the VM (review IS-2); recorded in the audit row.
     source: Literal["console", "ssh-keygen"] | None = None
+    #: Required when the operator has TOTP enrolled: a password+TOTP step-up for ``host_key.confirm`` and this VM
+    #: (review IS-2, roadmap SF-10).
+    stepup_id: UUID | None = None
 
 
 def _vm_project(session: Session, vm_id: UUID) -> Any:
@@ -485,10 +488,12 @@ def confirm_host_key(
     assert who.user_id is not None  # noqa: S101 - human session (matrix: human_only)
     result = host_keys.confirm(session, vm_id, body.fingerprint.strip(), actor_id=who.user_id)
     if not result["already_confirmed"]:
+        # the step-up is spent with the UPDATE above: a refusal rolls both back (review IS-2, SF-10)
+        stepup = host_keys.spend_stepup(session, who, vm_id, body.stepup_id)
         _audit(session, who, "managed_vm.host_key_confirm", "managed_vm_host_key", str(vm_id),
                scope=project_scope_of(_vm_project(session, vm_id)),
                after={"managed_vm_id": str(vm_id), "fingerprint": result["fingerprint"],
-                      "source": body.source})  # fmt: skip
+                      "source": body.source, **stepup})  # fmt: skip
     session.commit()
     vm = _found(registry.get_managed_vm(session, vm_id), "managed-vm-not-found", "Managed VM")
     return {**vm, "already_confirmed": result["already_confirmed"]}

@@ -75,10 +75,13 @@ def send_signal(
     actor_id: str | None = None,
     approval_id: str | None = None,
     payload: Mapping[str, Any] | None = None,
+    signal_id: str | None = None,
 ) -> str:
+    """Insert a ``run_signal``. ``signal_id``: an id chosen by the caller beforehand (a step-up spent in the same
+    transaction names it, review PMR-8); a new one otherwise."""
     if kind not in SIGNAL_KINDS:
         raise ValueError(f"unknown signal kind {kind!r}")
-    sig_id = new_id()
+    sig_id = signal_id or new_id()
     conn.execute(
         text(
             "INSERT INTO run_signal (id, run_id, kind, actor_id, approval_id, payload) "

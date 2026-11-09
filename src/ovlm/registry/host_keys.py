@@ -12,6 +12,8 @@ SHA-256 fingerprint equals ``managed_vm.ssh_host_key_fingerprint`` **confirmed**
    ``-----BEGIN SSH HOST KEY FINGERPRINTS-----`` block, or ``ssh-keygen -lf`` run on the VM) and confirms it:
    ``POST /managed-vms/{id}/host-key/confirm {"fingerprint": "SHA256:..."}``, a human session only, audited. The
    confirmation names the fingerprint, so a key that changed after the operator looked at it is never confirmed.
+   An operator who has TOTP enrolled also presents a password+TOTP step-up bound to :data:`STEPUP_ACTION` and the
+   managed VM id, spent in the confirmation's transaction (review IS-2, roadmap SF-10; :func:`spend_stepup`).
 
 A re-scan never replaces a **confirmed** fingerprint: a different key then fails the scan (the VM was rebuilt or
 something answers in its place); the operator unregisters and registers the VM again to start over.
@@ -30,6 +32,9 @@ from sqlalchemy.orm import Session
 
 from ovlm import audit
 from ovlm.auth.dbutil import rowcount
+from ovlm.auth.errors import ProblemError
+from ovlm.auth.principal import Principal
+from ovlm.auth.stepup import consume_stepup
 from ovlm.registry.errors import DomainError
 from ovlm.workflow.requests import request_run
 
@@ -49,8 +54,13 @@ audit.register_entity(
         "floating_ip_id",
         "source",
         "via",
+        "stepup_id",
+        "auth_method",
     ],
 )
+#: The step-up action of a host-key confirmation; its target is the managed VM id (review IS-2, SF-10).
+STEPUP_ACTION = "host_key.confirm"
+_STEPUP_AUTH = "password+totp"
 
 #: OpenSSH's SHA-256 fingerprint form: ``SHA256:`` + 43 characters of unpadded base64.
 FINGERPRINT = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
@@ -152,3 +162,37 @@ def confirm(
                           "The scanned fingerprint changed while you were confirming it.",
                           "Read the VM again and compare the new fingerprint.")  # fmt: skip
     return {"fingerprint": fingerprint, "already_confirmed": False}
+
+
+def stepup_required(who: Principal) -> bool:
+    """Whether the confirmation needs a step-up: the confirming user has TOTP enrolled (review IS-2, SF-10).
+
+    Operators have no mandatory TOTP (security-model.md 2.1); one without it confirms with the session alone, as
+    before, and the audit row says so (``auth_method`` of the session, no ``stepup_id``). Approvers and admins, and any
+    operator who enrolled, always present password + TOTP for this action and this VM."""
+    return bool(who.is_human and who.totp_confirmed)
+
+
+def spend_stepup(
+    session: Session, who: Principal, managed_vm_id: UUID, stepup_id: UUID | None
+) -> dict[str, Any]:
+    """Spend the confirmation's step-up in the caller's transaction (with the ``UPDATE`` of :func:`confirm`), or
+    raise ``403``. Returns the audit fields (``stepup_id``, ``auth_method``). A step-up is single-use and bound to
+    this session, :data:`STEPUP_ACTION` and this VM; it must be password+TOTP."""
+    if not stepup_required(who):
+        return {"stepup_id": None, "auth_method": who.auth_method}
+    if stepup_id is None:
+        raise ProblemError(
+            403, "stepup-required", "Step-up authentication required",
+            "You have TOTP enrolled: confirming a host key needs your password and a TOTP code for this VM.",
+            next_action=f"POST /api/v1/session/reauth with action {STEPUP_ACTION} and target_id {managed_vm_id}, "
+            "then send stepup_id with the confirmation.",
+        )  # fmt: skip
+    consume_stepup(session, who, stepup_id, action=STEPUP_ACTION, target_id=str(managed_vm_id))
+    method = session.execute(
+        text("SELECT auth_method FROM stepup WHERE id = :i"), {"i": stepup_id}
+    ).scalar()
+    if method != _STEPUP_AUTH:
+        raise ProblemError(403, "stepup-invalid", "Step-up authentication required",
+                           "Confirming a host key needs a password + TOTP step-up.")  # fmt: skip
+    return {"stepup_id": str(stepup_id), "auth_method": _STEPUP_AUTH}

@@ -193,6 +193,34 @@ def test_refused_for_the_requester_without_stepup_and_for_a_non_approver(
     assert w.open_step()["state"] == "needs_human"
 
 
+def test_pmr8_a_replayed_stepup_does_not_authorize_a_reclone(lab: Lab) -> None:
+    """Review PMR-8 (REN-10 for the new kinds): a ``reprepare_automation`` signal carrying the step-up another signal
+    spent is refused; the step-up must be consumed by this very signal."""
+    w = lab.w
+    w.start()
+    w.drive(until="await_cutover")
+    early = (
+        lab.signal()
+    )  # nothing parked yet: refused by the worker, its step-up spent by that signal
+    w.drive(until="await_cutover")
+    assert lab.outcome(early).startswith("refused: no step in needs_human"), lab.outcome(early)
+    spent = w.q("SELECT payload FROM run_signal WHERE id = :i", i=early)[0]["payload"]["stepup_id"]
+    w.approve("cutover")
+    w.drive(until="data_attach_green")
+    lab.runner.lose_checkouts()
+    lab.restart()
+    w.drive()
+    assert w.open_step()["error"]["reason"] == "automation_checkout_lost", explain(w)
+
+    replay = w.signal(KIND, user="ap2", tc=w.blue_tc(), stepup_id=spent)
+    w.drive()
+    assert lab.outcome(replay) == "refused: step-up evidence invalid", lab.outcome(replay)
+    assert lab.authorizations() == [] and w.open_step()["state"] == "needs_human"
+    ok = lab.signal()
+    w.drive()
+    assert "authorized once" in lab.outcome(ok), lab.outcome(ok)
+
+
 def test_refused_when_the_run_is_not_stopped_on_a_lost_checkout(lab: Lab) -> None:
     w = lab.w
     w.start()

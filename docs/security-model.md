@@ -99,7 +99,11 @@ SOURCE-VERIFIED, DU = DOCUMENTED-UNVERIFIED, AS = ASSUMPTION are kept), [automat
   session id at login and on privilege change. Idle timeout 30 min, absolute 12 h; logout deletes the row.
 - **Step-up re-auth (TOTP)**: approvals and destructive confirmations require a TOTP step-up. A step-up is **single-use**,
   valid **5 minutes**, and **bound to one action type and one target** (and the session); it is consumed by exactly that
-  approval or confirmation and cannot be replayed for another action or target (SEC-R-10, M9).
+  approval or confirmation and cannot be replayed for another action or target (SEC-R-10, M9). A run action's step-up
+  also names the `run_signal` that spent it (`consumed_by_signal`, write-once by trigger), and the worker accepts the
+  signal only with a step-up spent by that signal, so a spent step-up cannot be replayed on a second signal of the same
+  kind and run either (review PMR-8, REN-10; renewal-workflow.md §2). Residual: a compromised api can still insert a
+  step-up row of its own (it issues them), which the out-of-band checks of §3.1 do not cover either.
 - CSRF: per-session synchronizer token, sent by HTMX via `hx-headers` (`X-CSRF-Token`) and in form fields; every
   unsafe method checks the token **and** the `Origin`/`Referer` against the configured external URL. Bearer-token API
   calls carry no cookie and are exempt.
@@ -291,6 +295,7 @@ TLS verification to OpenStack is always on; a custom CA bundle is configurable; 
 | Write path | Admin submits secret over TLS → api seals it with the public key → stores ciphertext. api cannot decrypt. |
 | Read path | Worker unwraps in memory for one step; never written to disk except the run-dir files of automation-contract §5. |
 | Rotation (KEK) | Admin adds new key pair with new `kek_id` → worker job re-wraps all DEKs (secrets themselves unchanged) → old private key removed after a verified pass (`ovlm kek status` exits 0). Audited. Secrets in the retired format `ovlm-env-v1` (rejected credentials kept as metadata) are never decrypted, so they are neither re-wrapped nor counted as "in use": they cannot keep an old key alive (review N-3, SF-4; `kek status` reports their count). Secret rotation (e.g. app credential) is separate (§4.4). |
+| Key agreement (api/worker) | The worker announces the ids of the keys it holds (`kek_key`, review CS-5); the api seals only to an announced id (upload refused with `503 credential-store-key-unknown` otherwise, CS-10). `/readyz` compares the same fingerprints: when the worker has announced keys and the api's public key (`kek.public_key_file`) is not among them, the api is **not ready** (`checks.kek`, 503). Only fingerprints are compared (the key id is 16 hex characters of SHA-256 over the public key); the unauthenticated response names no key id, the api log does (once per change). No announcement yet (worker not started, no KEK) and a held but non-current api key (mid-rotation, "worker first") are ready and logged (review CS-10, SF-6). |
 | Endpoint change | A secret is bound (AAD) to the cloud endpoint it was uploaded for; a changed `auth_url`, region, interface or CA bundle makes it fail closed. A change through the API asks for re-validation; a **direct** write of the `cloud` row (any role) does too, through a statement trigger that bumps `validation_requested_at` of the cloud's pending and active credentials, so the next validation pass records them invalid at once instead of up to the periodic re-validation interval later (review N-4, SF-5, migration `connections_0003`). |
 | Backup | DB backups contain ciphertext only; the KEK is backed up separately (offline, two custodians). The TOTP key (`auth.totp_key_file`, api only) is backed up **with** the KEK: losing it locks every admin and approver out of TOTP. Both files are 0400 on a real installation (install-guide.md §3a; review IS-7, SF-10). Restore test must cover both (NFR-7). |
 
@@ -382,7 +387,18 @@ by design); the out-of-band comparison and the audit row are the controls (revie
 it is confirmed: the operator pastes the fingerprint read **on the VM** (its console, or `ssh-keygen -lf` there) and
 says which source it came from; OVLM compares it with the scan and refuses a mismatch (409). The audit row
 `managed_vm.host_key_confirm` records the source (`console`, `ssh-keygen`) and `via: ui` (the API accepts the same
-optional `source`). No TOTP step-up is required for this confirmation (accepted for the lab, review IS-2).
+optional `source`).
+
+**Step-up on the confirmation** (review IS-2, roadmap SF-10, P1-4). An operator who has TOTP enrolled confirms only with a
+password+TOTP step-up for the action `host_key.confirm` and **this managed VM's id** (`POST /session/reauth`, then
+`stepup_id` in the body; the UI form asks for password and code itself). It is spent in the confirmation's
+transaction (a fingerprint mismatch or another refusal leaves it unspent), single-use, bound to the session, and
+refused (`403 stepup-required` / `stepup-invalid`, the refusal audited as `auth.stepup.refused`) when missing, for
+another VM or another action, already spent, or not password+TOTP. The audit row `managed_vm.host_key_confirm`
+records `stepup_id` and `auth_method`. Operators have no mandatory TOTP (§2.1): one who has not enrolled still
+confirms with the session alone, and the audit row shows the session's `auth_method` with no `stepup_id`. So the
+step-up is optional per operator, and it is what a stolen session of an enrolled operator lacks. The residual above
+(a compromised api holds the column grant) is unchanged.
 
 **Which address is scanned** (review IS-3). The scan and the renewal use one rule (`src/ovlm/registry/ssh_target.py`):
 `fixed_ips[0]` of the port the **service floating IP** is attached to. The scan finds that floating IP in the latest
@@ -395,6 +411,18 @@ address parsed as an IP (no hostname, `ssh-keyscan … --`).
 Worker → guest SSH (22) on the fixed IP: green has no FIP before cutover. Options: worker on a routed management
 network, or a bastion (`ProxyJump`, its host key pinned). Profiles' security groups allow 22 only from the worker/
 bastion source address; OVLM's readiness check flags `0.0.0.0/0` on 22 as a warning. Guests never connect to OVLM.
+
+**Jump host not wired yet (review N-1, roadmap SF-2).** A project connection stores `guest_access` (`direct`, or
+`jump_host` with host, port and the jump host's pinned key); changing it through the API takes a step-up and the typed
+connection name. That step-up is an **API-level control only**: the `ovlm_api` role can still update the column, and
+`guest_access` is not part of the `ssh_key` AAD binding (`Destination`: connection, kind, cloud, endpoint digest).
+Today this has no effect, because no worker code reads the connection's `guest_access`: every guest SSH call (B5's
+`ssh_argv`, the Ansible inventory's `ansible_ssh_common_args`, `ssh-keyscan`) goes straight to the VM's address, and
+public-key authentication sends a signature, never the key. Binding it now would bind a value nothing uses, so SF-2
+is moot until the jump host is wired. The day it is, the `ssh_key` binding must cover a digest of `guest_access` (or
+the jump host's key must be pinned outside what `ovlm_api` can write): `tests/unit/test_jump_host_binding_guard.py`
+fails if a `ProxyJump`/`ProxyCommand`/`-J` option, a read of the connection's `guest_access` or a jump-host field of
+the worker's connection snapshot appears while the binding does not cover it.
 
 ### 6.4 Guest output is untrusted
 Healthcheck JSON, Ansible facts, stdout and `set_stats` are attacker-controlled once a guest is compromised:

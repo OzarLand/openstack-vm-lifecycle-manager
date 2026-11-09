@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from ovlm import audit
 from ovlm.auth.authz import Action, authorize_action, project_scope_of
 from ovlm.auth.deps import get_db, require_action, require_role
+from ovlm.auth.errors import ProblemError
 from ovlm.auth.principal import Principal
 from ovlm.inventory import service as inventory
 from ovlm.registry import host_keys
@@ -28,6 +29,9 @@ from ovlm.ui.routes_account import router as account_router
 from ovlm.ui.routes_audit import router as audit_router
 from ovlm.ui.routes_policies import router as policies_router
 from ovlm.ui.routes_readiness import router as readiness_router
+from ovlm.ui.routes_renewal import Cfg, Hasher, Vault
+from ovlm.ui.routes_renewal import _problem as problem_of
+from ovlm.ui.routes_renewal import _stepup as issue_stepup
 from ovlm.ui.routes_renewal import router as renewal_router
 from ovlm.ui.support import UiRoute, error_page, render
 
@@ -281,13 +285,16 @@ def register_server(
 
 @router.post("/inventory/servers/{server_id}/host-key/confirm", response_class=HTMLResponse)
 def confirm_host_key(
-    request: Request, server_id: str, db: Db, fingerprint: Annotated[str, Form()] = "",
-    source: Annotated[str, Form()] = "", who: Principal = HOST_KEY_CONFIRMER,
+    request: Request, server_id: str, db: Db, settings: Cfg, hasher: Hasher, vault: Vault,
+    fingerprint: Annotated[str, Form()] = "", source: Annotated[str, Form()] = "",
+    password: Annotated[str, Form()] = "", totp_code: Annotated[str, Form()] = "",
+    who: Principal = HOST_KEY_CONFIRMER,
 ) -> Response:  # fmt: skip
     """The human face of ``POST /api/v1/managed-vms/{id}/host-key/confirm`` (review IS-2, SF-10). The form never
     shows or prefills the scanned fingerprint: the operator pastes the one read on the VM's console or with
-    ``ssh-keygen -lf``, and says which; OVLM compares it with the scan (mismatch: refused). Same service call, scope
-    rule and audit row as the API, plus the comparison source."""
+    ``ssh-keygen -lf``, and says which; OVLM compares it with the scan (mismatch: refused). An operator with TOTP
+    enrolled also gives password and code: a step-up for ``host_key.confirm`` and this VM, spent with the
+    confirmation. Same service calls, scope rule and audit row as the API, plus the comparison source."""
     parsed = _uuid(server_id)
     ctx = _detail_context(db, parsed) if parsed else None
     managed = ctx["managed"] if ctx else None
@@ -305,17 +312,23 @@ def confirm_host_key(
             raise DomainError(422, "invalid-source", "Say where the fingerprint comes from",
                               "Choose the console or ssh-keygen: the fingerprint must be read on the VM itself, "
                               "never copied from OVLM.")  # fmt: skip
+        stepup_id = None
+        if host_keys.stepup_required(who):
+            # reauth commits the step-up row on its own; the confirmation then spends it in its own transaction
+            stepup_id = issue_stepup(db, settings, hasher, vault, who, password, totp_code,
+                                     host_keys.STEPUP_ACTION, str(vm_id))  # fmt: skip
         result = host_keys.confirm(db, vm_id, fingerprint.strip(), actor_id=who.user_id)
         if not result["already_confirmed"]:
+            stepup = host_keys.spend_stepup(db, who, vm_id, stepup_id)
             _audit(db, who, "managed_vm.host_key_confirm", "managed_vm_host_key", str(vm_id), scope=scope,
                    after={"managed_vm_id": str(vm_id), "fingerprint": result["fingerprint"],
-                          "source": source, "via": "ui"})  # fmt: skip
+                          "source": source, "via": "ui", **stepup})  # fmt: skip
         db.commit()
-    except DomainError as exc:
+    except (DomainError, ProblemError) as exc:
         db.rollback()
+        status, error = problem_of(exc)
         return render(
-            request, "inventory/detail.html", exc.status, active="inventory", notice=None,
-            error={"title": exc.title, "detail": exc.detail, "next_action": exc.next_action}, **ctx,
+            request, "inventory/detail.html", status, active="inventory", notice=None, error=error, **ctx,
         )  # fmt: skip
     return RedirectResponse(
         f"/inventory/servers/{parsed}?notice=host-key-confirmed", status_code=303

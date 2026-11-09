@@ -175,13 +175,17 @@ class World:
 
     # -- approvals, as the api records them ----------------------------------------------------------------
 
-    def stepup(self, user: str, action: str, target: str, *, consumed: bool = True) -> str:
+    def stepup(self, user: str, action: str, target: str, *, consumed: bool = True,
+               signal_id: str | None = None) -> str:  # fmt: skip
+        """A step-up as ``POST /session/reauth`` issues it; ``consumed``: already spent (by ``signal_id``, as the api
+        spends a run action's step-up in the signal's transaction, review PMR-8)."""
         sid = new_id()
         self.x(
             "INSERT INTO stepup (id, user_id, session_id_hash, action, target_id, auth_method, created_at, expires_at, "
-            "consumed_at) VALUES (:i, :u, 'sess', :a, :t, 'password+totp', now() - interval '1 minute', "
-            "now() + interval '4 minutes', CASE WHEN :c THEN now() END)",
-            i=sid, u=self.users[user], a=action, t=target, c=consumed,
+            "consumed_at, consumed_by_signal) VALUES (:i, :u, 'sess', :a, :t, 'password+totp', "
+            "now() - interval '1 minute', now() + interval '4 minutes', CASE WHEN :c THEN now() END, "
+            "CAST(:sig AS uuid))",
+            i=sid, u=self.users[user], a=action, t=target, c=consumed, sig=signal_id if consumed else None,
         )  # fmt: skip
         return sid
 
@@ -219,15 +223,20 @@ class World:
         return tc_of(g["intended_name"], g["openstack_id"])
 
     def signal(self, kind: str, *, user: str = "op", tc: str | None = None, good_stepup: bool = True,
-               **payload: Any) -> str:  # fmt: skip
+               stepup_id: str | None = None, **payload: Any) -> str:  # fmt: skip
+        """A run action as the api records it: with ``tc``, a step-up spent by this signal (``stepup_id``: send this
+        one instead, as a replay would)."""
         body = dict(payload)
+        sig = new_id()
         if tc is not None:
             body["typed_confirmation"] = tc
-            body["stepup_id"] = self.stepup(
-                user, f"run.{kind}" if good_stepup else "run.other", self.run_id
+            body["stepup_id"] = stepup_id or self.stepup(
+                user, f"run.{kind}" if good_stepup else "run.other", self.run_id, signal_id=sig
             )
         with self.api.begin() as c:
-            return send_signal(c, self.run_id, kind, actor_id=self.users[user], payload=body)
+            return send_signal(
+                c, self.run_id, kind, actor_id=self.users[user], payload=body, signal_id=sig
+            )
 
     def green_id(self) -> str | None:
         rows = self.q("SELECT openstack_id FROM owned_resource WHERE run_id = :r AND role = 'green' "

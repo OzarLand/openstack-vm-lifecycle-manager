@@ -662,10 +662,14 @@ def accept_form(run: Mapping[str, Any]) -> dict[str, Any]:
         (c.get("check", ""), bool(c.get("ok")), str(c.get("detail", "")))
         for c in (probe or {}).get("checks") or ()
     ]
+    duration = (probe or {}).get("duration_s")
     return {
         "step_id": str(step.get("id") or ""), "step_key": step.get("step_key"),
         "refused_rows": evidence_lines(step.get("error")), "probe": probe, "checks": checks,
         "probe_id": str((probe or {}).get("id") or ""), "probe_at": (probe or {}).get("at"),
+        # PMR-4: ``at`` is when the probe started; how long it took is shown next to it
+        "probe_duration": round(float(duration), 1) if isinstance(duration, (int, float)) else None,
+        "probe_pending": any(p.get("kind") == "probe" for p in run.get("pending_signals") or ()),
         "available": bool(offer and offer.get("available")), "why": (offer or {}).get("effect"),
     }  # fmt: skip
 

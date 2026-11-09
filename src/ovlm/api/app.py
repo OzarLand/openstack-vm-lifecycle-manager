@@ -61,7 +61,9 @@ def create_app(
         server = None
         if probe is None:
             engine = make_engine(settings)
-            app.state.probe = DbReadinessProbe(engine, settings.migrations_dir)
+            app.state.probe = DbReadinessProbe(
+                engine, settings.migrations_dir, public_key_file=settings.kek.public_key_file
+            )
         else:
             app.state.probe = probe
         BUILD_INFO.labels(__version__, "api").set(1)

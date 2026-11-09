@@ -753,6 +753,9 @@ def action(
             403, "token-scope", "Forbidden", "The API token's scope does not allow this action."
         )
     payload: dict[str, Any] = {}
+    sig_id = (
+        new_id()
+    )  # named by the step-up spent below, in this transaction (review PMR-8, REN-10)
     if confirmed:
         try:
             if not who.is_human or stepup_id is None:
@@ -768,12 +771,15 @@ def action(
             if kind == "accept_step":
                 _accept_refused(s, who, str(run_id), scope, exc)
             raise
-        consume_stepup(s, who, stepup_id, action=f"run.{kind}", target_id=str(run_id))
+        consume_stepup(
+            s, who, stepup_id, action=f"run.{kind}", target_id=str(run_id), signal_id=sig_id
+        )
         payload = {"typed_confirmation": typed, "stepup_id": str(stepup_id)}
     if attestation:
         payload["attestation"] = attestation[:2000]
     payload |= accept_payload
-    sig = send_signal(s.connection(), str(run_id), kind, actor_id=str(who.user_id), payload=payload)
+    sig = send_signal(s.connection(), str(run_id), kind, actor_id=str(who.user_id), payload=payload,
+                      signal_id=sig_id)  # fmt: skip
     if kind == "accept_step":
         audit.record(
             s, action="run.accept_step.requested", target_type=accept.ENTITY, target_id=sig, actor_id=who.user_id,
