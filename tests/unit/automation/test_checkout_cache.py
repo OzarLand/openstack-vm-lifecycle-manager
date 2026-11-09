@@ -19,13 +19,21 @@ from ovlm.automation import checkout as co
 from ovlm.automation.checkout import CloneOptions, tree_digest
 from ovlm.automation.model import AutomationSpec, RunnerConfig
 from ovlm.automation.runner import (
+    CACHE_MARKER,
     AutomationRunner,
+    check_checkout_cache,
     sweep_checkout_cache,
     sweep_run_root_checkouts,
 )
 from ovlm.automation.types import AutomationError, Classification, Phase
 from tests.unit.automation.test_checkout import make_repo
 from tests.unit.automation.test_runner import FILES
+
+WF1 = "6f1d9a3e-0000-4000-8000-0000000000f1"
+#: run ids as the worker names cache entries (canonical UUIDs)
+LIVE, DONE_OLD, DONE_NEW, DONE, UNKNOWN = (
+    f"6f1d9a3e-0000-4000-8000-00000000000{i}" for i in range(1, 6)
+)
 
 # ---- tree_digest ------------------------------------------------------------------------------------------------
 
@@ -112,7 +120,7 @@ def cached(tmp_path: Path) -> tuple[AutomationRunner, Any, Path]:
         max_timeout={p: 100 for p in Phase}, default_timeout={p: 50 for p in Phase},
     )  # fmt: skip
     runner = AutomationRunner(cfg)
-    prepared = runner.prepare_automation(AutomationSpec(repo=url, ref=sha), "wf1")
+    prepared = runner.prepare_automation(AutomationSpec(repo=url, ref=sha), WF1)
     return runner, prepared, cache
 
 
@@ -146,14 +154,14 @@ def test_prepare_records_the_digest_and_writes_a_private_read_only_copy(cached: 
     runner, prepared, cache = cached
     assert prepared.tree_digest == tree_digest(prepared.checkout)
     assert prepared.evidence()["tree_digest"] == prepared.tree_digest
-    copy = cache / "wf1" / "_checkout"
+    copy = cache / WF1 / "_checkout"
     assert tree_digest(copy) == prepared.tree_digest
-    for d in (cache, cache / "wf1"):
+    for d in (cache, cache / WF1):
         assert stat.S_IMODE(d.stat().st_mode) == 0o700 and d.stat().st_uid == os.geteuid()
     f = copy / "playbooks" / "configure.yml"
     assert stat.S_IMODE(f.stat().st_mode) & 0o222 == 0, "cached files stay read-only"
     assert (copy / "playbooks" / "roles").is_symlink()
-    assert not (cache / "wf1" / "_checkout.tmp").exists()
+    assert not (cache / WF1 / "_checkout.tmp").exists()
 
 
 def test_without_a_cache_prepare_writes_none(tmp_path: Path) -> None:
@@ -171,7 +179,7 @@ def test_after_a_container_restart_the_cached_copy_is_adopted_when_the_digest_ma
     runner, prepared, _cache = cached
     _container_restart(runner)
     calls = _no_git(monkeypatch)
-    again = runner.reverify_checkout(prepared.spec, "wf1", expected_digest=prepared.tree_digest)
+    again = runner.reverify_checkout(prepared.spec, WF1, expected_digest=prepared.tree_digest)
     assert calls == []
     assert again is not None
     assert (again.sha, again.checkout, again.tree_digest) == (
@@ -185,7 +193,7 @@ def test_after_a_container_restart_the_cached_copy_is_adopted_when_the_digest_ma
     assert not (again.checkout.parent / "_checkout.adopt").exists()
     # the adopted checkout is usable as before: a later process restart adopts it from run_root
     assert (
-        runner.reverify_checkout(prepared.spec, "wf1", expected_digest=prepared.tree_digest)
+        runner.reverify_checkout(prepared.spec, WF1, expected_digest=prepared.tree_digest)
         is not None
     )
 
@@ -195,10 +203,10 @@ def test_a_modified_cached_file_is_refused_for_a_human(
 ) -> None:
     runner, prepared, cache = cached
     _container_restart(runner)
-    _rewrite(cache / "wf1" / "_checkout" / "playbooks" / "configure.yml", "- hosts: all\n")
+    _rewrite(cache / WF1 / "_checkout" / "playbooks" / "configure.yml", "- hosts: all\n")
     _no_git(monkeypatch)
     with pytest.raises(AutomationError, match="does not match the tree digest") as exc:
-        runner.reverify_checkout(prepared.spec, "wf1", expected_digest=prepared.tree_digest)
+        runner.reverify_checkout(prepared.spec, WF1, expected_digest=prepared.tree_digest)
     assert exc.value.classification is Classification.NEEDS_HUMAN
     assert (
         not prepared.checkout.exists()
@@ -210,12 +218,12 @@ def test_a_modified_cached_file_is_refused_for_a_human(
 def test_an_added_cached_file_is_refused(cached: Any) -> None:
     runner, prepared, cache = cached
     _container_restart(runner)
-    pb = cache / "wf1" / "_checkout" / "playbooks"
+    pb = cache / WF1 / "_checkout" / "playbooks"
     pb.chmod(0o755)
     (pb / "evil.yml").write_text("- hosts: all\n")
     pb.chmod(0o555)
     with pytest.raises(AutomationError) as exc:
-        runner.reverify_checkout(prepared.spec, "wf1", expected_digest=prepared.tree_digest)
+        runner.reverify_checkout(prepared.spec, WF1, expected_digest=prepared.tree_digest)
     assert exc.value.classification is Classification.NEEDS_HUMAN
 
 
@@ -226,7 +234,7 @@ def test_a_cached_copy_without_a_recorded_digest_is_refused(
     runner, prepared, _cache = cached
     _container_restart(runner)
     with pytest.raises(AutomationError, match="no recorded tree digest") as exc:
-        runner.reverify_checkout(prepared.spec, "wf1", expected_digest=expected)
+        runner.reverify_checkout(prepared.spec, WF1, expected_digest=expected)
     assert exc.value.classification is Classification.NEEDS_HUMAN
     assert not prepared.checkout.exists()
 
@@ -234,9 +242,9 @@ def test_a_cached_copy_without_a_recorded_digest_is_refused(
 def test_no_cache_copy_keeps_the_current_behaviour(cached: Any) -> None:
     runner, prepared, cache = cached
     _container_restart(runner)
-    co.remove_tree(cache / "wf1")
+    co.remove_tree(cache / WF1)
     assert (
-        runner.reverify_checkout(prepared.spec, "wf1", expected_digest=prepared.tree_digest) is None
+        runner.reverify_checkout(prepared.spec, WF1, expected_digest=prepared.tree_digest) is None
     )
 
 
@@ -254,20 +262,20 @@ def test_the_cache_is_not_trusted_for_another_sha(cached: Any) -> None:
     _container_restart(runner)
     other = AutomationSpec(repo=prepared.spec.repo, ref="0" * 40)
     with pytest.raises(AutomationError):
-        runner.reverify_checkout(other, "wf1", expected_digest="f" * 64)
+        runner.reverify_checkout(other, WF1, expected_digest="f" * 64)
 
 
 def test_a_run_root_checkout_that_differs_from_the_recorded_digest_is_refused(cached: Any) -> None:
     runner, prepared, _cache = cached
-    assert runner.reverify_checkout(prepared.spec, "wf1", expected_digest=prepared.tree_digest)
+    assert runner.reverify_checkout(prepared.spec, WF1, expected_digest=prepared.tree_digest)
     _rewrite(
         prepared.checkout / "playbooks" / "configure.yml", "- hosts: ovlm_target\n  tasks: []\n"
     )
     with pytest.raises(AutomationError, match="tree digest") as exc:
-        runner.reverify_checkout(prepared.spec, "wf1", expected_digest=prepared.tree_digest)
+        runner.reverify_checkout(prepared.spec, WF1, expected_digest=prepared.tree_digest)
     assert exc.value.classification is Classification.NEEDS_HUMAN
     # a run prepared before the digest existed: no expected digest, no comparison (previous behaviour)
-    assert runner.reverify_checkout(prepared.spec, "wf1") is not None
+    assert runner.reverify_checkout(prepared.spec, WF1) is not None
 
 
 def test_a_cache_directory_not_owned_by_the_worker_is_refused(
@@ -277,7 +285,7 @@ def test_a_cache_directory_not_owned_by_the_worker_is_refused(
     _container_restart(runner)
     monkeypatch.setattr(os, "geteuid", lambda: 4242)
     with pytest.raises(AutomationError, match="not a directory owned by the worker user") as exc:
-        runner.reverify_checkout(prepared.spec, "wf1", expected_digest=prepared.tree_digest)
+        runner.reverify_checkout(prepared.spec, WF1, expected_digest=prepared.tree_digest)
     assert exc.value.classification is Classification.NEEDS_HUMAN
 
 
@@ -285,14 +293,14 @@ def test_a_loose_cache_directory_mode_is_tightened(cached: Any) -> None:
     runner, prepared, cache = cached
     cache.chmod(0o755)
     _container_restart(runner)
-    assert runner.reverify_checkout(prepared.spec, "wf1", expected_digest=prepared.tree_digest)
+    assert runner.reverify_checkout(prepared.spec, WF1, expected_digest=prepared.tree_digest)
     assert stat.S_IMODE(cache.stat().st_mode) == 0o700
 
 
 def test_release_and_a_failed_prepare_remove_the_cached_copy(cached: Any) -> None:
     runner, prepared, cache = cached
     runner.release(prepared)
-    assert not (cache / "wf1").exists() and not prepared.checkout.exists()
+    assert not (cache / WF1).exists() and not prepared.checkout.exists()
     bad = AutomationSpec(repo=prepared.spec.repo, ref=prepared.sha, requirements="../../etc/passwd")
     with pytest.raises(AutomationError, match="escapes"):
         runner.prepare_automation(bad, "wf2")
@@ -301,29 +309,116 @@ def test_release_and_a_failed_prepare_remove_the_cached_copy(cached: Any) -> Non
 
 def test_sweep_removes_old_entries_of_finished_runs_only(tmp_path: Path) -> None:
     cache = tmp_path / "cache"
-    for name in ("live", "done-old", "done-new"):
+    for name in (LIVE, DONE_OLD, DONE_NEW):
         (cache / name / "_checkout").mkdir(parents=True)
         (cache / name / "_checkout" / "f").write_text("x")
         co.make_read_only(cache / name / "_checkout")
     now = time.time()
-    for name in ("live", "done-old"):
+    for name in (LIVE, DONE_OLD):
         os.utime(cache / name, (now - 10_000, now - 10_000))
     (cache / "stray-file").write_text("")
-    removed = sweep_checkout_cache(cache, 3600, keep={"live"}, now=now)
-    assert removed == [cache / "done-old"]
-    assert sorted(p.name for p in cache.iterdir()) == ["done-new", "live", "stray-file"]
+    removed = sweep_checkout_cache(cache, 3600, keep={LIVE}, now=now)
+    assert removed == [cache / DONE_OLD]
+    assert sorted(p.name for p in cache.iterdir()) == sorted([DONE_NEW, LIVE, "stray-file"])
     assert sweep_checkout_cache(tmp_path / "missing", 1, keep=set()) == []
 
 
 def test_sweep_removes_the_entry_of_a_terminal_run_at_once(tmp_path: Path) -> None:
     """Terminal is final: no age guard for a run the database reads terminal (roadmap P0-1)."""
     cache = tmp_path / "cache"
-    for name in ("live", "done", "unknown"):
+    for name in (LIVE, DONE, UNKNOWN):
         (cache / name / "_checkout").mkdir(parents=True)
         co.make_read_only(cache / name / "_checkout")
-    removed = sweep_checkout_cache(cache, 3600, keep={"live"}, terminal={"done", "live"})
-    assert removed == [cache / "done"]
-    assert sorted(p.name for p in cache.iterdir()) == ["live", "unknown"]
+    removed = sweep_checkout_cache(cache, 3600, keep={LIVE}, terminal={DONE, LIVE})
+    assert removed == [cache / DONE]
+    assert sorted(p.name for p in cache.iterdir()) == sorted([LIVE, UNKNOWN])
+
+
+def test_sweep_leaves_entries_ovlm_did_not_write(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review PMR-3 (the review's probe): the cache root named next to other worker state. A ``credentials``
+    directory, a run-id-shaped directory holding something else than checkout copies, a non-canonical id and a run
+    entry are all old; only the run entry goes, the rest is left alone and logged."""
+    cache = tmp_path / "cache"
+    (cache / "credentials").mkdir(parents=True)
+    (cache / "credentials" / "secret.json").write_text("x")
+    (cache / DONE / "_checkout").mkdir(parents=True)
+    (cache / UNKNOWN / "notes.txt").parent.mkdir()
+    (cache / UNKNOWN / "notes.txt").write_text("operator's")
+    (cache / DONE_OLD.upper()).mkdir()
+    (cache / LIVE).symlink_to(cache / "credentials")
+    old = time.time() - 10 * 3600
+    for p in cache.iterdir():
+        os.utime(p, (old, old), follow_symlinks=False)
+    with caplog.at_level("WARNING", logger="ovlm.automation.runner"):
+        removed = sweep_checkout_cache(cache, 3600, keep=set())
+    assert removed == [cache / DONE]
+    assert (cache / "credentials" / "secret.json").read_text() == "x"
+    assert (cache / UNKNOWN / "notes.txt").is_file() and (cache / DONE_OLD.upper()).is_dir()
+    assert "checkout cache sweep left entries OVLM did not write" in caplog.text
+    # a run-id directory with copies moved aside on a digest mismatch (PMR-6) is still OVLM's
+    (cache / DONE / "_checkout").mkdir(parents=True)
+    (cache / DONE / "_checkout.mismatch-20261109T101500.123456Z").mkdir()
+    assert sweep_checkout_cache(cache, 3600, keep=set(), terminal={DONE}) == [cache / DONE]
+
+
+def test_the_cache_directory_must_be_the_workers_own(tmp_path: Path) -> None:
+    """Review PMR-3: a cache directory that holds other entries (shared with other worker state) is refused before
+    anything is chmod-ed or swept there; a new one gets OVLM's marker, an existing one holding only run entries gets
+    it too; after that, a foreign entry is tolerated (the sweep leaves it alone)."""
+    shared = tmp_path / "var-lib-ovlm"
+    (shared / "credentials").mkdir(parents=True)
+    os.chmod(shared, 0o755)  # noqa: S103 - an operator's directory, readable by others
+    with pytest.raises(AutomationError, match="entries OVLM did not write"):
+        check_checkout_cache(shared)
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o755 and not (shared / CACHE_MARKER).exists()
+    fresh = tmp_path / "checkouts"
+    check_checkout_cache(fresh)
+    assert (fresh / CACHE_MARKER).is_file() and stat.S_IMODE(fresh.stat().st_mode) == 0o700
+    legacy = tmp_path / "legacy"  # a cache from before the marker, on a filesystem of its own
+    (legacy / DONE / "_checkout").mkdir(parents=True)
+    (legacy / "lost+found").mkdir()
+    check_checkout_cache(legacy)
+    assert (legacy / CACHE_MARKER).is_file()
+    (legacy / "other").mkdir()  # marked as OVLM's: tolerated, the sweep leaves it alone
+    check_checkout_cache(legacy)
+    link = tmp_path / "link"
+    link.symlink_to(fresh)
+    with pytest.raises(AutomationError, match="not a directory owned by the worker user"):
+        check_checkout_cache(link)
+
+
+def test_the_worker_refuses_to_start_on_a_shared_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ovlm.config import Settings
+    from ovlm.worker import main as worker_main
+
+    shared = tmp_path / "var-lib-ovlm"
+    (shared / "credentials").mkdir(parents=True)
+    s = Settings(process_role="worker", development_mode=True,
+                 automation={"run_root": str(tmp_path / "run"), "checkout_cache": str(shared)})  # fmt: skip
+    monkeypatch.setattr(
+        worker_main, "make_engine", lambda settings: type("E", (), {"dispose": lambda self: None})()
+    )
+    monkeypatch.setattr(worker_main, "check_schema_at_head", lambda engine, d: None)
+    assert worker_main.run(s) == 1
+
+
+def test_settings_refuse_a_cache_that_holds_or_sits_in_other_worker_state() -> None:
+    from ovlm.config import Settings
+
+    for cache, creds in (("/var/lib/ovlm", "/var/lib/ovlm/credentials"), ("/var/lib/ovlm/c", "/var/lib/ovlm/c"),
+                         ("/srv/creds/cache", "/srv/creds")):  # fmt: skip
+        with pytest.raises(ValueError, match="must not be or contain the renewal.credentials_dir"):
+            Settings(process_role="worker", development_mode=True, automation={"checkout_cache": cache},
+                     renewal={"credentials_dir": creds})  # fmt: skip
+    with pytest.raises(ValueError, match="kek key directory"):
+        Settings(process_role="worker", automation={"checkout_cache": "/run/secrets", "run_user": "ovlm-ansible"},
+                 kek={"private_key_file": "/run/secrets/kek.pem"})  # fmt: skip
+    Settings(process_role="worker", development_mode=True, automation={"checkout_cache": "/var/lib/ovlm/checkouts"},
+             renewal={"credentials_dir": "/var/lib/ovlm/credentials"})  # fmt: skip
 
 
 def _run_root_checkout(run_root: Path, name: str, *, age: float = 0.0) -> Path:
@@ -381,15 +476,15 @@ def test_the_terminal_sweep_of_both_roots_leaves_nothing_of_a_prepared_run(cache
     runner, prepared, cache = cached
     run_root = runner.cfg.run_root
     assert (
-        prepared.checkout == run_root / "wf1" / "_checkout"
-        and (run_root / "wf1" / "_checkout.sha").is_file()
+        prepared.checkout == run_root / WF1 / "_checkout"
+        and (run_root / WF1 / "_checkout.sha").is_file()
     )
-    assert sweep_run_root_checkouts(run_root, 0, keep={"wf1"}, terminal={"wf1"}) == []
-    assert sweep_checkout_cache(cache, 0, keep={"wf1"}, terminal={"wf1"}) == []
-    assert prepared.checkout.is_dir() and (cache / "wf1" / "_checkout").is_dir()
-    assert sweep_run_root_checkouts(run_root, 3600, keep=(), terminal={"wf1"}) == [run_root / "wf1"]
-    assert sweep_checkout_cache(cache, 3600, keep=(), terminal={"wf1"}) == [cache / "wf1"]
-    assert not (run_root / "wf1").exists() and not (cache / "wf1").exists()
+    assert sweep_run_root_checkouts(run_root, 0, keep={WF1}, terminal={WF1}) == []
+    assert sweep_checkout_cache(cache, 0, keep={WF1}, terminal={WF1}) == []
+    assert prepared.checkout.is_dir() and (cache / WF1 / "_checkout").is_dir()
+    assert sweep_run_root_checkouts(run_root, 3600, keep=(), terminal={WF1}) == [run_root / WF1]
+    assert sweep_checkout_cache(cache, 3600, keep=(), terminal={WF1}) == [cache / WF1]
+    assert not (run_root / WF1).exists() and not (cache / WF1).exists()
 
 
 def test_settings_wire_the_cache_and_refuse_bad_paths() -> None:

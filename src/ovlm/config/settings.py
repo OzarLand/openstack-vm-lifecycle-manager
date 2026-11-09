@@ -408,6 +408,19 @@ class Settings(BaseSettings):
                 "kek.private_key_file is the worker's decryption key: only the worker may be given it "
                 "(security-model.md 5.1); the api is given kek.public_key_file"
             )
+        cache = self.automation.checkout_cache
+        if cache is not None:
+            # PMR-3: the cache is swept and chmod-ed by the worker; it must not hold or sit inside other worker state
+            others = [("renewal.credentials_dir", self.renewal.credentials_dir)]
+            others += [("kek key directory", p.parent) for p in (self.kek.private_key_file,
+                                                                 *self.kek.previous_private_key_files) if p]  # fmt: skip
+            for name, other in others:
+                if other is not None and (
+                    cache.is_relative_to(other) or other.is_relative_to(cache)
+                ):
+                    raise ValueError(
+                        f"automation.checkout_cache must not be or contain the {name}, nor sit inside it"
+                    )
         if self.http.port == self.http.metrics_port and self.http.host == self.http.metrics_host:
             raise ValueError(
                 "http.port and http.metrics_port must differ (metrics use a separate port)"

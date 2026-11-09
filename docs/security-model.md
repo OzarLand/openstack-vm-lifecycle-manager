@@ -412,6 +412,12 @@ Galaxy download at run time. ansible-runner runs as a separate OS user (`ovlm-an
 (no `OS_*`, DB URL, KEK path), a private run dir (0700, tmpfs), and no read access to the KEK file or DB secret files.
 Residual risk: an approved but malicious SHA still runs code on the worker host as `ovlm-ansible` and on guests.
 
+The persistent copy of the verified checkout (`automation.checkout_cache`, automation-contract.md §2) is a directory
+of its own, owned by the worker user, 0700, marked by OVLM on first use; the worker refuses to start on a cache
+directory that holds anything else (shared with other worker state) and settings refuse one that is, contains or sits
+in `renewal.credentials_dir` or a KEK key's directory; the sweep removes only run-id entries holding checkout copies
+(review PMR-3).
+
 ## 7. Destructive operations
 
 ### 7.1 Inventory

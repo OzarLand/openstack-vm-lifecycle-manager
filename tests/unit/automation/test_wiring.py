@@ -202,7 +202,10 @@ def _checkout(root: Path, run_id: str, *, old: bool = False) -> Path:
     (entry / "_checkout").mkdir(parents=True)
     (entry / "_checkout" / "site.yml").write_text("- hosts: all\n")
     co.make_read_only(entry / "_checkout")
-    (entry / "_checkout.sha").write_text("a" * 40 + "\n")
+    if (
+        root.name == "run"
+    ):  # the commit record sits next to the run_root checkout only (not in the cache)
+        (entry / "_checkout.sha").write_text("a" * 40 + "\n")
     if old:
         then = time.time() - 365 * 86400
         os.utime(entry, (then, then))
@@ -258,7 +261,8 @@ def test_a_non_terminal_runs_checkout_is_kept_after_a_step(tmp_path: Path, state
     w._sweep_checkouts(_LIVE)  # noqa: SLF001
     w._sweep_checkouts()  # noqa: SLF001  (the periodic sweep: kept whatever its age)
     for root in (tmp_path / "run", tmp_path / "cache"):
-        assert (root / _LIVE / "_checkout").is_dir() and (root / _LIVE / "_checkout.sha").is_file()
+        assert (root / _LIVE / "_checkout").is_dir()
+    assert (tmp_path / "run" / _LIVE / "_checkout.sha").is_file()
 
 
 def test_a_step_of_a_run_without_a_checkout_does_not_read_the_database(tmp_path: Path) -> None:

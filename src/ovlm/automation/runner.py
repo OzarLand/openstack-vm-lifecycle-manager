@@ -199,26 +199,13 @@ class AutomationRunner:
     # ---- the persistent copy of the checkout (automation.checkout_cache, lab finding Z) ------------------------
 
     def _cache_root(self) -> Path | None:
-        """The cache directory, created 0700 if missing. Refused unless the worker user owns it: it must not be
-        shared with ``ovlm-ansible`` or anyone else (a copy they could change would be adopted as verified)."""
+        """The cache directory, checked by :func:`check_checkout_cache` (created 0700 with OVLM's marker if missing;
+        refused unless the worker user owns it and it holds only OVLM's entries): it must not be shared with
+        ``ovlm-ansible`` or anyone else (a copy they could change would be adopted as verified)."""
         root = self.cfg.checkout_cache
         if root is None:
             return None
-        try:
-            root.mkdir(parents=True, exist_ok=True, mode=0o700)
-            st = os.lstat(root)
-            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
-                raise AutomationError(
-                    "automation.checkout_cache is not a directory owned by the worker user",
-                    Classification.NEEDS_HUMAN,
-                )
-            if stat.S_IMODE(st.st_mode) != 0o700:
-                os.chmod(root, 0o700)
-        except OSError as exc:
-            raise AutomationError(
-                f"automation.checkout_cache is not usable: {type(exc).__name__}",
-                Classification.NEEDS_HUMAN,
-            ) from None
+        check_checkout_cache(root)
         return root
 
     def _cache_entry(self, workflow_id: str) -> Path | None:
@@ -769,6 +756,72 @@ class AutomationRunner:
 # ---- module-level helpers -------------------------------------------------------------------------------
 
 
+#: The file OVLM writes at the top of ``automation.checkout_cache`` on first use: the directory is OVLM's (PMR-3).
+CACHE_MARKER = ".ovlm-checkout-cache"
+#: A canonical run id (the worker's ``workflow_run.id``): the only names of entries the cache sweep may remove.
+_RUN_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+#: What a run's cache entry ``<cache>/<run id>/`` holds: the copy, a copy being written, and copies moved aside on a
+#: digest mismatch (``_checkout.mismatch-<UTC time>``, PMR-6). Anything else: not an entry OVLM wrote.
+_CACHE_ENTRY_PART = re.compile(
+    r"_checkout|_checkout\.tmp|_checkout\.mismatch-[0-9]{8}T[0-9]{6}(?:\.[0-9]{1,6})?Z"
+)
+
+
+def is_cache_entry(entry: Path) -> bool:
+    """Whether ``entry`` looks like a run entry OVLM wrote in the checkout cache: a real directory named by a
+    canonical run id that holds nothing but :data:`_CACHE_ENTRY_PART` names (review PMR-3)."""
+    if not _RUN_UUID.fullmatch(entry.name) or entry.is_symlink() or not entry.is_dir():
+        return False
+    try:
+        return all(_CACHE_ENTRY_PART.fullmatch(p.name) for p in entry.iterdir())
+    except OSError:
+        return False
+
+
+def check_checkout_cache(root: Path) -> None:
+    """Make sure ``automation.checkout_cache`` is OVLM's own directory before anything is written or swept there
+    (review PMR-3); the worker calls it at start-up and refuses to start on :class:`AutomationError`.
+
+    * missing: created 0700 (parents too) and :data:`CACHE_MARKER` written;
+    * a symlink, not a directory, or not owned by the worker's euid: refused;
+    * no marker yet (a cache from before the marker, or a directory an operator named): accepted only if every entry
+      in it is a run entry OVLM wrote (:func:`is_cache_entry`) or ``lost+found``, then the marker is written; a directory holding
+      anything else (other worker state, credentials) is refused: it is shared, and OVLM would chmod and sweep it;
+    * only then is its mode forced to 0700."""
+    try:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        st = os.lstat(root)
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
+            raise AutomationError(
+                "automation.checkout_cache is not a directory owned by the worker user",
+                Classification.NEEDS_HUMAN,
+            )
+        marker = root / CACHE_MARKER
+        if not marker.is_file() or marker.is_symlink():
+            # lost+found: the cache is the root of a filesystem of its own (never swept: not a run id)
+            foreign = sorted(
+                e.name for e in root.iterdir() if e.name != "lost+found" and not is_cache_entry(e)
+            )
+            if foreign:
+                raise AutomationError(
+                    "automation.checkout_cache holds entries OVLM did not write ("
+                    + ", ".join(foreign[:5]) + (", ..." if len(foreign) > 5 else "")
+                    + "): give the checkout cache a directory of its own",
+                    Classification.NEEDS_HUMAN,
+                )  # fmt: skip
+            marker.unlink(missing_ok=True)
+            fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w", encoding="ascii") as f:
+                f.write("OVLM automation checkout cache: entries are swept by the worker\n")
+        if stat.S_IMODE(st.st_mode) != 0o700:
+            os.chmod(root, 0o700)
+    except OSError as exc:
+        raise AutomationError(
+            f"automation.checkout_cache is not usable: {type(exc).__name__}",
+            Classification.NEEDS_HUMAN,
+        ) from None
+
+
 #: What the run-level checkout leaves in ``<run_root>/<workflow_id>`` (the checkout, its commit record, an adoption
 #: in progress). The step run directories next to them belong to the orphan sweeper (``rundir.sweep_orphans``).
 _RUN_ROOT_CHECKOUT_PARTS = ("_checkout", "_checkout.sha", "_checkout.adopt")
@@ -815,10 +868,23 @@ def sweep_checkout_cache(
     """Remove cached checkouts (``<cache>/<workflow_id>``) of runs not in ``keep`` (the non-terminal runs): at once
     for a run in ``terminal``, otherwise once last written more than ``max_age`` seconds ago. Run by the worker at
     start-up, periodically and after a run's last step, so the cache does not grow forever. Returns the removed
-    entries."""
-    removed = _sweepable(cache, max_age, keep, terminal, now)
-    for entry in removed:
+    entries.
+
+    Only entries that look like OVLM's run entries are candidates (:func:`is_cache_entry`: a canonical run id holding
+    only checkout copies, review PMR-3); anything else in the directory is left alone and logged."""
+    removed: list[Path] = []
+    foreign: list[str] = []
+    for entry in _sweepable(cache, max_age, keep, terminal, now):
+        if not is_cache_entry(entry):
+            foreign.append(entry.name)
+            continue
         co.remove_tree(entry)
+        removed.append(entry)
+    if foreign:
+        log.warning(
+            "checkout cache sweep left entries OVLM did not write",
+            extra={"count": len(foreign), "entries": foreign[:10]},
+        )
     return removed
 
 
