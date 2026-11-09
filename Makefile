@@ -3,7 +3,8 @@ SHELL := /bin/bash
 UV ?= uv
 SECRETS := db_superuser_password db_owner_password db_api_password db_worker_password
 
-.PHONY: help install lint format typecheck test test-unit test-integration lock lock-check secrets build up down smoke clean
+.PHONY: help install lint format typecheck test test-unit test-integration lock lock-check secrets build up down smoke clean \
+	backup restore upgrade-preflight
 
 help:  ## Show targets
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -110,6 +111,47 @@ smoke:  ## Assertions on a running stack (`make up` first); used by CI
 	echo "== each service connects as its own DB role"; \
 	test "$$(docker compose exec -T postgres psql -U postgres -d ovlm -Atc "select string_agg(distinct usename, ',' order by usename) from pg_stat_activity where application_name like 'ovlm-%'")" = ovlm_api,ovlm_worker; \
 	echo "smoke OK"
+
+BACKUP_DIR ?= backups
+
+backup:  ## Dump the running stack's database to $(BACKUP_DIR)/<UTC time>/ after `ovlm backup check`
+	@set -euo pipefail; umask 077; \
+	d="$(BACKUP_DIR)/$$(date -u +%Y%m%dT%H%M%SZ)"; mkdir -p "$$d"; \
+	echo "== backup check: every sealed secret in use is wrapped to the current KEK; the TOTP key decrypts"; \
+	if ! docker compose exec -T api ovlm backup check > "$$d/manifest.txt"; then \
+	  cat "$$d/manifest.txt"; rm -rf "$$d"; \
+	  echo "backup REFUSED: the keys in ./secrets cannot restore this database (see the BLOCK lines)"; exit 2; \
+	fi; \
+	echo "== pg_dump (custom format: schema, data, grants, triggers, sequences)"; \
+	docker compose exec -T postgres pg_dump -U postgres -d ovlm -Fc > "$$d/ovlm.dump"; \
+	docker compose exec -T postgres pg_restore -l < "$$d/ovlm.dump" > /dev/null; \
+	echo "== cluster roles (attributes only, no passwords: those come from ./secrets)"; \
+	docker compose exec -T postgres pg_dumpall -U postgres --roles-only --no-role-passwords > "$$d/roles.sql"; \
+	(cd "$$d" && sha256sum manifest.txt ovlm.dump roles.sql > SHA256SUMS); \
+	cat "$$d/manifest.txt"; \
+	echo "backup OK: $$d (store it encrypted; the KEK and TOTP key of this manifest are kept apart, offline)"
+
+restore:  ## DESTRUCTIVE: replace the database: make restore DUMP=backups/<time> CONFIRM=replace-ovlm-database
+	@set -euo pipefail; \
+	test -n "$(DUMP)" || { echo "DUMP=$(BACKUP_DIR)/<time> is required"; exit 2; }; \
+	test "$(CONFIRM)" = replace-ovlm-database || { echo "CONFIRM=replace-ovlm-database is required: this drops the database ovlm"; exit 2; }; \
+	(cd "$(DUMP)" && sha256sum -c --quiet SHA256SUMS); \
+	cat "$(DUMP)/manifest.txt"; \
+	docker compose up -d --wait postgres; \
+	docker compose stop worker api; \
+	docker compose exec -T postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'DROP DATABASE IF EXISTS ovlm WITH (FORCE)'; \
+	docker compose exec -T postgres psql -U postgres -d postgres -v ON_ERROR_STOP=1 -v dbname=ovlm < deploy/backup/create-database.sql; \
+	docker compose exec -T postgres pg_restore -U postgres -d ovlm --exit-on-error --single-transaction < "$(DUMP)/ovlm.dump"; \
+	echo "== end every restored browser session (a session revoked after the backup would be live again)"; \
+	docker compose exec -T postgres psql -U postgres -d ovlm -v ON_ERROR_STOP=1 -c 'DELETE FROM auth_session'; \
+	docker compose up -d --wait; \
+	echo "== the keys in ./secrets open this database"; \
+	docker compose exec -T api ovlm backup check; \
+	docker compose exec -T -u ovlm worker ovlm kek status; \
+	echo "restore OK: run make smoke and check every non-terminal run (docs/backup-restore-upgrade.md section 3)"
+
+upgrade-preflight:  ## Read-only, new image: refuse an upgrade mid-window or a downgrade (PREFLIGHT_ARGS=--worker-stopped)
+	docker compose run --rm --no-deps -T api upgrade preflight $(PREFLIGHT_ARGS)
 
 clean:
 	rm -rf .pytest_cache .mypy_cache .ruff_cache build dist

@@ -130,8 +130,10 @@ Monitoring (worker metrics port): `ovlm_credentials_expiring{within="30d"|"7d"|"
    `connections_0002`) are never decrypted, so they are not counted per key and not re-wrapped: they do not keep the
    old key "in use" (review N-3). `kek status` prints their count; delete those credentials when convenient.
    Run it as the worker user: `docker compose exec -u ovlm worker ovlm kek status`.
-5. Remove the old private key from the worker configuration and destroy it (and its offline backup) after the
-   verified pass.
+5. Remove the old private key from the worker configuration after the verified pass. Destroy it (and its offline
+   backup) only when no retained database backup lists its `kek_id` in its manifest: such a backup needs it to
+   restore its credentials ([backup-restore-upgrade.md §2](backup-restore-upgrade.md#2-consistency-rules)). Take a
+   new backup now.
 
 ## 6. What never contains a secret
 

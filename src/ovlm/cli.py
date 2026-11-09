@@ -1,5 +1,5 @@
-"""``ovlm`` command: ``api``, ``worker``, ``migrate`` (architecture.md section 4), ``admin create`` (bootstrap) and
-``kek`` (credential store key pair).
+"""``ovlm`` command: ``api``, ``worker``, ``migrate`` (architecture.md section 4), ``admin create`` (bootstrap),
+``kek`` (credential store key pair), ``upgrade preflight`` and ``backup check`` (docs/backup-restore-upgrade.md).
 
 There are deliberately no secret-bearing options: secrets are read from the files named in the settings.
 """
@@ -71,6 +71,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from ovlm.secrets.cli import main as kek_main
 
         return kek_main(args_in[1:])
+    if args_in[:1] in (["upgrade"], ["backup"]):  # read-only (docs/backup-restore-upgrade.md)
+        from ovlm.maintenance.cli import backup_main, upgrade_main
+
+        return (upgrade_main if args_in[0] == "upgrade" else backup_main)(args_in[1:])
     if args_in[:1] == ["inventory"]:  # `ovlm inventory sync --cloud <name>` (E2-2); own sub-parser
         from ovlm.inventory.cli import main as inventory_main
 

@@ -88,6 +88,55 @@ class CrashWithBeatDue(CrashPlan):
                 t.join(5)
 
 
+class BeatGate:
+    """Controls the background heartbeats of one engine (the ``ovlm-hb-*`` threads; synchronous guarded heartbeats
+    of the step thread pass through untouched).
+
+    A test that expires a live attempt's lease and lets another engine claim the step has a race with that
+    attempt's own heartbeat (every 0.2 s here): a beat landing between ``expire_leases()`` and the claim extends
+    the lease again, the claim finds nothing, and the stale attempt commits (CI flake of 2026-11-09 in WF-05).
+
+    * :meth:`hold` waits for a beat in flight to finish, then drops every later beat before it reaches the DB, as
+      if lost on the way; the attempt does not notice (its local fence stays valid). Expire and claim after it.
+    * :meth:`resume` lets beats through again.
+    * :meth:`next_beat` waits for a real beat sent after the call to land (the reproduction of the race).
+    """
+
+    def __init__(self, engine: WorkflowEngine) -> None:
+        self._cond = threading.Condition()
+        self._held = False
+        self._landed = 0  # real beats completed; a beat runs entirely under the lock
+        self.dropped = 0
+        real = engine.heartbeat
+
+        def heartbeat(claim: Any, fence: Any) -> bool | None:
+            if not threading.current_thread().name.startswith("ovlm-hb-"):
+                return real(claim, fence)
+            with self._cond:
+                if self._held:
+                    self.dropped += 1
+                    return True  # the beat loop carries on; the DB lease is not touched
+                result = real(claim, fence)
+                self._landed += 1
+                self._cond.notify_all()
+                return result
+
+        setattr(engine, "heartbeat", heartbeat)  # noqa: B010 - instance override of a method, test only
+
+    def hold(self) -> None:
+        with self._cond:  # a beat in flight finishes first
+            self._held = True
+
+    def resume(self) -> None:
+        with self._cond:
+            self._held = False
+
+    def next_beat(self, timeout: float = 5.0) -> None:
+        with self._cond:  # a beat in flight finishes first and does not count
+            want = self._landed + 1
+            assert self._cond.wait_for(lambda: self._landed >= want, timeout), "no heartbeat landed"
+
+
 class RecordingAudit:
     def __init__(self) -> None:
         self.events: list[AuditEvent] = []

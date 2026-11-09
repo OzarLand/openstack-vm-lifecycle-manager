@@ -216,6 +216,9 @@ Larger scales are not designed for. A single PostgreSQL instance is sufficient.
   `migrate` → start api + worker. Runs record `strategy_version`; a release resumes runs of the previous minor version
   or refuses to start with a clear message listing them.
 - Supported upgrade path: N-1 → N only. Downgrade = restore backup.
+- Procedure, backup and restore: [backup-restore-upgrade.md](backup-restore-upgrade.md). `ovlm upgrade preflight`
+  (read-only, run with the new release) refuses while a run is in phase `window` or `restore` or a downtime interval
+  is open, and when the database is ahead of the release.
 
 ## 10. Testing architecture (summary; Agent QA owns the plan)
 
