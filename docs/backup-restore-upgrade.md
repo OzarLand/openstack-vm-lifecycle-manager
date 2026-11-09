@@ -68,6 +68,14 @@ with mode `0600` under `backups/` (git-ignored).
    credentials uploaded or rotated, users and tokens created or revoked, and audit rows. The audit rows still exist in
    the log-stream mirror (`event=audit` lines, security-model.md §8); keep that collector's retention longer than the
    backup interval.
+7. **Client tools have the server's major version.** `pg_dump`, `pg_restore` and `psql` must be the major version of
+   the PostgreSQL server they talk to (`SHOW server_version_num`, divided by 10000). A newer `pg_dump` writes
+   settings an older server does not know (`pg_dump` 17 emits `SET transaction_timeout`, which a 16 server refuses
+   with `unrecognized configuration parameter`, so `--exit-on-error` aborts the restore); an older one refuses to dump
+   a newer server. `make backup` and `make restore` run the tools inside the `postgres` container, so they always
+   match. When you dump or restore from another host, use `/usr/lib/postgresql/<major>/bin` (Debian/Ubuntu package
+   `postgresql-client-<major>`), not whatever `pg_dump` is first on `PATH`. Restoring into a newer major (a
+   PostgreSQL upgrade) is the one supported mismatch: dump with the old server's tools, restore with the new ones.
 
 ## 3. Restore
 
@@ -208,8 +216,9 @@ one (`database-ahead`).
 
 ## 5. What is tested
 
-`tests/integration/test_backup_restore.py` (real PostgreSQL, real `pg_dump`/`pg_restore`/`psql`; `OVLM_TEST_PG_BIN`
-names their directory when they are not on `PATH`):
+`tests/integration/test_backup_restore.py` (real PostgreSQL, real `pg_dump`/`pg_restore`/`psql` of the server's major
+version, §2 rule 7: from `OVLM_TEST_PG_BIN` (a directory), else `/usr/lib/postgresql/<major>/bin`, else `PATH` if its
+tools have that major; any other version fails the test with the reason, it is never skipped):
 
 - A database with active credentials sealed to a KEK, a TOTP-enrolled admin, audit rows and a closed downtime
   interval is dumped (`pg_dump -Fc`), restored with `create-database.sql` and `pg_restore --single-transaction`, and

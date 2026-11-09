@@ -25,6 +25,7 @@ from ovlm.workflow.crashpoint import CrashPlan, SimulatedCrash
 from ovlm.workflow.engine import EngineConfig
 from tests.integration.workflow.conftest import (
     TEST_CONFIG,
+    BeatGate,
     CrashWithBeatDue,
     RecordingAudit,
     WfDb,
@@ -100,18 +101,27 @@ def test_wf05_db_guard_rejects_stale_commit_even_when_local_fence_passes(wf: WfD
     run_id = wf.request([plan_step("set", res="a", value="A")])
     a = wf.make_engine(clock=FakeClock())
     b = wf.make_engine(clock=FakeClock())
+    gate = BeatGate(a)
     a.admit_pending()
     (claim_a,) = a.claim(1)
     claims_b = []
 
     def b_takes_over(_name: str) -> None:  # runs inside A, right after A's act
+        # A's beats stop reaching the DB from here on (A does not notice); otherwise a beat between the expiry and
+        # B's claim extends A's lease again, B claims nothing and A commits legitimately (see the test below)
+        gate.hold()
         wf.expire_leases()
         claims_b.extend(b.claim(1))
 
     crashpoint.install(CrashPlan("set.after_act", 1, action=b_takes_over))
     before = m.FENCED_COMMIT_REJECTED._value.get()  # noqa: SLF001
-    assert a.execute(claim_a) == "commit_rejected"
-    crashpoint.install(None)
+    try:
+        got = a.execute(claim_a)
+    finally:
+        crashpoint.install(None)
+    # B really took the step over
+    assert len(claims_b) == 1 and claims_b[0].lease_owner == b.worker_id
+    assert got == "commit_rejected"  # A's fence still passed locally: only the DB guard refused
     assert m.FENCED_COMMIT_REJECTED._value.get() == before + 1  # noqa: SLF001
     (s,) = wf.steps(run_id)
     assert s["state"] == "running" and s["lease_owner"] == b.worker_id  # A wrote nothing
@@ -121,6 +131,35 @@ def test_wf05_db_guard_rejects_stale_commit_even_when_local_fence_passes(wf: WfD
     assert s["evidence"] == {"already": True, "value": "A"}  # B probed and found A's effect
     assert len(wf.effects("a")) == 1  # no duplicate effect
     assert drive(b, run_id, wf)["state"] == "completed"
+
+
+def test_wf05_a_live_beat_between_expiry_and_claim_keeps_the_step(wf: WfDb) -> None:
+    """Reproduction of the CI flake of the test above (before ``BeatGate.hold``): A's own heartbeat lands between
+    ``expire_leases()`` and B's claim. The lease is A's again, B claims nothing, and A commits: correct engine
+    behaviour (A is alive and owns the step), but the takeover the test meant to stage never happened."""
+    run_id = wf.request([plan_step("set", res="a", value="A")])
+    a = wf.make_engine(clock=FakeClock())
+    b = wf.make_engine(clock=FakeClock())
+    gate = BeatGate(a)
+    a.admit_pending()
+    (claim_a,) = a.claim(1)
+    claims_b = []
+
+    def b_too_late(_name: str) -> None:
+        wf.expire_leases()
+        gate.next_beat()  # what a slow runner does: A's heartbeat thread runs before B's claim
+        claims_b.extend(b.claim(1))
+
+    crashpoint.install(CrashPlan("set.after_act", 1, action=b_too_late))
+    try:
+        got = a.execute(claim_a)
+    finally:
+        crashpoint.install(None)
+    assert claims_b == []
+    assert got == "succeeded"
+    assert len(wf.effects("a")) == 1
+    assert drive(b, run_id, wf)["state"] == "completed"
+    assert len(wf.effects("a")) == 1
 
 
 def test_wf05_stale_intent_checkpoint_is_rejected_before_any_act(wf: WfDb) -> None:
@@ -210,12 +249,14 @@ def test_wf06_in_flight_call_of_stale_worker_lands_during_takeover_delay(wf: WfD
     run_id = wf.request([plan_step("inflight", res="f", value="F", name="wf06")], phase="window")
     clock_a = FakeClock()
     a = wf.make_engine(clock=clock_a)
+    gate = BeatGate(a)
     a.admit_pending()
     (claim_a,) = a.claim(1)
     t, out = _in_thread(lambda: a.execute(claim_a))
     _wait_for(
         lambda: "wf06" in BLOCKERS, 5, "request in flight"
     )  # A passed the gate; request on the wire
+    gate.hold()  # A's live heartbeat must not extend the lease between the expiry and B's claim
     wf.expire_leases()
 
     def land() -> None:
@@ -225,6 +266,7 @@ def test_wf06_in_flight_call_of_stale_worker_lands_during_takeover_delay(wf: WfD
     clock_b = _LandingClock(land)
     b = wf.make_engine(clock=clock_b)
     (claim_b,) = b.claim(1)
+    gate.resume()  # A's next beat matches 0 rows now: it may fence A (fence_lost) before A's commit is refused
     clock_a.advance(TEST_CONFIG.lease_duration)
     assert b.execute(claim_b) == "succeeded"
     assert clock_b.sleeps[0] == TEST_CONFIG.takeover_delay  # wait, then probe

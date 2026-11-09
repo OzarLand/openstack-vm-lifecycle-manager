@@ -12,13 +12,17 @@
 * ``ovlm upgrade preflight`` refuses while a run is in its window or restore, or a downtime interval is open, and
   with ``--worker-stopped`` while a worker beats or a step holds a lease.
 
-pg_dump / pg_restore / psql: from ``OVLM_TEST_PG_BIN`` (a directory) or ``PATH``; the client must not be older than
-the server. No silent skip.
+pg_dump / pg_restore / psql must have the server's major version (``SHOW server_version_num``): a newer pg_dump
+writes settings an older server does not know (pg_dump 17 sets ``transaction_timeout``, which a 16 server refuses on
+restore), an older one cannot dump a newer server. Resolution: ``OVLM_TEST_PG_BIN`` (a directory), else
+``/usr/lib/postgresql/<server major>/bin``, else ``PATH`` if its tools have that major. Otherwise the test fails with
+the reason; no silent skip.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import uuid
@@ -55,15 +59,69 @@ CREATE_DB_SQL = ROOT / "deploy" / "backup" / "create-database.sql"
 # --- PostgreSQL client tools ------------------------------------------------------------------------------------
 
 
-def _tool(name: str) -> str:
-    d = os.environ.get("OVLM_TEST_PG_BIN")
-    path = str(Path(d) / name) if d else shutil.which(name)
-    if not path or not Path(path).is_file():
-        pytest.fail(
-            f"{name} not found: install the PostgreSQL client or set OVLM_TEST_PG_BIN",
-            pytrace=False,
+PG_TOOLS = ("pg_dump", "pg_restore", "psql")
+# (host, port) -> the client directory chosen for that server
+_PG_BIN: dict[tuple[str, int], Path] = {}
+
+
+def server_major(admin_url: URL) -> int:
+    eng = create_engine(admin_url)
+    try:
+        with eng.connect() as c:
+            return int(c.execute(text("SHOW server_version_num")).scalar_one()) // 10000
+    finally:
+        eng.dispose()
+
+
+def client_major(tool: Path) -> int | None:
+    """The major version of a PostgreSQL client tool (``pg_dump (PostgreSQL) 16.15 (Ubuntu ...)`` -> 16)."""
+    try:
+        out = subprocess.run(
+            [str(tool), "--version"], capture_output=True, text=True, check=False, timeout=30
         )
-    return path
+    except OSError:
+        return None
+    m = re.search(r"\(PostgreSQL\) (\d+)", out.stdout)
+    return int(m.group(1)) if m else None
+
+
+def resolve_pg_bin(major: int) -> Path:
+    """The directory holding pg_dump / pg_restore / psql of exactly ``major``, or ``pytest.fail`` with the reason.
+
+    ``OVLM_TEST_PG_BIN`` wins (a wrong version there is an error, not a reason to look elsewhere), then
+    ``/usr/lib/postgresql/<major>/bin``, then ``PATH``.
+    """
+    explicit = os.environ.get("OVLM_TEST_PG_BIN")
+    debian = Path(f"/usr/lib/postgresql/{major}/bin")
+    if explicit:
+        where, d = "OVLM_TEST_PG_BIN", Path(explicit)
+    elif (debian / "pg_dump").is_file():
+        where, d = "/usr/lib/postgresql", debian
+    else:
+        found = shutil.which("pg_dump")
+        if found is None:
+            pytest.fail(
+                f"no PostgreSQL {major} client tools: install postgresql-client-{major} or set OVLM_TEST_PG_BIN",
+                pytrace=False,
+            )
+        where, d = "PATH", Path(found).parent
+    for name in PG_TOOLS:
+        got = client_major(d / name) if (d / name).is_file() else None
+        if got != major:
+            pytest.fail(
+                f"{d / name} (from {where}) is PostgreSQL {got or 'missing'} but the server is {major}: "
+                "pg_dump/pg_restore/psql must have the server's major version (a newer pg_dump writes settings "
+                f"an older server refuses on restore). Install postgresql-client-{major} or set OVLM_TEST_PG_BIN.",
+                pytrace=False,
+            )
+    return d
+
+
+def pg_bin(admin_url: URL) -> Path:
+    key = (admin_url.host or "", admin_url.port or 5432)
+    if key not in _PG_BIN:
+        _PG_BIN[key] = resolve_pg_bin(server_major(admin_url))
+    return _PG_BIN[key]
 
 
 def _pg(admin_url: URL, tool: str, *args: str, stdin: bytes | None = None) -> bytes:
@@ -77,7 +135,11 @@ def _pg(admin_url: URL, tool: str, *args: str, stdin: bytes | None = None) -> by
         admin_url.username or "",
     ]
     done = subprocess.run(
-        [_tool(tool), *conn, *args], input=stdin, env=environ, capture_output=True, check=False
+        [str(pg_bin(admin_url) / tool), *conn, *args],
+        input=stdin,
+        env=environ,
+        capture_output=True,
+        check=False,
     )
     assert done.returncode == 0, f"{tool} failed: {done.stderr.decode(errors='replace')}"
     return done.stdout
