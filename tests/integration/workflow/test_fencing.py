@@ -21,9 +21,15 @@ from sqlalchemy import text
 from ovlm.workflow import crashpoint
 from ovlm.workflow import metrics as m
 from ovlm.workflow.clock import FakeClock, SystemClock
-from ovlm.workflow.crashpoint import CrashPlan
+from ovlm.workflow.crashpoint import CrashPlan, SimulatedCrash
 from ovlm.workflow.engine import EngineConfig
-from tests.integration.workflow.conftest import TEST_CONFIG, RecordingAudit, WfDb, drive
+from tests.integration.workflow.conftest import (
+    TEST_CONFIG,
+    CrashWithBeatDue,
+    RecordingAudit,
+    WfDb,
+    drive,
+)
 from tests.integration.workflow.dummy import BLOCKERS, REVOKED, plan_step
 from tests.integration.workflow.test_crash_matrix import worker_process
 
@@ -324,6 +330,78 @@ def test_wf07_late_heartbeat_after_the_local_fence_does_not_extend_the_lease(wf:
     assert a.heartbeat(claim, fence) is False
     after = lease()
     assert after == expired, "a heartbeat after the local fence extended the lease"
+    assert wf.run(run_id)["state"] == "running"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [SimulatedCrash("set.after_claim"), RuntimeError("bug outside the step contract")],
+    ids=["simulated_crash", "exception"],
+)
+def test_wf07_heartbeat_in_flight_when_the_attempt_raises_cannot_extend_the_lease(
+    wf: WfDb, exc: BaseException
+) -> None:
+    """CI flake 2026-11-09 (renewal crash window): an attempt that leaves ``execute`` by an exception must stop
+    and fence its heartbeat before the exception escapes. Before the fix a beat that was already due went out
+    after the attempt had gone and extended the lease by a full ``lease_duration`` (a crash harness had already
+    expired it; in a live worker an exception logged by the step thread had the same effect): the takeover
+    waited for a lease that no attempt held any more."""
+    run_id = wf.request([plan_step("set", res="k", value="K")])
+    a = wf.make_engine()
+    a.admit_pending()
+    (claim,) = a.claim(1)
+    plan = CrashWithBeatDue("set.after_claim", exc=exc)
+    crashpoint.install(plan)
+    with pytest.raises(type(exc)):
+        a.execute(claim)
+    # the attempt is gone: the dead worker's lease runs out (what the crash harnesses do), then the held beat
+    # is released; with the fix ``execute`` has already waited for it, and it was refused
+    wf.expire_leases()
+    plan.release()
+    crashpoint.install(None)
+    (step,) = wf.steps(run_id)
+    assert step["state"] == "running" and step["attempt"] == 1
+    assert step["lease_expires_at"] < wf.one("SELECT now() AS n")["n"], (
+        "a heartbeat sent after the attempt raised extended its lease"
+    )
+    b = wf.make_engine()
+    (claim_b,) = b.claim(1)
+    assert claim_b.takeover and claim_b.step.attempt == 2
+    assert b.execute(claim_b) == "succeeded"
+    assert drive(b, run_id, wf)["state"] == "completed"
+    assert [e["key"] for e in wf.effects()] == ["k"]
+
+
+def test_wf07_beat_whose_attempt_ended_during_the_update_is_rolled_back(wf: WfDb) -> None:
+    """The other half of the fix: a beat that outlived ``_Heartbeater.stop``'s bounded wait (its UPDATE was on
+    the wire when the attempt ended) re-checks the fence before COMMIT and rolls the extension back."""
+    from sqlalchemy import event as sa_event
+
+    from ovlm.workflow.fence import Fence
+
+    run_id = wf.request([plan_step("block", res="k", value="K", name="wf07d")])
+    a = wf.make_engine(clock=SystemClock())
+    a.admit_pending()
+    (claim,) = a.claim(1)
+    wf.expire_leases()
+    fence = Fence(
+        clock=SystemClock(), lease_duration=60.0, fence_margin=1.0, t_send=time.monotonic()
+    )
+
+    def end_attempt_during_update(_c: Any, _cur: Any, stmt: str, *_a: Any) -> None:
+        if stmt.lstrip().startswith("UPDATE workflow_step"):
+            fence.close("attempt ended")
+
+    sa_event.listen(a.db, "after_cursor_execute", end_attempt_during_update)
+    try:
+        assert a.heartbeat(claim, fence) is False
+    finally:
+        sa_event.remove(a.db, "after_cursor_execute", end_attempt_during_update)
+    lease = wf.one(
+        "SELECT lease_expires_at < now() AS expired FROM workflow_step WHERE id = :id",
+        id=claim.step.id,
+    )
+    assert lease["expired"], "a beat whose attempt ended during the UPDATE extended the lease"
     assert wf.run(run_id)["state"] == "running"
 
 

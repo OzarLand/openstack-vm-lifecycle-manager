@@ -17,6 +17,7 @@ from sqlalchemy.engine import URL
 from ovlm.workflow import crashpoint
 from ovlm.workflow.audit import AuditEvent
 from ovlm.workflow.clock import Clock, FakeClock
+from ovlm.workflow.crashpoint import CrashPlan, SimulatedCrash
 from ovlm.workflow.engine import EngineConfig, WorkflowEngine
 from ovlm.workflow.ids import new_id
 from ovlm.workflow.registry import Registry
@@ -37,6 +38,54 @@ TEST_CONFIG = EngineConfig(
     retry_backoff_max=0.0,
     watchdog_interval=0.05,  # fake clocks do not move with real time: poll the fence often
 )
+
+
+class CrashWithBeatDue(CrashPlan):
+    """Crash at ``target`` (its ``occurrence``-th hit) while the crashing attempt's heartbeat has a beat due.
+
+    Reproduces the CI flakes of 2026-11-09 deterministically: the step thread raises ``exc`` only once the
+    heartbeat thread is past its interval wait (``beat_due``), and that beat is held until :meth:`release` (or
+    for at most ``hold`` seconds). A test expires the dead attempt's lease, as the crash harnesses do, then
+    releases the beat: it must not extend the lease of an attempt that has gone.
+    """
+
+    def __init__(
+        self,
+        target: str,
+        occurrence: int = 1,
+        *,
+        exc: BaseException | None = None,
+        hold: float = 1.0,
+    ) -> None:
+        super().__init__(target=target, occurrence=occurrence)
+        self.exc = exc if exc is not None else SimulatedCrash(target)
+        self.hold = hold
+        self.beat_due = threading.Event()
+        self._armed = threading.Event()
+        self._gone = threading.Event()
+
+    def hit(self, name: str) -> None:
+        if name == "lease.heartbeat":
+            if self._armed.is_set() and not self.beat_due.is_set():
+                self.beat_due.set()
+                self._gone.wait(self.hold)
+            return
+        if self.fired or name != self.target:
+            return
+        self.hits += 1
+        if self.hits < self.occurrence:
+            return
+        self.fired = True
+        self._armed.set()
+        assert self.beat_due.wait(5), f"no heartbeat became due before {name}"
+        raise self.exc
+
+    def release(self) -> None:
+        """Let the held beat go, then wait until every heartbeat thread has finished."""
+        self._gone.set()
+        for t in threading.enumerate():
+            if t.name.startswith("ovlm-hb-"):
+                t.join(5)
 
 
 class RecordingAudit:

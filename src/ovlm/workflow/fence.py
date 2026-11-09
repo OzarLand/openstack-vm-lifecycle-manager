@@ -110,6 +110,16 @@ class Fence:
                 self._revoked = reason
         self._fire(reason)
 
+    def close(self, reason: str) -> None:
+        """The attempt has ended (returned or raised): it owns nothing any more, so no heartbeat may extend its
+        lease and no gate may pass. Unlike :meth:`revoke`, no callback fires: the attempt's actions ended with it."""
+        with self._lock:
+            if self._revoked is None:
+                self._revoked = reason
+            self._fired = True
+            self._callbacks.clear()
+        self.stopped.set()
+
     def poll_deadline(self) -> None:
         """Called periodically by the heartbeat thread: fire revoke callbacks once the deadline is past."""
         if self.remaining() <= 0:

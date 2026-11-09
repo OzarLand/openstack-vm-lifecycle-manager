@@ -26,8 +26,9 @@ is in phase ``window`` or ``restore``, first waits ``worker.takeover_delay`` (he
 
 **S5 - crash anywhere is recoverable.** Nothing is committed in ``finally`` blocks or exception handlers that
 could run after a crash; a crash leaves the step ``running`` with a lease that expires, after which another claim
-(attempt + 1, new token) re-probes. Admission, transitions, lock acquisition/release, signal consumption and
-their audit events each commit in a single transaction.
+(attempt + 1, new token) re-probes. An attempt that leaves ``execute`` (returned or raised) has closed its fence
+and joined its heartbeat first, so no extension of its lease lands afterwards. Admission, transitions, lock
+acquisition/release, signal consumption and their audit events each commit in a single transaction.
 
 **S6 - signals.** ``run_signal.consumed_at``/``outcome`` are written in the same transaction as the effect
 (SRE-R-24). Signals needing a step boundary are left pending while a step runs and applied afterwards.
@@ -318,6 +319,10 @@ class _StepContext:
 # ---- heartbeat and watchdog threads -----------------------------------------------------------------------
 
 
+class _LateBeat(Exception):  # noqa: N818 - control flow only, never escapes ``WorkflowEngine.heartbeat``
+    """Rolls back a lease extension whose attempt ended while the UPDATE was in flight."""
+
+
 class _Heartbeater:
     """Extends the lease every ``heartbeat_interval``; a 0-row result revokes the fence at once.
 
@@ -339,8 +344,28 @@ class _Heartbeater:
         self._wd.start()
 
     def stop(self) -> None:
-        # No DB write here: this runs in ``finally`` (S5).
+        """Stop and fence the heartbeat before the attempt leaves ``execute``, however it leaves it.
+
+        Setting the stop event alone is not enough: a beat already past its interval wait would still go out and
+        extend the lease of an attempt that has ended (returned ``commit_unknown``, or raised: a bug outside the
+        step contract that the worker loop logs, an interrupt, a simulated crash), delaying the takeover by up to
+        one lease. So the fence is closed first (a beat not yet sent is refused by
+        :meth:`WorkflowEngine.heartbeat`), then both threads are joined: a beat in flight lands before the attempt
+        is gone, never after. The join is bounded by the worst case of one beat (pool checkout,
+        ``statement_timeout``). No DB write here: this runs in ``finally`` (S5).
+        """
+        self._fence.close("attempt ended")
         self._stop.set()
+        cfg = self._engine.config
+        bound = cfg.fence_margin + max(cfg.heartbeat_interval, 1.0)
+        for t in (self._hb, self._wd):
+            if t.is_alive() and t is not threading.current_thread():
+                t.join(bound)
+                if t.is_alive():
+                    log.warning(
+                        "heartbeat thread still running after the attempt ended",
+                        extra={"step_id": self._claim.step.id, "thread": t.name},
+                    )
 
     def _beat_loop(self) -> None:
         interval = self._engine.config.heartbeat_interval
@@ -568,6 +593,12 @@ class WorkflowEngine:
                         "owner": claim.lease_owner,
                     },
                 ).first()
+                if row is not None and fence.revoked is not None:
+                    # The attempt ended (or fenced itself) while the UPDATE was on its way: roll it back. Normally
+                    # ``_Heartbeater.stop`` waits for this beat; this covers a beat that outlived that bounded wait.
+                    raise _LateBeat
+        except _LateBeat:
+            return False
         except SQLAlchemyError:
             log.warning(
                 "step heartbeat failed; ownership unknown", extra={"step_id": claim.step.id}
