@@ -68,6 +68,8 @@ class FakeGuest:
     cloud: RenewalFake
     volume_id: str | None
     fs_uuid: str = "11111111-2222-3333-4444-555555555555"
+    #: blkid LABEL of the data filesystem (contract 3.3 rule 7); a label profile names it instead of the UUID
+    fs_label: str | None = "app-data"
     marker: str = "marker-v1"
     phases: set[str] = field(default_factory=lambda: {"preflight"})
     #: phase -> list of classifications returned by the next calls (consumed first).
@@ -180,7 +182,9 @@ class FakeGuest:
                 return PhaseResult("needs_human", "device not found")
             st.mounted = True
             return PhaseResult(
-                "ok", "mounted", {"fs_uuid": self.fs_uuid, "marker_sha256": self.marker}
+                "ok",
+                "mounted",
+                {"fs_uuid": self.fs_uuid, "fs_label": self.fs_label, "marker_sha256": self.marker},
             )
         if phase == "start_service":
             if self.volume_id and not st.mounted:

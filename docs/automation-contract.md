@@ -114,6 +114,7 @@ Rules (mandatory):
 4. Mount by UUID or label via `ansible.posix.mount` with `state: mounted`, `opts: defaults,nofail`; write fstab by UUID, never by device name.
 5. Verify marker: if `data_marker` (a file path profile-defined, default `.ovlm-marker`) exists, read it; its checksum is returned in the result JSON.
 6. Never `wipefs`, `mkfs -f`, `dd`, `parted mklabel` anywhere in the repo's `data_attach`. OVLM static-lints the playbook for these strings before the run (cheap, advisory; not a proof).
+7. Report the mounted filesystem's identity: `facts.fs_uuid` (blkid `UUID`) and `facts.fs_label` (blkid `LABEL`, `null` when the filesystem has none). The profile names the filesystem by exactly one of `fs_uuid` or `label`; OVLM compares the reported value of that one with the profile in W6 (3.7.1). A missing or different value parks W6 `needs_human` (`data_attach_mismatch`), before the service starts on the new VM and before the floating IP moves.
 
 ### 3.4 `quiesce` (runs on OLD VM, before OVLM detaches the volume; on the NEW VM in restore step S2)
 - Stop write sources: stop the service units listed in `ovlm.vars.service_units`, confirm no process holds the mount (`fuser -m`/`lsof` read-only), `sync`, `umount <mount_point>`; never edit fstab and never disable units. Service units are stopped, never disabled, and the fstab entry (by UUID or label, `nofail`) stays in place: restore boots the old VM again and relies on fstab to remount the volume and on enabled units to restart the service.
@@ -129,7 +130,7 @@ Enables and starts units; waits for the unit to be active; no data modification 
 ### 3.6 `healthcheck`
 Read-only, may run any number of times and in check mode. Contract:
 - Exit code: 0 healthy, 2 unhealthy (retryable: wait and repeat), 3 degraded-but-serving (treated as unhealthy unless profile sets `accept_degraded`), 1/other = automation error. **Clarification (reference workload): the result is authoritative in `result.json`** (`classification` and `facts.health_state`), not the exit code, because Ansible's own exit codes cannot express 2/3/1 (a playbook run ends 0 or non-zero; there is no "degraded" state). The exit code is used only when `result.json` is missing or malformed (section 3.7).
-- Produces `artifacts/result.json` (3.7) with `checks[]`: each `{name, ok, detail, observed, expected}`. Required checks: service responds (profile-defined URL/port), data mount present and by expected fs UUID, marker checksum equals `ovlm.expected_marker_checksum` (passed by OVLM from the `quiesce` output of the old VM). Optional input `ovlm.expected_fs_uuid` (the filesystem UUID recorded for the data volume): when present, the data-mount check compares the mounted filesystem UUID against it.
+- Produces `artifacts/result.json` (3.7) with `checks[]`: each `{name, ok, detail, observed, expected}`. Required checks: service responds (profile-defined URL/port), data mount present and by expected fs UUID, marker checksum equals `ovlm.expected_marker_checksum` (passed by OVLM from the `quiesce` output of the old VM). Optional input `ovlm.expected_fs_uuid` (the filesystem UUID recorded for the data volume): when present, the data-mount check compares the mounted filesystem UUID against it. OVLM passes it only when the profile names the filesystem by `fs_uuid`; a profile that names it by `label` gets no expected identity here (the service reports no label), and W6 has already checked the label (3.3 rule 7).
 - Timeout per call 60 s default; OVLM does the repetition/backoff, not the playbook.
 
 ### 3.6.1 External-probe identity contract (B8, W10, S9)
@@ -170,6 +171,7 @@ Phase `*` means every phase.
 | `quiesce` | `marker_sha256` | required whenever the renewal has a data volume (3.4); `null` only in the S2 "never mounted" case | W1, S2 |
 | `quiesce` | `was_mounted` | optional (bool); `false` together with a `null` marker is the S2 "never mounted" case (3.4) | S2 |
 | `data_attach` | `fs_uuid` | required when the profile names the filesystem by `fs_uuid`: the UUID of the mounted filesystem | W6 |
+| `data_attach` | `fs_label` | required when the profile names the filesystem by `label`: the label of the mounted filesystem | W6 |
 | `data_attach` | `marker_sha256` | required whenever W1 recorded a marker: SHA-256 of the data marker file on the mounted volume | W6 |
 | `data_attach` | `device` | optional, evidence only: the `/dev/disk/by-id/...` path used | none |
 | `healthcheck` | `marker_sha256` | required whenever W1 recorded a marker: the service's view of the marker (3.6) | W8 |

@@ -523,6 +523,13 @@ def marker_comparison(expected: str | None, observed: Any) -> str:
     return "equal" if observed == expected else "differs"
 
 
+def fs_identity_problems(fact: str, observed: Any, expected: str) -> list[str]:
+    """W6: the mounted filesystem's identity against the profile's; a missing fact is a problem, never a pass."""
+    if observed is None or observed == "":
+        return [f"{fact} not reported by data_attach (the profile names the filesystem by it)"]
+    return [] if observed == expected else [f"{fact} differs from the profile"]
+
+
 class DataAttachGreen(WindowAnsible):
     """W6: AC data_attach on green: by-id device, blkid decision table, mount by UUID. ``first_use=false``."""
 
@@ -560,14 +567,23 @@ class DataAttachGreen(WindowAnsible):
             return out
         dv = self.resolved(ctx)["data_volume"]
         marker = w1_marker(ctx)
-        problems = []
-        if dv.get("fs_uuid") and res.facts.get("fs_uuid") != dv["fs_uuid"]:
-            problems.append("fs_uuid differs from the profile")
+        problems: list[str] = []
+        checked: str | None = None
+        # The profile names the filesystem by exactly one of ``fs_uuid`` or ``label`` (profiles.spec.DataVolume);
+        # W6 checks the one it names (contract 3.7.1). A label profile used to pass with neither checked (P0-5).
+        if dv.get("fs_uuid"):
+            problems += fs_identity_problems("fs_uuid", res.facts.get("fs_uuid"), dv["fs_uuid"])
+            checked = "fs_uuid"
+        elif dv.get("label"):
+            problems += fs_identity_problems("fs_label", res.facts.get("fs_label"), dv["label"])
+            checked = "fs_label"
+        else:  # the profile schema forbids this; a plan that carries neither is not checkable, so it is not a pass
+            problems.append("the plan names no filesystem identity (fs_uuid or label)")
         if marker is not None and res.facts.get(MARKER_FACT) != marker:
             problems.append("marker checksum differs from W1")
         if problems:
             return self.fail(ctx, E.NEEDS_HUMAN, "data_attach_mismatch", problems=problems)
-        return Done({**dict(out.evidence), "first_use": False,
+        return Done({**dict(out.evidence), "first_use": False, "fs_identity_checked": checked,
                      "marker_comparison": marker_comparison(marker, res.facts.get(MARKER_FACT))})  # fmt: skip
 
     def classify(self, ctx: StepContext, exc: Exception) -> Fail:

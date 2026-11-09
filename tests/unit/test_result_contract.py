@@ -323,6 +323,7 @@ def test_the_scan_finds_the_reads_it_must_find() -> None:
         ("quiesce", "marker_sha256"),
         ("quiesce", "was_mounted"),
         ("data_attach", "fs_uuid"),
+        ("data_attach", "fs_label"),
         ("data_attach", "marker_sha256"),
         ("healthcheck", "marker_sha256"),
         ("healthcheck", "health_state"),
