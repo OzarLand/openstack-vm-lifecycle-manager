@@ -422,7 +422,11 @@ def phase_outcome(step: RStep, ctx: StepContext, res: Any, *, data_phase: bool =
     cls = E(res.classification) if res.classification != "ok" else E.RETRYABLE
     if data_phase:
         cls = E.NEEDS_HUMAN  # contract section 6: any data-phase anomaly stops for a human
-    return step.fail(ctx, cls, f"{step.key}_failed", phase_reason=res.reason, facts=dict(res.facts))
+    # ``playbook_reported``: the playbook ran and refused with this classification (the accept-step entry, ADR-0008).
+    extra = {"playbook_reported": res.reported} if getattr(res, "reported", None) else {}
+    return step.fail(
+        ctx, cls, f"{step.key}_failed", phase_reason=res.reason, facts=dict(res.facts), **extra
+    )
 
 
 class AnsibleStep(RStep):

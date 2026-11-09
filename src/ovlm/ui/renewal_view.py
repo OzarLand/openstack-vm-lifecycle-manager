@@ -387,6 +387,18 @@ NEEDS_HUMAN: Mapping[str, tuple[str, list[str]]] = {
             "Retry step, or Abort to stop the window safely.",
         ],
     ),
+    "quiesce_green_failed": (
+        "Restore step S2: the pinned quiesce playbook refused on the new VM. The restore cannot go on past it by "
+        "itself, and the pinned repository cannot change during the run.",
+        [
+            "Read the step's error below: it is what the playbook reported (untrusted text from the guest).",
+            "If the cause is fixable on the new VM, fix it and use Retry step.",
+            "If the playbook refuses a state that is safe (for example a data volume that was never mounted), an "
+            "approver who is not the run's requester can use Accept the step without running its playbook: press "
+            "Probe first; OVLM offers it only while its own read-only probe shows the volume attached to the new VM "
+            "only, mounted nowhere there, and the service units stopped.",
+        ],
+    ),  # fmt: skip
     "quiesce_no_marker": (
         "The service on the old VM was stopped and the data volume unmounted, but the automation reported no data "
         "marker checksum. Without it OVLM cannot prove on the new VM that the data survived, so it stopped before "
@@ -635,6 +647,27 @@ def _windows(windows: Any) -> str:
         out.append(f"{days} {w.get('start', '?')}-{w.get('end', '?')} {w.get('timezone', '')}".strip()
                    if isinstance(w, dict) else str(w))  # fmt: skip
     return "; ".join(out) or "any time"
+
+
+def accept_form(run: Mapping[str, Any]) -> dict[str, Any]:
+    """The accept-step form (ADR-0008): the refused playbook result (reported by the guest: untrusted, shown
+    escaped), OVLM's latest probe of the postcondition with its id, time and checks, and what the request carries."""
+    step = run.get("current_step") or {}
+    truth = run.get("current_truth")
+    probe = truth.get("accept_probe") if isinstance(truth, Mapping) else None
+    offer = next(
+        (a for a in run.get("available_actions") or () if a.get("action") == "accept-step"), None
+    )
+    checks = [
+        (c.get("check", ""), bool(c.get("ok")), str(c.get("detail", "")))
+        for c in (probe or {}).get("checks") or ()
+    ]
+    return {
+        "step_id": str(step.get("id") or ""), "step_key": step.get("step_key"),
+        "refused_rows": evidence_lines(step.get("error")), "probe": probe, "checks": checks,
+        "probe_id": str((probe or {}).get("id") or ""), "probe_at": (probe or {}).get("at"),
+        "available": bool(offer and offer.get("available")), "why": (offer or {}).get("effect"),
+    }  # fmt: skip
 
 
 def typed_target(tc: str) -> dict[str, str]:

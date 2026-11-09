@@ -17,6 +17,7 @@ from html import unescape
 from typing import Any
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from ovlm.workflow.ids import new_id
@@ -912,13 +913,13 @@ def test_a_refusal_names_the_signed_in_account_and_the_missing_role(env: Env) ->
     run = w.seed_run(plan, state="needs_human", needs_human_reason="api_unreachable", phase="window",
                      steps=[{"key": "stop_old", "state": "needs_human", "error_class": "needs_human"}])  # fmt: skip
     expected = "Signed in as ap1 (approver). This action needs the operator role."
-    # the REST API
+    # the REST API (retry-step: operator only; probe is read-only and open to approvers since ADR-0008)
     r = w.ap.post(
-        f"/api/v1/runs/{run}/actions/probe", headers=w.h(w.ap, **{"Idempotency-Key": "k" * 12})
+        f"/api/v1/runs/{run}/actions/retry-step", headers=w.h(w.ap, **{"Idempotency-Key": "k" * 12})
     )
     assert r.status_code == 403 and expected in r.json()["detail"], r.text
     # the web form
-    r = w.post(w.ap, f"/renewals/runs/{run}/actions/probe", {"idempotency_key": "k" * 12})
+    r = w.post(w.ap, f"/renewals/runs/{run}/actions/retry-step", {"idempotency_key": "k" * 12})
     assert r.status_code == 403 and expected in unescape(r.text), r.text
     # the run page explains the disabled actions the same way
     page = w.ap.get(f"/renewals/runs/{run}")
@@ -926,3 +927,152 @@ def test_a_refusal_names_the_signed_in_account_and_the_missing_role(env: Env) ->
     # a plain role guard (viewer-only API call needing the operator role) says the same
     r = w.ap.post("/api/v1/plans", json={"managed_vm_id": w.ids["vm"]}, headers=w.h(w.ap))
     assert r.status_code == 403 and expected in r.json()["detail"], r.text
+
+
+# --- accept-step (ADR-0008) ------------------------------------------------------------------------------------------
+
+_REFUSED = {"reason": "quiesce_green_failed", "playbook_reported": "needs_human",
+            "phase_reason": "<b>not mounted</b> and no earlier quiesce record"}  # fmt: skip
+_ACCEPT_TEXT = "Accept the step without running its playbook"
+
+
+def _parked_s2(w: World, *, probe_age: float | None = 0.0, ok: bool = True) -> tuple[str, str, str]:
+    """A restore parked on S2's playbook refusal, with (unless ``probe_age`` is None) OVLM's accept probe stored."""
+    plan = w.approved_plan()
+    s2 = new_id()
+    probe_id = new_id()
+    truth: dict[str, Any] = {"api_reachable": True}
+    if probe_age is not None:
+        truth["accept_probe"] = {
+            "id": probe_id, "step_id": s2, "attempt": 1, "step_key": "quiesce_green", "ok": ok, "volume_id": "vol-1",
+            "at": (datetime.now(UTC) - timedelta(seconds=probe_age)).isoformat(),
+            "guest": {"mount_point": "/srv/data", "device_mounted": not ok},
+            "checks": [{"check": "data_device_mounted_nowhere", "ok": ok,
+                        "detail": "data device mounted nowhere" if ok else "data device mounted <i>/srv/data</i>"}],
+        }  # fmt: skip
+    run = w.seed_run(
+        plan, state="needs_human", phase="restore", needs_human_reason="quiesce_green_failed", current_truth=truth,
+        current_truth_at=datetime.now(UTC), downtime_started_at=datetime.now(UTC) - timedelta(minutes=9),
+        steps=[{"key": "unlock_old", "state": "succeeded"},
+               {"key": "quiesce_green", "state": "needs_human", "id": s2, "error_class": "needs_human", "error": _REFUSED}],
+    )  # fmt: skip
+    green = "9a9a9a9a-0000-4000-8000-00000000abcd"
+    w.e.sql(
+        "INSERT INTO owned_resource (id, run_id, resource_type, role, intended_name, openstack_id, state) "
+        "VALUES (:i, :r, 'server', 'green', 'app01-ovlm-new', :g, 'present')", i=new_id(), r=run, g=green,
+    )  # fmt: skip
+    return run, s2, probe_id
+
+
+def test_accept_step_is_offered_to_an_approver_with_the_probe_and_an_escaped_refusal(
+    env: Env,
+) -> None:
+    w = World(env)
+    run, s2, probe_id = _parked_s2(w)
+    page = w.ap.get(f"/renewals/runs/{run}")
+    assert page.status_code == 200 and _ACCEPT_TEXT in page.text
+    assert (
+        f"/renewals/runs/{run}/actions/accept-step" in page.text
+        and "without running quiesce.yml" in page.text
+    )
+    # an operator sees it but cannot use it: approver only
+    op = w.op.get(f"/renewals/runs/{run}")
+    assert _ACCEPT_TEXT in op.text and "/actions/accept-step" not in op.text
+    assert "This action needs the approver role." in unescape(op.text)
+    form = w.ap.get(f"/renewals/runs/{run}/actions/accept-step")
+    t = form.text
+    assert (
+        form.status_code == 200
+        and probe_id in t
+        and "Re-probe" in t
+        and "reported by the guest" in t
+    )
+    assert f'name="probe_id" value="{probe_id}"' in t and f'name="step_id" value="{s2}"' in t
+    assert (
+        "<b>not mounted</b>" not in t and "&lt;b&gt;not mounted&lt;/b&gt;" in t
+    )  # guest text escaped
+    assert 'name="attestation"' in t and "app01-ovlm-new" in t and "00abcd" in t  # TC of green
+    assert forms_carry_csrf(t, w.csrf(w.ap)) == 2  # re-probe and confirm
+    url = f"/renewals/runs/{run}/actions/accept-step"
+    base = {"typed_confirmation": "app01-ovlm-new 00abcd", "step_id": s2, "probe_id": probe_id}
+    short = w.post(
+        w.ap,
+        url,
+        {**base, "idempotency_key": "acc-key-0001", "attestation": "fine", **w.totp(w.ap_secret)},
+    )
+    assert short.status_code == 422 and "20 to 2000" in short.text
+    attestation = "Checked by hand: <script>alert(3)</script> lsblk shows nothing mounted"
+    ok = w.post(w.ap, url, {**base, "idempotency_key": "acc-key-0002", "attestation": attestation,
+                            **w.totp(w.ap_secret)})  # fmt: skip
+    assert ok.status_code == 303, ok.text
+    [(kind, payload)] = env.sql("SELECT kind, payload FROM run_signal WHERE run_id = :r", r=run)
+    assert kind == "accept_step" and payload["probe_id"] == probe_id and payload["step_id"] == s2
+    assert (
+        payload["attempt"] == 1 and payload["attestation"] == attestation and payload["stepup_id"]
+    )
+    acts = env.sql("SELECT action FROM audit_event WHERE run_id = :r AND action LIKE 'run.accept_step.%' ORDER BY id",
+                   r=run)  # fmt: skip
+    assert [a for (a,) in acts] == ["run.accept_step.requested"]
+    # one pending accept per run: a second request is refused (and that refusal is audited)
+    again = w.post(w.ap, url, {**base, "idempotency_key": "acc-key-0003", "attestation": attestation,
+                               **w.totp(w.ap_secret)})  # fmt: skip
+    assert again.status_code == 409 and "pending" in again.text
+    # the requester (who created the plan and started the run) cannot use it: not an approver here, and never SoD
+    assert w.post(w.op, url, {**base, "idempotency_key": "acc-key-0004", "attestation": attestation,
+                              "password": PASSWORD}).status_code == 403  # fmt: skip
+
+
+@pytest.mark.parametrize("case", ["no_probe", "stale", "unmet"])
+def test_accept_step_is_not_usable_without_a_fresh_probe_meeting_the_postcondition(
+    env: Env, case: str
+) -> None:
+    w = World(env)
+    run, _, _ = _parked_s2(w, probe_age=None if case == "no_probe" else (61 if case == "stale" else 0),
+                           ok=case != "unmet")  # fmt: skip
+    t = w.ap.get(f"/renewals/runs/{run}").text
+    assert _ACCEPT_TEXT in t and "/actions/accept-step" not in t
+    why = {
+        "no_probe": "press Probe first",
+        "stale": "press Probe",
+        "unmet": "does not show the postcondition",
+    }[case]
+    assert why in t
+    if case == "unmet":
+        assert "<i>/srv/data</i>" not in t and "&lt;i&gt;/srv/data&lt;/i&gt;" in t
+
+
+def test_accept_step_is_not_listed_for_another_parked_reason(env: Env) -> None:
+    w = World(env)
+    plan = w.approved_plan()
+    run = w.seed_run(plan, state="needs_human", phase="restore", needs_human_reason="data_phase_interrupted",
+                     steps=[{"key": "quiesce_green", "state": "needs_human", "error_class": "needs_human",
+                             "error": {"reason": "data_phase_interrupted"}}])  # fmt: skip
+    assert _ACCEPT_TEXT not in w.ap.get(f"/renewals/runs/{run}").text
+
+
+def test_an_accepted_step_carries_a_badge_and_the_escaped_attestation(env: Env) -> None:
+    w = World(env)
+    run, s2, probe_id = _parked_s2(w)
+    attestation = "<script>alert(2)</script> checked lsblk and the units on green by hand"
+    sig = new_id()
+    env.sql("INSERT INTO run_signal (id, run_id, kind, actor_id, payload, consumed_at, outcome) VALUES "
+            "(:i, :r, 'accept_step', (SELECT id FROM app_user WHERE username = 'ap1'), '{}', now(), 'accepted')",
+            i=sig, r=run)  # fmt: skip
+    env.sql("INSERT INTO step_acceptance (id, run_id, signal_id, step_id, step_key, attempt, approver_id, probe_id, "
+            "probe, probed_at, attestation, outcome, refused_result_sha256) VALUES (:i, :r, :s, :st, 'quiesce_green', 1, "
+            "(SELECT id FROM app_user WHERE username = 'ap1'), :p, '{}', now(), :t, 'accepted', :h)",
+            i=new_id(), r=run, s=sig, st=s2, p=probe_id, t=attestation, h="c" * 64)  # fmt: skip
+    env.sql("UPDATE workflow_step SET state = 'succeeded', resolution = 'accepted', finished_at = now() WHERE id = :i",
+            i=s2)  # fmt: skip
+    env.sql(
+        "UPDATE workflow_run SET state = 'running', needs_human_reason = NULL WHERE id = :r", r=run
+    )
+    t = w.op.get(f"/renewals/runs/{run}").text
+    assert (
+        "S2 accepted by ap1" in t and t.count("playbook not run") >= 2
+    )  # run summary and step list
+    assert "<script>alert(2)</script>" not in t and "&lt;script&gt;alert(2)&lt;/script&gt;" in t
+    body = w.op.get(f"/api/v1/runs/{run}", headers=w.h(w.op)).json()
+    assert [a["step_key"] for a in body["accepted_steps"]] == ["quiesce_green"]
+    assert body["accepted_steps"][0]["attestation"] == attestation  # data, as written
+    assert not any(a["action"] == "accept-step" for a in body["available_actions"])

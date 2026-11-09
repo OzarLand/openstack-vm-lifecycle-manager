@@ -23,13 +23,14 @@ from sqlalchemy.orm import Session
 from ovlm import audit
 from ovlm.auth.authz import authorize
 from ovlm.auth.errors import ProblemError
+from ovlm.auth.events import record_independent
 from ovlm.auth.principal import Principal
 from ovlm.auth.sod import Gate, account_provenance, check_approval_eligibility
 from ovlm.auth.stepup import consume_stepup
 from ovlm.policies.service import effective_policy
 from ovlm.profiles.waivers import active_waivers, for_display, hash_binding
 from ovlm.registry.errors import DomainError
-from ovlm.renewal import downtime, reprepare
+from ovlm.renewal import accept, downtime, reprepare
 from ovlm.renewal.config import RenewalConfig
 from ovlm.renewal.evidence import APPROVAL_STEPUP_ACTION, CUTOVER_STEPUP_ACTION
 from ovlm.renewal.plans import (
@@ -59,6 +60,7 @@ ACTIONS: Mapping[str, tuple[str, bool]] = {
     "discard": ("discard", True),
     "mark-resolved": ("mark_resolved", True),
     "reprepare-automation": ("reprepare_automation", True),
+    "accept-step": ("accept_step", True),
 }
 
 
@@ -464,6 +466,7 @@ def available_actions(
     snapshot_id: str | None = None,
     *,
     retire_sent: bool = False,
+    now: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Each action with the role it needs and its concrete effect from the current state (SRE-R-9). The phase is the
     effective one (REN-1): with the outage open a stored ``build`` phase reads ``window``, so the page offers the
@@ -486,7 +489,7 @@ def available_actions(
     out.append(
         {
             "action": "probe",
-            "role": "operator",
+            "role": "operator or approver",
             "effect": "read-only re-probe; refreshes the current truth",
         }
     )
@@ -506,6 +509,8 @@ def available_actions(
                         "role": "approver (not the run's requester) + TC",
                         "effect": f"authorize ONE re-clone of the pinned SHA inside the window (the only git contact "
                                   f"allowed there); its tree must match B6's digest; {key} is retried"})  # fmt: skip
+        if (offer := _accept_offer(run, step, phase, now)) is not None:
+            out.append(offer)
     snap = bool((resolved.get("data_volume") or {}).get("snapshot_before_handoff"))
     if phase == "build":
         out.append(
@@ -554,6 +559,42 @@ def available_actions(
     return out
 
 
+def _accept_offer(
+    run: Mapping[Any, Any], step: Mapping[Any, Any] | None, phase: str, now: datetime | None
+) -> dict[str, Any] | None:
+    """accept-step (ADR-0008): absent unless the run is parked on an allowlisted restore step whose playbook ran and
+    refused; then offered only while OVLM's last probe of the postcondition is fresh and meets it, otherwise listed
+    as unavailable with the reason (press Probe, or the failing check)."""
+    if step is None or accept.not_applicable(
+        run_state=run["state"], step_key=step.get("step_key"), step_state=step.get("state"), phase=phase,
+        error=step.get("error"),
+    ) is not None:  # fmt: skip
+        return None
+    role = "approver (not the run's requester) + TC of green + attestation"
+    probe = accept.shown_probe(run.get("current_truth"))
+    age = accept.probe_age(probe, now) if (probe is not None and now is not None) else None
+    why = None
+    if (
+        probe is None
+        or str(probe.get("step_id")) != str(step.get("id"))
+        or probe.get("attempt") != step.get("attempt")
+    ):
+        why = (f"press Probe first: accept-step needs OVLM's own read-only probe of {step['step_key']}'s "
+               f"postcondition, at most {int(accept.FRESH_SECONDS)} s old")  # fmt: skip
+    elif age is None or age > accept.FRESH_SECONDS:
+        why = f"the last probe is {int(age or 0)} s old: press Probe (it must be at most {int(accept.FRESH_SECONDS)} s old)"
+    elif not probe.get("ok"):
+        why = "not offered: OVLM's probe does not show the postcondition: " + "; ".join(
+            accept.failing(probe)
+        )
+    if why is not None:
+        return {"action": "accept-step", "role": role, "available": False, "effect": why}
+    assert probe is not None  # noqa: S101 - checked above
+    return {"action": "accept-step", "role": role, "available": True,
+            "effect": accept.effect(probe, probe.get("volume_id"), step["step_key"]),
+            "probe_id": str(probe.get("id")), "step_id": str(step.get("id"))}  # fmt: skip
+
+
 def run_body(s: Session, run_id: UUID | str) -> dict[str, Any]:
     run = (
         s.execute(text("SELECT * FROM workflow_run WHERE id = :i"), {"i": run_id}).mappings().one()
@@ -562,7 +603,7 @@ def run_body(s: Session, run_id: UUID | str) -> dict[str, Any]:
         text("SELECT resolved FROM renewal_plan WHERE id = :p"), {"p": run["renewal_plan_id"]}
     ).scalar_one()
     step = s.execute(
-        text("SELECT step_key, state, attempt, lease_owner, lease_expires_at, heartbeat_at, deadline_at, error "
+        text("SELECT id, step_key, state, attempt, lease_owner, lease_expires_at, heartbeat_at, deadline_at, error "
              "FROM workflow_step WHERE run_id = :r AND state IN ('ready','running','waiting','needs_human')"),
         {"r": run_id}).mappings().first()  # fmt: skip
     locks = s.execute(text("SELECT resource_type, resource_key FROM resource_lock WHERE holder_run_id = :r"),
@@ -570,6 +611,7 @@ def run_body(s: Session, run_id: UUID | str) -> dict[str, Any]:
     pending = s.execute(text("SELECT kind, actor_id, created_at FROM run_signal WHERE run_id = :r AND consumed_at IS "
                              "NULL ORDER BY created_at"), {"r": run_id}).mappings().all()  # fmt: skip
     hb = s.execute(text("SELECT max(last_seen_at) FROM worker_heartbeat")).scalar()
+    now = s.execute(text("SELECT now()")).scalar_one()
     body = _row(run)
     body |= {
         "downtime": downtime_body(s, run),
@@ -578,12 +620,15 @@ def run_body(s: Session, run_id: UUID | str) -> dict[str, Any]:
         "pending_signals": [_row(p) for p in pending],
         "worst_case_window_seconds": resolved["worst_case_window_seconds"],
         "max_window_duration_seconds": resolved["max_window_duration_seconds"],
+        # ADR-0008: a step closed by accept-step ran no playbook; every view of the run says so
+        "accepted_steps": accept.accepted(s, str(run_id)),
         "available_actions": available_actions(
             run,
             step,
             resolved,
             _snapshot_id(s, str(run_id)),
             retire_sent=_retire_sent(s, str(run_id)),
+            now=now,
         ),
         "last_worker_heartbeat": _iso(hb),
         "links": {"steps": f"/api/v1/runs/{run_id}/steps"},
@@ -605,8 +650,8 @@ def downtime_body(s: Session, run: Mapping[Any, Any]) -> dict[str, Any]:
 
 def steps(s: Session, run_id: UUID) -> list[dict[str, Any]]:
     rows = s.execute(
-        text("SELECT id, seq, step_key, state, attempt, destructive, evidence, error, error_class, deadline_at, "
-             "lease_owner, lease_expires_at, heartbeat_at, created_at, finished_at FROM workflow_step "
+        text("SELECT id, seq, step_key, state, resolution, attempt, destructive, evidence, error, error_class, "
+             "deadline_at, lease_owner, lease_expires_at, heartbeat_at, created_at, finished_at FROM workflow_step "
              "WHERE run_id = :r ORDER BY seq"), {"r": run_id}).mappings().all()  # fmt: skip
     return [_row(r) for r in rows]
 
@@ -673,18 +718,27 @@ def retirement_request(s: Session, who: Principal, run_id: UUID) -> dict[str, An
 
 def action(
     s: Session, who: Principal, run_id: UUID, name: str, *, typed: str | None, stepup_id: UUID | None,
-    attestation: str | None,
+    attestation: str | None, step_id: UUID | str | None = None, probe_id: str | None = None,
 ) -> dict[str, Any]:  # fmt: skip
     if name not in ACTIONS:
         raise not_found("action")
     kind, confirmed = ACTIONS[name]
     run, resolved = run_row(s, run_id, who)
     scope = resolved["scope"]
+    accept_payload: dict[str, Any] = {}
     if kind == "reprepare_automation":
         _check_reprepare(s, who, run, scope)
+    elif kind == "accept_step":
+        try:
+            accept_payload = _check_accept(s, who, run, resolved, step_id=step_id, probe_id=probe_id,
+                                           attestation=attestation)  # fmt: skip
+        except DomainError as exc:
+            _accept_refused(s, who, str(run_id), scope, exc)
+            raise
     else:
+        # probe is read-only: an approver may refresh the probe an accept-step rests on (ADR-0008)
         role_ok = authorize(who, "operator", scope) or (
-            kind == "mark_resolved" and authorize(who, "approver", scope)
+            kind in ("mark_resolved", "probe") and authorize(who, "approver", scope)
         )
         if not role_ok:
             raise DomainError(403, "forbidden", "Forbidden", who.needs_role_message("operator"),
@@ -695,22 +749,120 @@ def action(
         )
     payload: dict[str, Any] = {}
     if confirmed:
-        if not who.is_human or stepup_id is None:
-            raise DomainError(403, "human-session-required", "Human session required",
-                              "This action needs a human session, TOTP step-up and typed confirmation.")  # fmt: skip
-        expected = tc_target(s.connection(), str(run_id), kind, run["phase"] or "build", resolved)
-        if not expected or not hmac.compare_digest(" ".join((typed or "").split()), expected):
-            raise DomainError(422, "confirmation-mismatch", "Typed confirmation does not match",
-                              "Type the affected server's name and the last 6 characters of its id.")  # fmt: skip
+        try:
+            if not who.is_human or stepup_id is None:
+                raise DomainError(403, "human-session-required", "Human session required",
+                                  "This action needs a human session, TOTP step-up and typed confirmation.")  # fmt: skip
+            expected = tc_target(
+                s.connection(), str(run_id), kind, run["phase"] or "build", resolved
+            )
+            if not expected or not hmac.compare_digest(" ".join((typed or "").split()), expected):
+                raise DomainError(422, "confirmation-mismatch", "Typed confirmation does not match",
+                                  "Type the affected server's name and the last 6 characters of its id.")  # fmt: skip
+        except DomainError as exc:
+            if kind == "accept_step":
+                _accept_refused(s, who, str(run_id), scope, exc)
+            raise
         consume_stepup(s, who, stepup_id, action=f"run.{kind}", target_id=str(run_id))
         payload = {"typed_confirmation": typed, "stepup_id": str(stepup_id)}
     if attestation:
         payload["attestation"] = attestation[:2000]
+    payload |= accept_payload
     sig = send_signal(s.connection(), str(run_id), kind, actor_id=str(who.user_id), payload=payload)
-    _audit(
-        s, who, f"run.{kind}.request", "renewal_run", str(run_id), scope, kind=kind, signal_id=sig
-    )
+    if kind == "accept_step":
+        audit.record(
+            s, action="run.accept_step.requested", target_type=accept.ENTITY, target_id=sig, actor_id=who.user_id,
+            principal_type=who.principal_type, auth_method=who.auth_method, source_ip=who.source_ip,
+            project_scope=scope, run_id=UUID(str(run_id)),
+            after={"run_id": str(run_id), "step_key": accept_payload["step_key"], "attempt": accept_payload["attempt"],
+                   "approver": str(who.user_id), "signal_id": sig, "probe_id": accept_payload["probe_id"]},
+        )  # fmt: skip
+    else:
+        _audit(
+            s,
+            who,
+            f"run.{kind}.request",
+            "renewal_run",
+            str(run_id),
+            scope,
+            kind=kind,
+            signal_id=sig,
+        )
     return run_body(s, run_id)
+
+
+def _check_accept(
+    s: Session, who: Principal, run: Mapping[Any, Any], resolved: Mapping[str, Any], *, step_id: UUID | str | None,
+    probe_id: str | None, attestation: str | None,
+) -> dict[str, Any]:  # fmt: skip
+    """``accept-step`` (:mod:`ovlm.renewal.accept`, ADR-0008): an approver who is not the run's requester (run starter,
+    plan creator; whatever ``auth.allow_operator_approver`` says), on a restore step of the allowlist parked because
+    its playbook ran and refused, with an attestation and the latest OVLM probe, fresh and meeting the postcondition.
+    Returns the signal payload fields. The worker re-checks all of it, with a probe of its own."""
+    scope = resolved["scope"]
+    if not authorize(who, "approver", scope):
+        raise DomainError(403, "forbidden", "Forbidden", who.needs_role_message("approver"),
+                          "Sign out and sign in as an account that holds it.")  # fmt: skip
+    creator = s.execute(
+        text("SELECT created_by FROM renewal_plan WHERE id = :p"), {"p": run["renewal_plan_id"]}
+    ).scalar()
+    if who.user_id in {run["started_by"], creator}:
+        raise DomainError(403, "sod-violation", "Separation of duties",
+                          "The run's requester (who started it or created its plan) cannot accept a step.")  # fmt: skip
+    step = s.execute(
+        text("SELECT id, step_key, state, attempt, error FROM workflow_step WHERE run_id = :r AND state = 'needs_human'"),
+        {"r": run["id"]},
+    ).mappings().first()  # fmt: skip
+    phase = effective_phase(
+        run["phase"], run.get("downtime_started_at"), run.get("downtime_ended_at")
+    )
+    why = accept.not_applicable(
+        run_state=run["state"], step_key=step["step_key"] if step else None, step_state=step["state"] if step else None,
+        phase=phase, error=step["error"] if step else None,
+    )  # fmt: skip
+    if why is not None or step is None:
+        raise DomainError(
+            409, accept.NOT_APPLICABLE, "accept-step does not apply", why or "no parked step"
+        )
+    if step_id is not None and str(step_id) != str(step["id"]):
+        raise DomainError(409, accept.NOT_APPLICABLE, "Another step is parked",
+                          "The parked step changed since the page was loaded. Reload the run.")  # fmt: skip
+    if accept.pending(s, str(run["id"])):
+        raise DomainError(409, accept.PENDING, "An accept-step request is pending",
+                          "The worker has not applied the earlier request yet: one pending accept per run.")  # fmt: skip
+    if accept.already_accepted(s, str(run["id"]), step["step_key"]):
+        raise DomainError(409, accept.ALREADY, "Already accepted",
+                          "This step was already accepted once in this run.")  # fmt: skip
+    if (problem := accept.attestation_problem(attestation)) is not None:
+        raise DomainError(422, accept.ATTESTATION, "Attestation required", problem)
+    shown = accept.shown_probe(run.get("current_truth"))
+    if shown is None or not probe_id or str(shown.get("id")) != probe_id:
+        raise DomainError(409, accept.PROBE_MISMATCH, "Not the latest probe",
+                          "The probe you saw is not the run's latest probe. Probe again and re-read it.")  # fmt: skip
+    if str(shown.get("step_id")) != str(step["id"]) or shown.get("attempt") != step["attempt"]:
+        raise DomainError(409, accept.PROBE_MISMATCH, "Probe of another attempt",
+                          "The probe was taken for another step or attempt. Probe again.")  # fmt: skip
+    age = accept.probe_age(shown, s.execute(text("SELECT now()")).scalar_one())
+    if age is None or age > accept.FRESH_SECONDS:
+        raise DomainError(409, accept.PROBE_STALE, "Probe too old",
+                          f"OVLM's probe must be at most {int(accept.FRESH_SECONDS)} s old. Probe again.")  # fmt: skip
+    if not shown.get("ok"):
+        raise DomainError(
+            409, accept.POSTCONDITION, "Postcondition not met", "; ".join(accept.failing(shown))
+        )
+    return {"step_id": str(step["id"]), "step_key": step["step_key"], "attempt": step["attempt"],
+            "probe_id": probe_id}  # fmt: skip
+
+
+def _accept_refused(s: Session, who: Principal, run_id: str, scope: str, exc: DomainError) -> None:
+    """``run.accept_step.refused`` for a request the api refuses: its own transaction, so it survives the rollback."""
+    record_independent(
+        s, action="run.accept_step.refused", target_type=accept.ENTITY, target_id=run_id, result="denied",
+        actor_id=who.user_id, principal_type=who.principal_type, auth_method=who.auth_method,
+        source_ip=who.source_ip, project_scope=scope, run_id=UUID(run_id),
+        after={"run_id": run_id, "approver": str(who.user_id), "outcome": "refused", "refusal_code": exc.code,
+               "refusal": str(exc.detail)[:200]},
+    )  # fmt: skip
 
 
 def _check_reprepare(s: Session, who: Principal, run: Mapping[Any, Any], scope: str) -> None:

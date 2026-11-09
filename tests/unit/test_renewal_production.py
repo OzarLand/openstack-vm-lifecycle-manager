@@ -386,6 +386,67 @@ def test_probe_runs_only_the_fixed_list_and_refuses_odd_arguments() -> None:
             g.probe("run", target, **bad)
 
 
+def test_accept_probe_adds_one_fixed_read_only_command_and_reads_units_line_by_line() -> None:
+    """ADR-0008: the accept-step probe adds ``lsblk`` on the volume's by-id device (mounted anywhere, partitions
+    included) and reads each unit's state from ``systemctl is-active`` output, not from its exit code."""
+    _p, pub = _key()
+    vol = "5e1f0c2a-7b7d-4c3e-9f00-0123456789ab"
+    dev = "/dev/disk/by-id/virtio-5e1f0c2a-7b7d-4c3e-9"
+    ssh = _Ssh(parse_public_key(pub), {
+        ("systemctl", "is-active", "--", "app.service", "db.service"): SshResult(3, "inactive\nfailed\n"),
+        ("lsblk", "-n", "-o", "MOUNTPOINT", "--", dev): SshResult(0, "\n\n"),
+        ("findmnt", "-n", "--", "/srv/data"): SshResult(1, ""),
+    })  # fmt: skip
+    g = _guest(ssh)
+    target = GuestRef(GREEN, "10.0.0.9", "new", (pub,))
+    res = g.probe(
+        "run",
+        target,
+        mount_point="/srv/data",
+        units=("app.service", "db.service"),
+        data_volume_id=vol,
+    )
+    assert (
+        res.unit_states == {"app.service": "inactive", "db.service": "failed"}
+        and res.units_active is False
+    )
+    assert res.device_mounted is False and res.device_mountpoints == () and res.mounted is False
+    assert ("lsblk", "-n", "-o", "MOUNTPOINT", "--", dev) in ssh.commands
+    assert all(c[0] in ("systemctl", "findmnt", "lsblk", "cloud-init") for c in ssh.commands), (
+        ssh.commands
+    )
+    # mounted elsewhere (a partition at another path): seen through the device, not the mount point
+    ssh.answers[("lsblk", "-n", "-o", "MOUNTPOINT", "--", dev)] = SshResult(0, "\n/mnt/other\n")
+    res = g.probe(
+        "run", target, mount_point="/srv/data", units=("app.service",), data_volume_id=vol
+    )
+    assert res.device_mounted is True and res.device_mountpoints == ("/mnt/other",)
+    # a missing line is "unknown", never "inactive"; an absent device is unknown, never "mounted nowhere"
+    ssh.answers[("systemctl", "is-active", "--", "app.service", "db.service")] = SshResult(
+        3, "inactive\n"
+    )
+    ssh.answers[("lsblk", "-n", "-o", "MOUNTPOINT", "--", dev)] = SshResult(
+        32, "", "not a block device"
+    )
+    res = g.probe(
+        "run",
+        target,
+        mount_point="/srv/data",
+        units=("app.service", "db.service"),
+        data_volume_id=vol,
+    )
+    assert (
+        res.unit_states == {"app.service": "inactive", "db.service": "unknown"}
+        and res.device_mounted is None
+    )
+    # without a volume id the command list is unchanged; a volume id that is not one is refused
+    ssh.commands.clear()
+    g.probe("run", target, mount_point="/srv/data", units=("app.service",))
+    assert not any(c[0] == "lsblk" for c in ssh.commands)
+    with pytest.raises(AutomationError):
+        g.probe("run", target, mount_point=None, units=(), data_volume_id="x; reboot")
+
+
 def test_blue_is_reached_only_with_the_registered_fingerprint() -> None:
     _p, pub = _key()
     key = parse_public_key(pub)

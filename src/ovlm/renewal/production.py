@@ -536,6 +536,25 @@ class RecordStore(Protocol):
 
 _MOUNT = re.compile(r"^/[A-Za-z0-9._/-]{0,250}$")
 _UNIT = re.compile(r"^[A-Za-z0-9:_.@-]{1,200}\.(service|socket|timer|target|mount)$")
+#: A Cinder volume id; its first 20 characters are the virtio serial the guest's by-id link carries.
+_VOLUME = re.compile(r"^[0-9A-Za-z-]{20,64}$")
+
+
+def by_id_device(volume_id: str) -> str:
+    """The data volume's by-id device in the guest (the reference role's rule: virtio serial = the first 20
+    characters of the volume id). ``lsblk`` on it lists the disk and its partitions with their mount points."""
+    return "/dev/disk/by-id/virtio-" + volume_id[:20]
+
+
+def unit_states_of(units: Sequence[str], stdout: str) -> dict[str, str]:
+    """``systemctl is-active -- a b`` prints one state per unit, in order. A unit without a line reads ``unknown``,
+    never "inactive": only an explicit ``inactive`` or ``failed`` counts as stopped (ADR-0008)."""
+    lines = [x.strip() for x in stdout.splitlines()]
+    return {
+        u: (lines[i] if i < len(lines) and lines[i] else "unknown") for i, u in enumerate(units)
+    }
+
+
 #: B5 rotation (ADR-0006 D'): new host keys, printed back over the same authenticated session, sshd reloaded.
 ROTATE_HOST_KEYS = (
     "sudo", "-n", "sh", "-c",
@@ -856,6 +875,14 @@ class RunnerGuestPort:
             except Exception:  # noqa: BLE001 - losing the artefact row must not change what the phase decided
                 log.exception("could not store the automation run record")
         facts = dict(outcome.result.facts) if outcome.result is not None else {}
+        # The playbook ran and refused: a valid result.json that says it failed, and its own classification.
+        reported = (
+            outcome.result.classification.value
+            if outcome.result is not None
+            and not outcome.result.ok
+            and not outcome.decision.reason.startswith(("process killed", "timeout"))
+            else None
+        )
         return PhaseResult(
             cast(Any, outcome.decision.classification.value),
             outcome.decision.reason,
@@ -865,6 +892,7 @@ class RunnerGuestPort:
                 "sha": prepared.sha,
                 "exit_code": outcome.record.exit_code,
             },
+            reported,
         )
 
     def bootstrap(self, run_id: str, policy: str) -> Bootstrap:
@@ -956,8 +984,9 @@ class RunnerGuestPort:
         return HostKeyResult(True, "ok", tuple(k.line for k in new), mode)
 
     def probe(
-        self, run_id: str, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...]
-    ) -> GuestProbe:
+        self, run_id: str, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...],
+        data_volume_id: str | None = None,
+    ) -> GuestProbe:  # fmt: skip
         resolved = self._resolved(run_id)
         creds, user = self._creds(resolved), resolved["guest_access"]["ssh_user"]
         keys = self._target_keys(target, creds)
@@ -967,6 +996,8 @@ class RunnerGuestPort:
             raise AutomationError("mount point not allowed in a probe", Classification.FATAL)
         if any(not _UNIT.match(u) for u in units):
             raise AutomationError("unit name not allowed in a probe", Classification.FATAL)
+        if data_volume_id is not None and not _VOLUME.match(data_volume_id):
+            raise AutomationError("volume id not allowed in a probe", Classification.FATAL)
         state = self._ssh(target, user, keys, creds, ("systemctl", "is-system-running"))
         if not state.connected:
             return GuestProbe(False)
@@ -977,13 +1008,22 @@ class RunnerGuestPort:
                 == 0
             )
         active = None
+        unit_states: dict[str, str] | None = None
         if units:
-            active = (
-                self._ssh(
-                    target, user, keys, creds, ("systemctl", "is-active", "--", *units)
-                ).exit_code
-                == 0
+            res = self._ssh(target, user, keys, creds, ("systemctl", "is-active", "--", *units))
+            active = res.exit_code == 0
+            unit_states = unit_states_of(units, res.stdout)
+        device_mounted: bool | None = None
+        device_mountpoints: tuple[str, ...] = ()
+        if data_volume_id is not None:
+            device = by_id_device(data_volume_id)
+            res = self._ssh(
+                target, user, keys, creds, ("lsblk", "-n", "-o", "MOUNTPOINT", "--", device)
             )
+            # any other exit: the device is absent or unreadable, i.e. unknown (never "mounted nowhere")
+            if res.exit_code == 0:
+                device_mountpoints = tuple(x.strip() for x in res.stdout.splitlines() if x.strip())
+                device_mounted = bool(device_mountpoints)
         ci = self._ssh(target, user, keys, creds, ("cloud-init", "status"))
         return GuestProbe(
             True,
@@ -991,6 +1031,9 @@ class RunnerGuestPort:
             active,
             ci.exit_code == 0 and "status: done" in ci.stdout,
             next(iter(state.stdout.strip().splitlines()), None),
+            unit_states,
+            device_mounted,
+            device_mountpoints,
         )
 
     def external_probe(
