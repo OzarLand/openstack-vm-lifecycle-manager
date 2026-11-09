@@ -55,6 +55,9 @@ the repository. Thresholds marked `tune` in the file are defaults; keep them in 
 
 Every alert has a `severity` label (`page` or `ticket`) and a `runbook_url` annotation pointing to its section below.
 
+Backups, restores and upgrades of OVLM itself, and when they are refused (never mid-window):
+[backup-restore-upgrade.md](backup-restore-upgrade.md).
+
 ## 2. Route pages (Alertmanager)
 
 ```yaml

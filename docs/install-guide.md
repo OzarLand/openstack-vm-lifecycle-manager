@@ -101,7 +101,8 @@ repository.
   api's uid. Do not keep that mode outside a development machine.
 
 Restoring: put both files back at their paths with the same modes **before** `make up`, then restore the database.
-`ovlm kek status` (in the worker) shows whether every stored secret is wrapped to a key the worker holds.
+`ovlm kek status` (in the worker) shows whether every stored secret is wrapped to a key the worker holds. The
+full procedure, `make backup` and `make restore`: [backup-restore-upgrade.md](backup-restore-upgrade.md).
 
 > [!NOTE]
 > `compose.yaml` is the **development and CI** file. It sets `OVLM_DEVELOPMENT_MODE: "true"` and publishes the api
@@ -328,8 +329,8 @@ connection, with the credential from the encrypted store.
 | Blue's SSH host key: scan at registration, operator confirmation | 🟡 Implemented, integration tested with an `ssh-keyscan` double; not lab validated |
 | End-to-end renewal on a real cloud | ⬜ Not started. Not lab validated |
 | TLS proxy example configuration | ⬜ Not provided. Bring your own |
-| Backup and restore of the database and the key | ⬜ Designed ([security-model.md §5](security-model.md)), not documented as a procedure |
-| Upgrades between versions | ⬜ No upgrade guide. Expect to start clean |
+| Backup and restore of the database and the key | 🟡 Procedure and `make backup` / `make restore`: [backup-restore-upgrade.md](backup-restore-upgrade.md). Integration tested, not lab validated |
+| Upgrades between versions | 🟡 Procedure with a read-only preflight that refuses mid-window: [backup-restore-upgrade.md §4](backup-restore-upgrade.md#4-upgrade). No upgrade between two real releases tested yet |
 | Alerts and paging | 🟡 Sample Prometheus rules and runbooks: [operations.md](operations.md). Paging is mandatory before any real renewal; not lab validated |
 
 The day-by-day state is in [team-log.md](team-log.md) and the backlog in [roadmap.md](roadmap.md).
