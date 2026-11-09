@@ -1127,7 +1127,10 @@ def _abort_actor(c: Connection, run_id: str) -> str | None:
 def _check_confirmation(
     c: Connection, sig: SignalView, run_id: str, expected_tc: str
 ) -> str | None:
-    """Re-validate the step-up (``run.<kind>`` on this run, consumed, interactive, of the actor) and the TC."""
+    """Re-validate the step-up (``run.<kind>`` on this run, consumed **by this signal**, interactive, of the actor)
+    and the TC. The api spends the step-up and inserts the signal in one transaction and records the signal's id on
+    the step-up (``consumed_by_signal``, write-once by trigger): a second signal replaying a spent ``stepup_id`` is
+    refused (review PMR-8 for ``accept_step`` and ``reprepare_automation``, REN-10 for every confirmed kind)."""
     import hmac
 
     typed = " ".join(str(sig.payload.get("typed_confirmation") or "").split())
@@ -1138,7 +1141,8 @@ def _check_confirmation(
         return "no step-up"
     row = c.execute(
         text(
-            "SELECT user_id, action, target_id, auth_method, created_at, consumed_at FROM stepup WHERE id = :i"
+            "SELECT user_id, action, target_id, auth_method, created_at, consumed_at, consumed_by_signal "
+            "FROM stepup WHERE id = :i"
         ),
         {"i": sid},
     ).first()
@@ -1151,6 +1155,8 @@ def _check_confirmation(
         and row.auth_method == INTERACTIVE_AUTH
         and row.consumed_at is not None
         and row.created_at <= row.consumed_at <= row.created_at + STEPUP_VALIDITY
+        and row.consumed_by_signal is not None
+        and str(row.consumed_by_signal) == str(sig.id)
     )
     return None if ok else "step-up evidence invalid"
 

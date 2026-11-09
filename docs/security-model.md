@@ -99,7 +99,11 @@ SOURCE-VERIFIED, DU = DOCUMENTED-UNVERIFIED, AS = ASSUMPTION are kept), [automat
   session id at login and on privilege change. Idle timeout 30 min, absolute 12 h; logout deletes the row.
 - **Step-up re-auth (TOTP)**: approvals and destructive confirmations require a TOTP step-up. A step-up is **single-use**,
   valid **5 minutes**, and **bound to one action type and one target** (and the session); it is consumed by exactly that
-  approval or confirmation and cannot be replayed for another action or target (SEC-R-10, M9).
+  approval or confirmation and cannot be replayed for another action or target (SEC-R-10, M9). A run action's step-up
+  also names the `run_signal` that spent it (`consumed_by_signal`, write-once by trigger), and the worker accepts the
+  signal only with a step-up spent by that signal, so a spent step-up cannot be replayed on a second signal of the same
+  kind and run either (review PMR-8, REN-10; renewal-workflow.md §2). Residual: a compromised api can still insert a
+  step-up row of its own (it issues them), which the out-of-band checks of §3.1 do not cover either.
 - CSRF: per-session synchronizer token, sent by HTMX via `hx-headers` (`X-CSRF-Token`) and in form fields; every
   unsafe method checks the token **and** the `Origin`/`Referer` against the configured external URL. Bearer-token API
   calls carry no cookie and are exempt.
