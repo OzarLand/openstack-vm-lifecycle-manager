@@ -20,12 +20,13 @@ from ovlm.automation.checkout import CloneOptions, tree_digest
 from ovlm.automation.model import AutomationSpec, RunnerConfig
 from ovlm.automation.runner import (
     CACHE_MARKER,
+    MISMATCH_KEEP,
     AutomationRunner,
     check_checkout_cache,
     sweep_checkout_cache,
     sweep_run_root_checkouts,
 )
-from ovlm.automation.types import AutomationError, Classification, Phase
+from ovlm.automation.types import AutomationError, CheckoutUnverifiable, Classification, Phase
 from tests.unit.automation.test_checkout import make_repo
 from tests.unit.automation.test_runner import FILES
 
@@ -213,6 +214,53 @@ def test_a_modified_cached_file_is_refused_for_a_human(
         and not (prepared.checkout.parent / "_checkout.adopt").exists()
     )
     assert not (prepared.checkout.parent / "_checkout.sha").exists()
+
+
+def test_a_mismatching_cached_copy_is_moved_aside_not_overwritten(
+    cached: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review PMR-6 (a): the mismatching copy is the one sign that something wrote to the worker-only cache. It is
+    moved aside (``_checkout.mismatch-<UTC time>``, content intact) and its path and both digests are given to the
+    caller for the step's evidence; a re-clone then writes a fresh copy next to it instead of deleting it. At most
+    MISMATCH_KEEP are kept per run; the run's terminal sweep removes them with the entry."""
+    runner, prepared, cache = cached
+    entry = cache / WF1
+    _container_restart(runner)
+    _rewrite(entry / "_checkout" / "playbooks" / "configure.yml", "- hosts: evil\n")
+    calls = _no_git(monkeypatch)
+    with pytest.raises(CheckoutUnverifiable) as exc:
+        runner.reverify_checkout(prepared.spec, WF1, expected_digest=prepared.tree_digest)
+    assert calls == []
+    moved = Path(exc.value.detail["quarantined_checkout"])
+    assert (
+        moved.parent == entry
+        and moved.name.startswith("_checkout.mismatch-")
+        and moved.name in str(exc.value)
+    )
+    assert (moved / "playbooks" / "configure.yml").read_text() == "- hosts: evil\n"
+    assert exc.value.detail["recorded_tree_digest"] == prepared.tree_digest
+    assert exc.value.detail["cached_tree_digest"] == tree_digest(moved) != prepared.tree_digest
+    assert not (entry / "_checkout").exists()
+    # an approver's re-clone (B6 path) writes a new copy and leaves the quarantined one alone
+    monkeypatch.undo()
+    again = runner.prepare_automation(prepared.spec, WF1)
+    assert (
+        again.tree_digest == prepared.tree_digest
+        and (entry / "_checkout").is_dir()
+        and moved.is_dir()
+    )
+    # bounded: the oldest go first
+    for _ in range(MISMATCH_KEEP + 1):
+        _container_restart(runner)
+        _rewrite(entry / "_checkout" / "playbooks" / "configure.yml", "- hosts: evil\n")
+        with pytest.raises(CheckoutUnverifiable):
+            runner.reverify_checkout(prepared.spec, WF1, expected_digest=prepared.tree_digest)
+        runner.prepare_automation(prepared.spec, WF1)
+    kept = sorted(p.name for p in entry.iterdir() if p.name.startswith("_checkout.mismatch-"))
+    assert len(kept) == MISMATCH_KEEP and moved.name not in kept
+    assert (
+        sweep_checkout_cache(cache, 3600, keep=(), terminal={WF1}) == [entry] and not entry.exists()
+    )
 
 
 def test_an_added_cached_file_is_refused(cached: Any) -> None:

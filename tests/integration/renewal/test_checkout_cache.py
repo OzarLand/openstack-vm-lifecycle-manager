@@ -102,6 +102,21 @@ def test_a_tampered_cached_checkout_stops_for_a_human(world: World, tmp_path: Pa
         port._prepared_for(run_id)  # noqa: SLF001
     assert exc.value.error_class is ErrorClass.NEEDS_HUMAN
     assert "does not match the tree digest" in exc.value.detail["message"]
+    # PMR-6 (a): the tampered copy is kept aside for a human, with its path and both digests in the step's refusal
+    # evidence and the audit trail
+    moved = Path(exc.value.detail["quarantined_checkout"])
+    assert cfg.checkout_cache is not None and moved.parent == cfg.checkout_cache / run_id
+    assert moved.name.startswith("_checkout.mismatch-")
+    assert (moved / "playbooks" / "quiesce.yml").read_text().startswith("- hosts: ovlm_target")
+    assert (
+        exc.value.detail["recorded_tree_digest"]
+        == _b6.tree_digest
+        != exc.value.detail["cached_tree_digest"]
+    )
+    [row] = world.q("SELECT after FROM audit_event WHERE run_id = :r AND action = 'automation.checkout.quarantined'",
+                    r=run_id)  # fmt: skip
+    assert row["after"]["quarantined_checkout"] == str(moved)
+    assert row["after"]["cached_tree_digest"] == exc.value.detail["cached_tree_digest"]
 
 
 def test_a_b6_without_a_recorded_digest_cannot_adopt_the_cache(

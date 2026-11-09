@@ -662,10 +662,12 @@ class RunnerGuestPort:
                 spec, run_id, waivers=waivers, expected_digest=recorded
             )
         except CheckoutUnverifiable as exc:
+            if exc.detail.get("quarantined_checkout"):
+                self._audit_quarantine(run_id, step_id, exc.detail)
             prepared = self._reprepare(
                 run_id, resolved, spec, recorded,
                 refusal=(reprepare.CHECKOUT_UNVERIFIABLE, str(exc)),
-                step_id=step_id, attempt=attempt, fence=fence,
+                step_id=step_id, attempt=attempt, fence=fence, detail=exc.detail,
             )  # fmt: skip
         if prepared is None:
             if self._in_outage(run_id):
@@ -699,6 +701,7 @@ class RunnerGuestPort:
         step_id: str | None,
         attempt: int | None,
         fence: FenceLike | None,
+        detail: Mapping[str, str] | None = None,
     ) -> PreparedAutomation:
         """The only git contact allowed where the checkout cannot be adopted: an approver's one-shot authorization
         (``reprepare-automation``), consumed **before** the clone. The normal B6 path runs (pinned SHA, verify, lint,
@@ -709,12 +712,18 @@ class RunnerGuestPort:
         authorization given for this step is taken, and only while this attempt holds the step's lease in the
         database (:func:`~ovlm.renewal.reprepare.take`). An attempt that lost its lease consumes nothing and
         contacts no git host."""
+        # a mismatching cached copy moved aside: where, and both digests (PMR-6)
+        evidence = dict(detail or {})
         if step_id is None or attempt is None or fence is None:
-            raise StepRefusal(ErrorClass.NEEDS_HUMAN, refusal[0], message=refusal[1][:300])
+            raise StepRefusal(
+                ErrorClass.NEEDS_HUMAN, refusal[0], message=refusal[1][:300], **evidence
+            )
         fence.check("automation:reprepare")
         auth = self._take_authorization(run_id, step_id, attempt)
         if auth is None:
-            raise StepRefusal(ErrorClass.NEEDS_HUMAN, refusal[0], message=refusal[1][:300])
+            raise StepRefusal(
+                ErrorClass.NEEDS_HUMAN, refusal[0], message=refusal[1][:300], **evidence
+            )
         try:
             fence.check("automation:reprepare")
         except FenceLost:
@@ -760,9 +769,21 @@ class RunnerGuestPort:
             )  # fmt: skip
         self._finish_authorization(
             auth, ok=True, outcome="re-cloned and verified", recorded_digest=recorded,
-            tree_digest=prepared.tree_digest,
+            tree_digest=prepared.tree_digest, quarantined=evidence.get("quarantined_checkout"),
         )  # fmt: skip
         return prepared
+
+    def _audit_quarantine(
+        self, run_id: str, step_id: str | None, detail: Mapping[str, str]
+    ) -> None:
+        """Audit ``automation.checkout.quarantined``: a cached copy that did not match B6's digest was moved aside
+        (PMR-6). Never fails the caller."""
+        try:
+            with self.engine.begin() as c:
+                reprepare.record_quarantine(c, run_id=run_id, step_id=step_id, detail=detail)
+        except Exception as exc:  # noqa: BLE001 - evidence, never fatal: the refusal still carries it
+            log.error("could not audit the quarantined checkout", extra={"run_id": run_id,
+                                                                         "error": type(exc).__name__})  # fmt: skip
 
     def _take_authorization(
         self, run_id: str, step_id: str, attempt: int

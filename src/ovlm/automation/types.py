@@ -59,10 +59,14 @@ class AutomationError(Exception):
 class CheckoutUnverifiable(AutomationError):  # noqa: N818 - a classified refusal, like its base
     """The run's checkout (on ``run_root`` or in the checkout cache) cannot be shown to be the tree B6 verified: its
     tree digest differs from the recorded one, or none was recorded. Always ``NEEDS_HUMAN``; never resolved by a git
-    contact unless an approver authorizes one re-clone (``reprepare-automation``)."""
+    contact unless an approver authorizes one re-clone (``reprepare-automation``).
 
-    def __init__(self, message: str) -> None:
+    ``detail``: evidence for the step's refusal, e.g. where a mismatching cached copy was moved aside and both
+    digests (``quarantined_checkout``, ``recorded_tree_digest``, ``cached_tree_digest``; review PMR-6)."""
+
+    def __init__(self, message: str, detail: dict[str, str] | None = None) -> None:
         super().__init__(message, Classification.NEEDS_HUMAN)
+        self.detail: dict[str, str] = dict(detail or {})
 
 
 @dataclass(frozen=True)

@@ -24,6 +24,7 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import Callable, Container, Sequence
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
@@ -274,9 +275,13 @@ class AutomationRunner:
             ) from None
         if got != expected_digest:
             co.remove_tree(tmp)
+            moved = self._quarantine(cached)
             raise CheckoutUnverifiable(
                 "the cached checkout does not match the tree digest recorded by prepare_automation "
                 "(modified on disk?); not adopted"
+                + (f", moved aside to {moved.name}" if moved is not None else ""),
+                {"recorded_tree_digest": expected_digest, "cached_tree_digest": got}
+                | ({"quarantined_checkout": str(moved)} if moved is not None else {}),
             )
         try:
             tmp.rename(dest)
@@ -292,6 +297,33 @@ class AutomationRunner:
             extra={"workflow_id": dest.parent.name},
         )
         return got
+
+    def _quarantine(self, cached: Path) -> Path | None:
+        """Move a cached copy whose digest differs from B6's record aside, next to it, as
+        ``_checkout.mismatch-<UTC time>`` (review PMR-6): the one sign that something wrote to the worker-only cache
+        (or the disk corrupted it) is kept for a human instead of being overwritten by a re-clone. At most
+        :data:`MISMATCH_KEEP` such copies are kept per run (the oldest go first); the run's terminal sweep removes
+        the rest with the entry. ``None`` if it cannot be moved (it stays where it is; never adopted)."""
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+        moved = cached.with_name(f"_checkout.mismatch-{stamp}")
+        try:
+            cached.rename(moved)
+        except OSError as exc:
+            log.error(
+                "cannot move the mismatching cached checkout aside",
+                extra={"error": type(exc).__name__},
+            )
+            return None
+        log.warning(
+            "the cached checkout does not match B6's tree digest: moved aside for inspection",
+            extra={"workflow_id": cached.parent.name, "quarantined_checkout": str(moved)},
+        )
+        kept = sorted(
+            p for p in cached.parent.iterdir() if p.name.startswith("_checkout.mismatch-")
+        )
+        for old in kept[:-MISMATCH_KEEP]:
+            co.remove_tree(old)
+        return moved
 
     def reverify_checkout(
         self,
@@ -756,6 +788,8 @@ class AutomationRunner:
 # ---- module-level helpers -------------------------------------------------------------------------------
 
 
+#: Cached copies moved aside on a digest mismatch kept per run (PMR-6); older ones are removed.
+MISMATCH_KEEP = 3
 #: The file OVLM writes at the top of ``automation.checkout_cache`` on first use: the directory is OVLM's (PMR-3).
 CACHE_MARKER = ".ovlm-checkout-cache"
 #: A canonical run id (the worker's ``workflow_run.id``): the only names of entries the cache sweep may remove.

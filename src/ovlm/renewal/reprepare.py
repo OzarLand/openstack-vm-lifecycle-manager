@@ -60,8 +60,30 @@ audit.register_entity(
         "outcome",
         "recorded_tree_digest",
         "tree_digest",
+        "quarantined_checkout",
     ],
 )
+#: A cached checkout copy that did not match B6's tree digest, moved aside (review PMR-6).
+CHECKOUT_ENTITY = "automation_checkout"
+audit.register_entity(
+    CHECKOUT_ENTITY,
+    ["run_id", "step_id", "quarantined_checkout", "recorded_tree_digest", "cached_tree_digest"],
+)
+
+
+def record_quarantine(
+    c: Connection, *, run_id: str, step_id: str | None, detail: Mapping[str, str]
+) -> None:
+    """Audit ``automation.checkout.quarantined`` (worker): where the mismatching copy was moved and both digests."""
+    with Session(bind=c) as s:
+        audit.record(
+            s, action="automation.checkout.quarantined", target_type=CHECKOUT_ENTITY, target_id=run_id,
+            result="failure", principal_type="worker", auth_method="none", run_id=UUID(run_id),
+            step_id=UUID(step_id) if step_id else None,
+            after={"run_id": run_id, "step_id": step_id, "quarantined_checkout": detail.get("quarantined_checkout"),
+                   "recorded_tree_digest": detail.get("recorded_tree_digest"),
+                   "cached_tree_digest": detail.get("cached_tree_digest")},
+        )  # fmt: skip
 
 
 def applies_to(error: Mapping[str, Any] | None) -> bool:
@@ -207,8 +229,10 @@ def finish(
     outcome: str,
     recorded_digest: str | None = None,
     tree_digest: str | None = None,
+    quarantined: str | None = None,
 ) -> None:
-    """Record what the consumed authorization led to, on its row and in the audit trail."""
+    """Record what the consumed authorization led to, on its row and in the audit trail (with the cached copy moved
+    aside on a digest mismatch, when there was one: PMR-6)."""
     c.execute(
         text("UPDATE automation_reprepare SET outcome = :o WHERE id = :i"),
         {"i": auth.id, "o": outcome[:500]},
@@ -220,5 +244,6 @@ def finish(
             run_id=UUID(auth.run_id), authority_ref=f"run_signal:{auth.signal_id}",
             after={"run_id": auth.run_id, "step_key": auth.step_key, "sha": auth.sha, "approver": auth.approver_id,
                    "signal_id": auth.signal_id, "outcome": outcome[:200], "recorded_tree_digest": recorded_digest,
-                   "tree_digest": tree_digest},
+                   "tree_digest": tree_digest}
+            | ({"quarantined_checkout": quarantined} if quarantined else {}),
         )  # fmt: skip

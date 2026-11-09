@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import sqlalchemy.exc
+from sqlalchemy import text
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import Session
 
@@ -293,6 +295,49 @@ def test_the_api_offers_and_checks_the_action(lab: Lab) -> None:
             svc.action(s, _who(w, "ap2"), UUID(w.run_id), "reprepare-automation", typed=w.blue_tc(),
                        stepup_id=None, attestation=None)  # fmt: skip
         assert exc.value.code == "human-session-required"
+
+
+def test_a_consumed_authorization_cannot_be_re_armed_or_deleted(lab: Lab) -> None:
+    """Review PMR-6 (b): the worker's column grant would let it set ``consumed_at`` back to NULL; the trigger allows
+    only the consume transitions (NULL to a value, once each) and refuses every other change, DELETE and TRUNCATE,
+    even for the table owner."""
+    w = lab.w
+    lab.strand()
+    lab.signal()
+    w.drive()
+    [auth] = lab.authorizations()
+    assert auth["consumed_at"] is not None and auth["outcome"] == "re-cloned and verified"
+    refused = (sqlalchemy.exc.DBAPIError,)
+    for sql in (
+        "UPDATE automation_reprepare SET consumed_at = NULL WHERE id = :i",
+        "UPDATE automation_reprepare SET consumed_at = now() + interval '1 second' WHERE id = :i",
+        "UPDATE automation_reprepare SET outcome = 'x' WHERE id = :i",
+        "UPDATE automation_reprepare SET outcome = NULL WHERE id = :i",
+        "UPDATE automation_reprepare SET consumed_at = consumed_at WHERE id = :i",
+    ):
+        with pytest.raises(refused, match="append-only"), w.worker.begin() as c:
+            c.execute(text(sql), {"i": auth["id"]})
+    with pytest.raises(refused, match="permission denied"), w.worker.begin() as c:
+        c.execute(text("DELETE FROM automation_reprepare WHERE id = :i"), {"i": auth["id"]})
+    for sql in ("UPDATE automation_reprepare SET sha = :s WHERE id = :i", "DELETE FROM automation_reprepare WHERE id = :i",
+                "TRUNCATE automation_reprepare CASCADE"):  # fmt: skip
+        with pytest.raises(refused, match="append-only"), w.admin.begin() as c:
+            c.execute(text(sql), {"i": auth["id"], "s": "0" * 40})
+    # a pending one: its outcome cannot come before its consumption
+    w.x("UPDATE workflow_step SET state = 'needs_human', error = '{\"reason\": \"automation_checkout_lost\"}' "
+        "WHERE id = (SELECT id FROM workflow_step WHERE run_id = :r AND state = 'waiting')", r=w.run_id)  # fmt: skip
+    w.x("UPDATE workflow_run SET state = 'needs_human', needs_human_reason = 'automation_checkout_lost' WHERE id = :r",
+        r=w.run_id)  # fmt: skip
+    lab.signal("ap3")
+    assert w.engine is not None
+    w.engine.process_signals()
+    pending = next(a for a in lab.authorizations() if a["consumed_at"] is None)
+    with pytest.raises(refused, match="append-only"), w.worker.begin() as c:
+        c.execute(
+            text("UPDATE automation_reprepare SET outcome = 'x' WHERE id = :i"),
+            {"i": pending["id"]},
+        )
+    assert [dict(a) for a in lab.authorizations()][0] == dict(auth)
 
 
 # --- PMR-2: an authorization is bound to its step and fenced ------------------------------------------------------
