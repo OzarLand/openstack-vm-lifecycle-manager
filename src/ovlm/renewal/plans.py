@@ -32,7 +32,7 @@ from ovlm.renewal.config import RenewalConfig
 audit.register_entity(
     "renewal_run",
     ["trigger", "step_key", "error_class", "reason", "outcome", "approval_id", "snapshot_id", "truth", "rule",
-     "kind", "signal_id", "plan_id", "run_id"],
+     "kind", "signal_id", "plan_id", "run_id", "interval_kind", "seconds"],
 )  # fmt: skip
 audit.register_entity(
     "renewal_plan", ["managed_vm_id", "state", "policy_version", "run_id", "subject_type", "reason"]

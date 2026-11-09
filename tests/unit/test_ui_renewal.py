@@ -89,6 +89,78 @@ def test_downtime_timer() -> None:
     assert ended and not ended["running"] and ended["elapsed"] == 300 and ended["remaining"] is None
 
 
+def _iv(
+    kind: str, start: datetime, end: datetime | None, by: str, to: str | None, **kw: object
+) -> dict[str, object]:
+    return {"kind": kind, "started_at": start.isoformat(), "ended_at": end.isoformat() if end else None,
+            "started_by_step": by, "ended_by_step": to, "ongoing": end is None,
+            "seconds": ((end or NOW) - start).total_seconds(), **kw}  # fmt: skip
+
+
+def test_downtime_duration_is_a_measured_value_or_not_measured_never_0s() -> None:
+    """P2-3: a demo run measured 0.04 s and the panel said "0s", which reads as "no downtime"."""
+    assert rv.downtime_duration(None) == "not measured"
+    assert rv.downtime_duration("x") == "not measured"
+    assert rv.downtime_duration(0) == "under 0.1s"
+    assert rv.downtime_duration(0.04) == "under 0.1s"
+    assert rv.downtime_duration(0.46) == "0.5s"
+    assert rv.downtime_duration(218.4) == "3m 38s"
+    for v in (0, 0.0, 0.001, 0.4, 0.999, None):
+        assert rv.downtime_duration(v) != "0s"
+
+
+def test_downtime_panel_sums_every_interval_window_and_restore() -> None:
+    """Lab finding AC: a cutover then a revert before G3 is two outages; the panel lists both and their total."""
+    w1 = NOW - timedelta(hours=2)
+    body = {"downtime": {"intervals": [
+        _iv("window", w1, w1 + timedelta(seconds=41), "quiesce_old", "verify_external"),
+        _iv("restore", NOW - timedelta(minutes=10), NOW - timedelta(minutes=10) + timedelta(seconds=218.4),
+            "quiesce_green", "verify_external_old"),
+    ]}, "max_window_duration_seconds": 3600}  # fmt: skip
+    dt = rv.downtime(body, NOW)
+    assert dt is not None and not dt["running"] and dt["complete"]
+    assert dt["total"] == 259.4 and dt["total_text"] == "4m 19s"
+    assert [(i["kind_text"], i["started_by"], i["ended_by"], i["text"]) for i in dt["intervals"]] == [
+        ("Renewal window", "W1", "W10", "41s"), ("Restore to the old VM", "S2", "S9", "3m 38s"),
+    ]  # fmt: skip
+    assert dt["elapsed"] == 41 and not dt["window_running"] and dt["remaining"] is None
+
+
+def test_downtime_panel_open_interval_is_ongoing_and_counts_so_far() -> None:
+    w1 = NOW - timedelta(hours=1)
+    body = {"downtime": {"intervals": [
+        _iv("window", w1, w1 + timedelta(seconds=40), "quiesce_old", "verify_external"),
+        _iv("restore", NOW - timedelta(seconds=90), None, "quiesce_green", None),
+    ]}}  # fmt: skip
+    dt = rv.downtime(body, NOW)
+    assert dt is not None and dt["running"] and dt["intervals"][1]["ongoing"]
+    assert dt["intervals"][1]["text"] == "1m 30s" and dt["total"] == 130
+    assert not dt["window_running"]  # the window budget no longer runs: the window ended at W10
+
+
+def test_downtime_panel_sub_second_demo_run_never_shows_0s() -> None:
+    w1 = NOW - timedelta(minutes=3)
+    body = {"downtime": {"intervals": [
+        _iv("window", w1, w1 + timedelta(milliseconds=40), "quiesce_old", "verify_external"),
+    ]}}  # fmt: skip
+    dt = rv.downtime(body, NOW)
+    assert (
+        dt is not None
+        and dt["total_text"] == "under 0.1s"
+        and dt["intervals"][0]["text"] == "under 0.1s"
+    )
+
+
+def test_downtime_panel_unmeasured_end_of_a_finished_run() -> None:
+    body = {"downtime": {"intervals": [
+        _iv("window", NOW - timedelta(minutes=5), None, "quiesce_old", None, ongoing=False, end_measured=False,
+            seconds=None),
+    ]}}  # fmt: skip
+    dt = rv.downtime(body, NOW)
+    assert dt is not None and not dt["running"] and not dt["complete"]
+    assert dt["intervals"][0]["text"] == "not measured" and dt["total_text"] == "not measured"
+
+
 def _resolved(*, auto: bool, snapshot: bool) -> dict[str, object]:
     return {"auto_restore_in_window": auto, "data_volume": {"snapshot_before_handoff": snapshot}}
 

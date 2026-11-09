@@ -4,7 +4,7 @@
 |---|---|
 | Owner | Agent 2 — Chief Architect |
 | Status | **Designed** (Phase 1 proposal; nothing implemented) |
-| Last updated | 2026-11-05 |
+| Last updated | 2026-11-09 |
 
 > **Revision 2026-11-04**: DB role split `ovlm_api` / `ovlm_worker` with grants, `run_signal`, run `requested` state
 > (SEC-R-1); requester set and hash inputs on approvals, automation diff on plans (SEC-R-2); automation artefact
@@ -128,9 +128,10 @@ scheduler: `managed_vm_id`, `policy_id`, `deadline`, `next_window_start`, `compu
 
 | Table | Key columns | Constraints / notes |
 |---|---|---|
-| `workflow_run` | `kind` (`renewal`, `inventory_sync`, `readiness`, `credential_test`, `rewrap`, `automation_lint`, `automation_diff`, `probe`), `strategy`, `strategy_version`, `state` (`requested`, `rejected`, `running`, `needs_human`, `failed`, `completed`, `rolled_back`, …), `renewal_plan_id`, `service_id`, `subject` jsonb, `abort_requested`, `abort_requested_by`, `phase` (`build`, `window`, `retained`, `restore`, `retire`), `auto_restore_used bool`, `needs_human_reason` (`api_unreachable`, `post_start_failure`, `approval_evidence_invalid`, `ambiguous_state`, …; drives re-probe and paging), `downtime_started_at` (written in the W1 claim transaction), `downtime_ended_at`, `current_truth` jsonb + `current_truth_at` (SRE-R-9), `started_by`, `started_at`, `finished_at`, `version` | Partial unique: one non-terminal `renewal` run per service (`UNIQUE(service_id) WHERE kind='renewal' AND state NOT IN terminal`); api may INSERT only with `state='requested'` (trigger) |
+| `workflow_run` | `kind` (`renewal`, `inventory_sync`, `readiness`, `credential_test`, `rewrap`, `automation_lint`, `automation_diff`, `probe`), `strategy`, `strategy_version`, `state` (`requested`, `rejected`, `running`, `needs_human`, `failed`, `completed`, `rolled_back`, …), `renewal_plan_id`, `service_id`, `subject` jsonb, `abort_requested`, `abort_requested_by`, `phase` (`build`, `window`, `retained`, `restore`, `retire`), `auto_restore_used bool`, `needs_human_reason` (`api_unreachable`, `post_start_failure`, `approval_evidence_invalid`, `ambiguous_state`, …; drives re-probe and paging), `downtime_started_at` (written in the W1 claim transaction), `downtime_ended_at` (the run's **first** downtime interval, kept for the window budget, the REN-1 outage seal and the retention timer; every interval is in `run_downtime`), `current_truth` jsonb + `current_truth_at` (SRE-R-9), `started_by`, `started_at`, `finished_at`, `version` | Partial unique: one non-terminal `renewal` run per service (`UNIQUE(service_id) WHERE kind='renewal' AND state NOT IN terminal`); api may INSERT only with `state='requested'` (trigger) |
 | `run_signal` | `run_id`, `kind` (`admit`, `abort`, `rollback`, `revert`, `retry_step`, `mark_resolved`, `probe`, `discard`, `approve`, `reprepare_automation`), `actor_id`, `approval_id`, `payload` jsonb (TC as typed, step-up id, attestation), `created_at`, `consumed_at`, `outcome` | Written by api (INSERT), consumed by worker; `consumed_at`/`outcome` are set in the **same fenced transaction** as the state change the signal causes, so an uncommitted effect leaves the signal pending and it is re-applied (SRE-R-24); the worker re-validates actor role, step-up and TC before acting |
 | `automation_reprepare` | `run_id`, `signal_id` (unique), `step_id`, `step_key`, `sha` (the plan's pin), `approver_id`, `authorized_at`, `consumed_at`, `outcome` | One-shot approver authorization of one re-clone inside the window (`reprepare-automation`, renewal-workflow.md §2). Inserted by the worker when it accepts the signal; `consumed_at` set by the guest port **before** it clones, then `outcome`; at most one pending per run (partial unique index); no DELETE grant; api reads. Migration `renewal_0002` |
+| `run_downtime` | `run_id`, `kind` (`window`, `restore`), `started_at`, `started_by_step`, `ended_at`, `ended_by_step` | Every downtime interval of a renewal run (roadmap P0-3; renewal-workflow.md §3 "Downtime"). `window`: opened in the W1 claim transaction, closed in the W10 success commit (or S9 after an in-window restore). `restore`: opened by S2 when no interval is open (a revert after the cutover) in a fenced transaction before the quiesce play on green, or in S2's success commit when S2 is skipped; closed in the S9 success commit. Partial unique: at most one open interval per run (`UNIQUE(run_id) WHERE ended_at IS NULL`), so a retry, takeover or re-claim never opens a second one; closing is `UPDATE … WHERE ended_at IS NULL`. Append-only: a trigger allows only closing an open interval once and refuses any other UPDATE, DELETE, TRUNCATE. Worker: SELECT, INSERT, UPDATE of `ended_at`/`ended_by_step`; api: SELECT. Run downtime = Σ intervals; an open interval is "ongoing". Migration `renewal_0003` (backfills one `window` row per run from the run columns; restore outages before it were never measured) |
 | `installation_setting` | `key`, `value` jsonb, `changed_by`, `changed_at` (history kept) | Admin only, TC, audited. `allow_operator_approver` (default false, M9): when true, operator+approver in one scope is allowed and such approvals are flagged `self_approved` |
 | `workflow_step` | `run_id`, `seq`, `step_key`, `state` (`ready`, `running`, `waiting`, `succeeded`, `failed`, `needs_human`, `skipped`, `cancelled`), `attempt int`, `fencing_token bigint`, `lease_owner` (worker instance UUID, new per process start), `lease_expires_at`, `heartbeat_at`, `not_before`, `deadline_at`, `intent` jsonb, `evidence` jsonb, `error_class` (`retryable`, `needs_human`, `fatal`), `error` jsonb, `destructive bool` | `UNIQUE(run_id, seq)`; partial unique `UNIQUE(run_id) WHERE state='running'`; index `(state, not_before)`; index `(state, lease_expires_at)` |
 | `workflow_step_attempt` | `step_id`, `attempt`, `fencing_token`, `worker_id`, `started_at`, `ended_at`, `outcome`, `evidence` jsonb | Append-only history of attempts (FR-AUD-2 "every step attempt") |
@@ -169,6 +170,7 @@ mounted into api or worker containers, SEC-R-18) owns all tables; `ovlm_audit_ad
 | `workflow_run` | INSERT (`state='requested'` only), SELECT | read/write |
 | `run_signal` | INSERT, SELECT | SELECT, UPDATE (`consumed_at`, `outcome`) |
 | `workflow_step*`, `automation_run`, `owned_resource`, `resource_lock`, `worker_heartbeat` | SELECT | read/write |
+| `run_downtime` | SELECT | SELECT, INSERT, UPDATE (`ended_at`, `ended_by_step`; a trigger allows closing an open interval only) |
 | `observed_*`, `sync_run`, `readiness_assessment`, `check_result` | SELECT (readiness rows: INSERT of the request) | read/write |
 | `audit_event` | INSERT, SELECT | INSERT, SELECT |
 
@@ -208,5 +210,6 @@ erDiagram
   workflow_run ||--o{ approval : "cutover/retirement gates"
   workflow_run ||--o{ resource_lock : holds
   workflow_run ||--o{ owned_resource : creates
+  workflow_run ||--o{ run_downtime : "downtime intervals"
   workflow_run ||--o{ audit_event : correlates
 ```

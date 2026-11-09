@@ -29,7 +29,7 @@ from ovlm.auth.stepup import consume_stepup
 from ovlm.policies.service import effective_policy
 from ovlm.profiles.waivers import active_waivers, for_display, hash_binding
 from ovlm.registry.errors import DomainError
-from ovlm.renewal import reprepare
+from ovlm.renewal import downtime, reprepare
 from ovlm.renewal.config import RenewalConfig
 from ovlm.renewal.evidence import APPROVAL_STEPUP_ACTION, CUTOVER_STEPUP_ACTION
 from ovlm.renewal.plans import (
@@ -572,6 +572,7 @@ def run_body(s: Session, run_id: UUID | str) -> dict[str, Any]:
     hb = s.execute(text("SELECT max(last_seen_at) FROM worker_heartbeat")).scalar()
     body = _row(run)
     body |= {
+        "downtime": downtime_body(s, run),
         "current_step": _row(step) if step else None,
         "locks": [{"resource_type": t, "resource_key": k} for t, k in locks],
         "pending_signals": [_row(p) for p in pending],
@@ -588,6 +589,18 @@ def run_body(s: Session, run_id: UUID | str) -> dict[str, Any]:
         "links": {"steps": f"/api/v1/runs/{run_id}/steps"},
     }
     return body
+
+
+def downtime_body(s: Session, run: Mapping[Any, Any]) -> dict[str, Any]:
+    """Every downtime interval of the run and their sum (api-design.md, renewal-workflow.md 3). A run row whose first
+    interval exists only in ``downtime_started_at``/``downtime_ended_at`` is read through those columns."""
+    items = downtime.intervals(s, str(run["id"]))
+    if not items:
+        now = s.execute(text("SELECT now()")).scalar_one()
+        items = downtime.from_run_columns(run, now)
+    out = downtime.summary(items, terminal=run["state"] in TERMINAL)
+    out["intervals"] = [_row(i) for i in out["intervals"]]
+    return out
 
 
 def steps(s: Session, run_id: UUID) -> list[dict[str, Any]]:
