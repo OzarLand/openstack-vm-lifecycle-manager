@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
+from ovlm.config.renewal_defaults import DEFAULTS_ID
 from ovlm.config.settings import (
     RenewalApprovalValidity,
     RenewalExternalVerify,
@@ -15,6 +19,9 @@ from ovlm.config.settings import (
     RenewalRetire,
     RenewalSettings,
 )
+from ovlm.registry.errors import DomainError
+from ovlm.renewal.config import RenewalConfig
+from ovlm.renewal.plans import resolve_plan
 from ovlm.workflow.ids import new_id
 from tests.integration.auth_support import PASSWORD, Env, env  # noqa: F401 - fixture
 from tests.integration.renewal.conftest import CFG, _seed
@@ -59,11 +66,79 @@ def configure(e: Env) -> None:
     e.app.state.settings = e.settings.model_copy(update={"renewal": RENEWAL})
 
 
-def test_plan_needs_configured_keys_no_invented_defaults(env: Env) -> None:  # noqa: F811
+def test_plan_on_a_fresh_config_records_the_defaults(env: Env) -> None:  # noqa: F811
+    """P1-8: no renewal key set, the plan is created; it records every effective value and which came from the
+    built-in defaults, bound into the plan hash (``resolved``), and the worst case is computed from them."""
+    assert env.app.state.settings.renewal == RenewalSettings()  # nothing configured
     a = Api(env)
     r = a.op.post("/api/v1/plans", json={"managed_vm_id": a.ids["vm"]}, headers=a.h(a.op))
-    assert r.status_code == 409 and r.json()["code"] == "renewal-config-incomplete"
-    assert "timeouts.green_build" in r.json()["detail"]
+    assert r.status_code == 201, r.text
+    plan = r.json()
+    rec = plan["resolved"]["renewal_settings"]
+    expected = RenewalConfig.from_settings(env.app.state.settings)
+    assert rec["defaults"] == DEFAULTS_ID
+    assert rec["values"] == expected.values() and len(rec["values"]) == 30
+    assert rec["defaulted"] == sorted(rec["values"])  # every key from the defaults
+    assert rec["values"]["renewal.timeouts.green_build"] == 900.0
+    assert plan["resolved"]["worst_case_window_seconds"] == expected.worst_case_window(
+        snapshot=False, stateless=False
+    )
+    assert plan["blast_radius"]["timeouts"]["keys_from_defaults"] == 30
+    stored = env.sql(
+        "SELECT resolved -> 'renewal_settings' FROM renewal_plan WHERE id = :i", i=plan["id"]
+    )
+    assert stored[0][0] == rec
+
+
+def test_plan_records_an_override(env: Env) -> None:  # noqa: F811
+    renewal = RenewalSettings(timeouts={"fip_status": 45, "volume_detach": 100},
+                              healthcheck=RenewalHealthcheck(max_attempts=3))  # fmt: skip
+    env.app.state.settings = env.settings.model_copy(update={"renewal": renewal})
+    a = Api(env)
+    r = a.op.post("/api/v1/plans", json={"managed_vm_id": a.ids["vm"]}, headers=a.h(a.op))
+    assert r.status_code == 201, r.text
+    rec = r.json()["resolved"]["renewal_settings"]
+    assert rec["values"]["renewal.timeouts.fip_status"] == 45.0
+    assert rec["values"]["renewal.timeouts.volume_detach"] == 100.0
+    assert rec["values"]["renewal.healthcheck.max_attempts"] == 3
+    overridden = {"renewal.timeouts.fip_status", "renewal.timeouts.volume_detach",
+                  "renewal.healthcheck.max_attempts"}  # fmt: skip
+    assert overridden.isdisjoint(rec["defaulted"]) and len(rec["defaulted"]) == 27
+    default_worst = RenewalConfig.from_settings(env.settings).worst_case_window(
+        snapshot=False, stateless=False
+    )
+    # W9 + S8 (+15 s each), W3 + S4 (+40 s each), one more attempt in W8 (+130 s) and S7 (start + check, +300 s)
+    assert (
+        r.json()["resolved"]["worst_case_window_seconds"]
+        == default_worst + 2 * 15 + 2 * 40 + 130 + 300
+    )
+
+
+def test_plan_refused_when_the_profile_asks_more_than_the_step_bound(env: Env) -> None:  # noqa: F811
+    a = Api(env)
+    # a new profile version (versions are immutable) whose automation asks the runner for 600 s of quiesce
+    env.sql(
+        "INSERT INTO profile_version (id, profile_id, number, spec, spec_hash, automation_sha, created_by) "
+        "SELECT :i, profile_id, 2, jsonb_set(spec, '{automation,timeouts}', '{\"quiesce\": 600}'), spec_hash, "
+        "automation_sha, created_by FROM profile_version WHERE number = 1",
+        i=new_id(),
+    )
+    env.sql("UPDATE profile SET latest_version = 2")
+    r = a.op.post("/api/v1/plans", json={"managed_vm_id": a.ids["vm"]}, headers=a.h(a.op))
+    assert r.status_code == 409 and r.json()["code"] == "renewal-timeouts-inconsistent", r.text
+    assert "quiesce (600 s > 120 s)" in r.json()["detail"]
+
+
+def test_plan_needs_every_key_of_a_hand_built_config(env: Env) -> None:  # noqa: F811
+    """A config built without the defaults (tools, tests) is still refused with the list of missing keys."""
+    a = Api(env)
+    partial = RenewalConfig(timeouts={"green_build": 900.0})
+    with env.owner.connect() as c:
+        prow = c.execute(text("SELECT * FROM policy")).mappings().one()
+        with pytest.raises(DomainError) as exc:
+            resolve_plan(c, UUID(a.ids["vm"]), partial, policy_row=prow)
+    assert exc.value.code == "renewal-config-incomplete"
+    assert "timeouts.fip_status" in exc.value.detail
 
 
 def test_plan_approval_start_and_run_actions(env: Env) -> None:  # noqa: F811

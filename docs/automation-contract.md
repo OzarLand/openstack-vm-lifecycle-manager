@@ -214,14 +214,20 @@ Inputs: `ovlm.rollback.phase` (which phase failed). Typical: on the OLD VM, remo
 
 ## 6. Timeouts and exit-code classification
 
-| Phase | Default timeout (ASSUMPTION: tune in lab) | Idle (no output) |
+| Phase | Default timeout | Idle (no output) |
 |---|---|---|
 | preflight | 120 s | 60 s |
 | configure | 1800 s | 300 s |
-| data_attach | 300 s | 120 s |
-| quiesce | 300 s | 120 s |
-| start_service | 300 s | 120 s |
+| data_attach | 120 s | 90 s |
+| quiesce | 120 s | 90 s |
+| start_service | 120 s | 90 s |
 | healthcheck | 60 s per call | 30 s |
+| rollback_hooks | 120 s | 90 s |
+
+The four phases that run in the downtime window or the restore were lowered from 300 s (idle 120 s) with roadmap P1-8,
+from the Felcloud measurements, so the worst-case window stays under a default Keystone token lifetime
+([timeouts.md](timeouts.md)). A workload that needs more asks for it in its profile (`automation.timeouts`, up to
+`automation.max_timeout`, default 4x) and the renewal's step bound must allow it (checked at plan creation).
 
 Timeouts are `min(profile value, OVLM maximum)`. On timeout: SIGTERM to the process group, 30 s grace, SIGKILL; classification below.
 

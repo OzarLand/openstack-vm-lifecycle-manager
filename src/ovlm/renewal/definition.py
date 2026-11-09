@@ -224,6 +224,15 @@ class BlueGreenFipV1(WorkflowDefinition):
         missing = self.d.cfg.missing(snapshot=bool(dv.get("snapshot_before_handoff")))
         if missing:
             return Reject("configuration keys missing: " + ", ".join(missing))
+        recorded = (r.get("renewal_settings") or {}).get("values")
+        if recorded is not None and recorded != self.d.cfg.values():
+            # the plan shows the approvers the values the api had; the worker enforces its own (roadmap P1-8)
+            changed = sorted(k for k in set(recorded) | set(self.d.cfg.values())
+                             if recorded.get(k) != self.d.cfg.values().get(k))  # fmt: skip
+            log.warning(
+                "renewal settings of the worker differ from the plan's record: %s", ", ".join(changed),
+                extra={"run_id": run.id, "renewal_plan_id": run.renewal_plan_id, "changed_keys": changed},
+            )  # fmt: skip
         unavailable = self.d.cloud.unavailable_reason(project_of(r))
         if unavailable:
             return Reject(unavailable)

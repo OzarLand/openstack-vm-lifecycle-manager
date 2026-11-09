@@ -322,71 +322,84 @@ different uids.
 
 ### 5.3 The configuration file
 
-The renewal has **no default timeouts**: every key below must be set, or the api refuses to create a plan and the
-worker rejects the run at admission with the list of missing keys (`src/ovlm/renewal/config.py`). The values are
-**yours to measure** on your cloud and your workload; the project gives no numbers (the Felcloud lab's worst-case window
-came to 49 minutes, inside a 1 h policy window, with values measured there). The settings are a TOML file read by the
-api and the worker (`OVLM_CONFIG_FILE`, default `/etc/ovlm/ovlm.toml`; [architecture.md](architecture.md)). It holds no
-secret. Create `config/ovlm.toml`, mode 0644. The `<seconds>` placeholders are deliberate: the file does not parse
-until you replace them.
+The settings are a TOML file read by the api and the worker (`OVLM_CONFIG_FILE`, default `/etc/ovlm/ovlm.toml`;
+[architecture.md](architecture.md)). It holds no secret. Create `config/ovlm.toml`, mode 0644, and mount the **same**
+file into the api and the worker (section 5.4).
+
+The renewal timeouts have **built-in defaults** (`ovlm-renewal-defaults/1`), derived from the Felcloud lab with margins:
+every key, its value, where it comes from and how it was chosen are in [timeouts.md](timeouts.md). A fresh install can
+create a plan without setting any of them. The defaults stay explicit: the api and the worker log at start which keys
+use them and the worst-case windows they give, and each plan records the effective value of every key
+(`resolved.renewal_settings`, bound into the plan hash and approved at G1 and G2). With the defaults the worst-case
+window is 36 min (stateless), 44 min (data volume) or 49 min (with a pre-handoff snapshot). Your Keystone tokens must
+outlive it (W1 is refused otherwise; Keystone's default lifetime is 1 h), and the G2 approver weighs it against the
+policy's windows and `max_window_duration` (section 6.6).
+
+The one key you must set is the automation allowlist. Every renewal key below is an **optional override**: uncomment
+only the ones you measured on your cloud and your workload; the others keep their defaults.
 
 ```toml
-[renewal.timeouts]                 # seconds; one deadline per step (renewal-workflow.md section 2)
-preflight = <seconds>
-claim_resources = <seconds>
-green_create_call = <seconds>
-green_build = <seconds>            # green ACTIVE
-green_ssh = <seconds>              # green reachable over SSH
-green_host_key = <seconds>         # added to green_ssh
-green_ready = <seconds>
-server_stop = <seconds>
-server_start = <seconds>
-server_lock = <seconds>
-server_delete = <seconds>
-volume_detach = <seconds>
-volume_attach = <seconds>
-snapshot = <seconds>               # needed only when a profile sets snapshot_before_handoff
-fip_status = <seconds>
-external_verify = <seconds>
-
-[renewal.automation_timeouts]      # seconds per Ansible phase, as the renewal counts them (step deadline = this + 60 s)
-preflight = <seconds>
-configure = <seconds>
-quiesce = <seconds>
-data_attach = <seconds>
-start_service = <seconds>
-healthcheck = <seconds>
-rollback_hooks = <seconds>
-
-[renewal.green_ready]
-max_age = <seconds>
-
-[renewal.healthcheck]
-max_attempts = <count>
-interval = <seconds>
-
-[renewal.external_verify]
-required_successes = <count>
-interval = <seconds>
-
-[renewal.retire]
-health_max_age = <seconds>
-
-[renewal.approval_validity]
-retirement = <seconds>             # no documented default; plan (24 h) and cutover (4 h) have defaults
-
 [automation]
 allowed_repos = ["https://git.example.org/team/"]   # URL prefixes of the automation repositories; empty refuses all
+
+# Optional overrides (seconds unless noted). Defaults and their sources: docs/timeouts.md.
+# [renewal.timeouts]               # one deadline per step (renewal-workflow.md section 2)
+# preflight = 120
+# claim_resources = 120
+# green_create_call = 120
+# green_build = 900                # green ACTIVE
+# green_ssh = 600                  # green reachable over SSH
+# green_host_key = 300             # added to green_ssh
+# green_ready = 300
+# server_stop = 90
+# server_start = 90
+# server_lock = 30
+# server_delete = 600
+# volume_detach = 60
+# volume_attach = 90
+# snapshot = 300                   # used only when a profile sets snapshot_before_handoff
+# fip_status = 30
+# external_verify = 60
+#
+# [renewal.automation_timeouts]    # per Ansible phase as the renewal counts it (step deadline = this + 60 s);
+# preflight = 120                  # default: the runner's timeout of the phase (automation.timeout or the contract)
+# configure = 1800
+# quiesce = 120
+# data_attach = 120
+# start_service = 120
+# healthcheck = 60
+# rollback_hooks = 120
+#
+# [renewal.green_ready]
+# max_age = 1800
+#
+# [renewal.healthcheck]
+# max_attempts = 2                 # count
+# interval = 10
+#
+# [renewal.external_verify]
+# required_successes = 2           # count
+# interval = 5
+#
+# [renewal.retire]
+# health_max_age = 3600
+#
+# [renewal.approval_validity]
+# retirement = 14400               # plan (24 h) and cutover (4 h) have their own defaults
 ```
 
 Notes:
 
 - `renewal.automation_timeouts.<phase>` bounds the **step**; the Ansible process itself is stopped at the runner's
   timeout for that phase (the contract defaults of [automation-contract.md §6](automation-contract.md#6-timeouts-and-exit-code-classification),
-  or `[automation.timeout]` overrides, capped by `[automation.max_timeout]`). Keep each step bound at or above the
-  runner's timeout of that phase. This guide found no check that ties the two together.
+  or `[automation.timeout]` overrides, capped by `[automation.max_timeout]`). Left unset, the step bound follows the
+  runner's timeout. Set below it, the api and the worker refuse to start; a profile whose `automation.timeouts` asks
+  for more than the step bound is refused at plan creation (`renewal-timeouts-inconsistent`). The other checks
+  between keys are listed in [timeouts.md §4](timeouts.md#4-checks).
 - The G2 approval shows the worst-case window computed from these values (sum of the W1–W10 and S1–S10 deadlines).
   The policy's `max_window_duration` must fit in its shortest window (§6.6).
+- Changing a renewal key applies to plans created afterwards; restart the api and the worker together. The worker
+  logs a warning when its values differ from the ones a plan recorded.
 - `automation.allowed_repos` is read by the **worker** at B6 (after G1). A profile with a repository outside it is
   accepted when it is saved and refused only at B6: check it yourself before G1. There is no admin API for this list;
   changing it means editing the file and restarting the worker.
@@ -757,7 +770,7 @@ database volume).
 | No published images, no release tags process described | You build from a commit you choose | pin the commit (§5.1) |
 | `compose.prod.yaml` has not started a stack on a real host (only `docker compose config` and unit tests in CI); `make smoke` is not run against it in CI | Restart policies, the fixed network and the proxy's address are unverified | §5.4, §5.5; check the audit log's client addresses (§2.3) |
 | The sample TLS proxy configuration is untested | | `nginx -t` and check the headers (§2.3) |
-| Renewal timeouts have no defaults | No plan until all are set | measure; §5.3 |
+| Renewal timeout defaults come from one lab cloud (1 vCPU guests, few runs) | A slower cloud or workload can hit a step deadline | compare step durations with the plan's deadlines after a first run and override (§5.3, [timeouts.md](timeouts.md) §5) |
 | No UI for clouds, connections, credentials, users, services, profiles; no OpenAPI document | Setup is API-only, by hand, with a session and CSRF | §5.6, api-design.md |
 | Automation repository allowlist is a worker setting, checked at B6 only (the admin API in the design is not built) | A wrong repository is found after G1 | check it before G1 (§7.1) |
 | No lint at profile save (`lint_status: pending`) | Lint findings appear at B6 | lint your repository before G1 |

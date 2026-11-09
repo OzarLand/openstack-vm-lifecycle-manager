@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
@@ -48,6 +49,8 @@ from ovlm.renewal.plans import (
 )
 from ovlm.workflow.ids import new_id
 from ovlm.workflow.requests import request_run, send_signal
+
+log = logging.getLogger("ovlm.renewal")
 
 TERMINAL = ("rejected", "cancelled", "failed", "completed", "rolled_back")
 #: action path segment -> (signal kind, needs TC + step-up + human session)
@@ -198,6 +201,12 @@ def create_plan(
     )  # fmt: skip
     _audit(s, who, "plan.create", "renewal_plan", pid, scope, managed_vm_id=str(managed_vm_id),
            policy_version=prow["version"])  # fmt: skip
+    rs = resolved["renewal_settings"]
+    log.info(
+        "plan created; %d renewal key(s) use the built-in defaults %s", len(rs["defaulted"]), rs["defaults"],
+        extra={"plan_id": str(pid), "renewal_defaults": rs["defaults"], "renewal_defaulted_keys": rs["defaulted"],
+               "worst_case_window_seconds": resolved["worst_case_window_seconds"]},
+    )  # fmt: skip
     return plan_body(
         s, s.execute(text("SELECT * FROM renewal_plan WHERE id = :i"), {"i": pid}).mappings().one()
     )

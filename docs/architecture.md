@@ -156,7 +156,8 @@ Background jobs that are not renewals (inventory sync, readiness run, credential
 | Docker secrets files | DB password per role (api: `ovlm_api`, worker: `ovlm_worker`, migrate: `ovlm_owner` only — never mounted into api or worker, SEC-R-18), KEK private key (worker only), CSRF token derivation key (api only; sessions stay server-side with opaque ids, SEC-R-32). Passwords are read from files, never placed in a URL or env |
 | DB | Clouds/projects, credentials (sealed), profiles, policies — managed through the API |
 
-Key groups (all timeouts and limits are named keys; **defaults TBD in lab** unless a doc states otherwise):
+Key groups (all timeouts and limits are named keys; the renewal timeouts have built-in defaults derived from the lab,
+listed with their sources in [timeouts.md](timeouts.md), recorded in every plan):
 `worker.{slots, lease_duration, heartbeat_interval, fence_margin, shutdown_grace}`,
 `poll.{initial_interval, max_interval}`, `retry.max_attempts.<step_key>`, `timeouts.<step_key>`,
 `worker.takeover_delay`, `green_ready.max_age`, `timeouts.green_ready`, `admission.alert_after`, `signal.alert_after`, `automation.{run_root, timeout.<phase>, idle_timeout.<phase>, result_max_bytes,
@@ -168,7 +169,7 @@ non-escalating per-source delay), `log.openstack_http_debug` (refused unless `de
 (development/test installations only).
 `auto_restore_in_window` and `max_window_duration` are **policy** fields, not config keys (bound into the plan hash,
 SEC-R-30, SRE-R-6). `auth.allow_operator_approver` is an installation setting in the DB (admin, TC, audited, M9), not
-a file key. EXP-01/EXP-01b lab times (renewal-workflow.md §10) are documentation, never defaults.
+a file key. The renewal timeout defaults are derived from the EXP-01/EXP-01b and Felcloud lab times (roadmap P1-8).
 
 ## 6. Observability
 
