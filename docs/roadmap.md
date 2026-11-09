@@ -110,7 +110,7 @@ Owner numbers refer to [agent-team.md](agent-team.md). "Model" is the default le
 | SF-3 | Refuse an application credential when Keystone omits the `unrestricted` field | N-2 (Low) | Fixed (`claude/ovlm-security-followups`) |
 | SF-4 | Remove or exclude rejected `ovlm-env-v1` credentials so `ovlm kek status` can reach 0 after rotation | N-3 (Low) | Fixed (`claude/ovlm-security-followups`): excluded from usage and re-wrap, counted apart |
 | SF-5 | Signal a direct endpoint rewrite immediately (trigger) or document the up-to-24 h delay | N-4 (Info) | Fixed (`claude/ovlm-security-followups`): statement trigger, `connections_0003` |
-| SF-6 | `/readyz` reports an api/worker KEK mismatch | CS-10 (Low, control done) | Optional |
+| SF-6 | `/readyz` reports an api/worker KEK mismatch | CS-10 (Low, control done) | Fixed (`claude/ovlm-p1-4-security`, P1-4): `checks.kek` compares the api's public-key fingerprint with the worker's announced `kek_key` ids; a mismatch answers 503 without naming any key id (ids in the api log, once per change). `tests/integration/test_readyz_kek.py` |
 | SF-7 | `managed_vm` insert guard and tombstone, confirmation cleared on fingerprint change, live re-check at the first SSH to blue | IS-1 (Medium) | Fixed (#21, #22) |
 | SF-11 | Bind the plan's `resolved.blue` to the `managed_vm` row (server, service, project connection, plan's managed_vm_id) in the live host-key check and at preflight | IS-11 (Medium) | Fixed (#22) |
 | SF-12 | Insert guard identifies the api by role membership, not by name | IS-12 (Info) | Fixed (#22) |

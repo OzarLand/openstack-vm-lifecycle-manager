@@ -162,7 +162,7 @@ plain column.
 * Not implemented here: vault passwords and per-service secrets (`vault_password`, `secret` kinds exist in the
   schema only), worker-generated SSH keys (§6.1 says the worker generates the per-project key; here an admin
   uploads it), wiring the read credential into a worker inventory-sync job (`connect_read_credential` exists and is
-  unit-level only), reporting a public-key mismatch in the api's `/readyz` (the api refuses at upload instead).
+  unit-level only). A public-key mismatch is reported by the api's `/readyz` (`checks.kek`, 503; roadmap SF-6) as well as refused at upload.
 
 ## 8. Review findings (2026-11-05)
 
@@ -172,7 +172,7 @@ plain column.
 | CS-2 | Same AAD; binding columns immutable (trigger), tombstones refuse re-insertion of a deleted id or secret, api insert must name the connection's cloud, api cannot update `project_connection.cloud_id`. | `test_cs2_*` (integration) |
 | CS-3 | Keystone's application credential record read at validation; null, > 180 days or later than uploaded refused; stored and enforced. | unit `test_cs3_*`, integration `test_cs3_keystone_expiry_is_stored_and_enforced` |
 | CS-4 | Daily re-validation of active credentials (`kek.revalidation_interval`); expiry/failing metrics and daily log line. | `test_cs4_active_credentials_are_revalidated_and_expiry_is_reported` |
-| CS-5, CS-10 | `UnknownKekError` transient; worker announces held key ids; api seals only to announced ids. | `test_cs5_unknown_key_is_transient_and_the_api_seals_only_to_announced_keys` |
+| CS-5, CS-10 | `UnknownKekError` transient; worker announces held key ids; api seals only to announced ids; `/readyz` reports a mismatch (SF-6). | `test_cs5_unknown_key_is_transient_and_the_api_seals_only_to_announced_keys`, `test_readyz_kek.py` |
 | CS-6 | **Not fixed here** (`compose.yaml`, `docker/worker-entrypoint.sh` are outside this change; needs `make smoke`). | — |
 | CS-7 | Secret registered with the redaction backstop before the Keystone call; disabled connections not validated. | `test_cs7_disabled_connection_is_neither_decrypted_nor_sent` |
 | CS-8 | Missing connection answers 404; an empty expected confirmation never matches. | unit `test_cs8_typed_confirmation_never_matches_an_empty_expected_name` |
