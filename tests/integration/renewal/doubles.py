@@ -129,7 +129,7 @@ class FakeGuest:
         self.calls.append(("prepare", run_id))
         return {"sha": automation.get("sha"), "lint": "ok"}
 
-    def has_phase(self, run_id: str, phase: str) -> bool:
+    def has_phase(self, run_id: str, phase: str, **_attempt: Any) -> bool:
         return phase in self.phases
 
     def run_phase(

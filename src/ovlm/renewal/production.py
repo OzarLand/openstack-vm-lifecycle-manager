@@ -104,6 +104,7 @@ from ovlm.renewal.ports import (
     PhaseResult,
 )
 from ovlm.workflow.contract import ErrorClass
+from ovlm.workflow.fence import FenceLost
 
 log = logging.getLogger("ovlm.renewal.production")
 
@@ -628,7 +629,10 @@ class RunnerGuestPort:
             store_diffs=bool(a.get("store_diffs")), accept_degraded=bool(hc.get("accept_degraded")),
         )  # fmt: skip
 
-    def _prepared_for(self, run_id: str) -> PreparedAutomation:
+    def _prepared_for(
+        self, run_id: str, *, step_id: str | None = None, attempt: int | None = None,
+        fence: FenceLike | None = None,
+    ) -> PreparedAutomation:  # fmt: skip
         """B6's checkout for this run. Another process prepared it (a restarted worker): re-adopt the checkout on
         disk, re-verified locally. After a worker **container** restart the tmpfs ``run_root`` is empty: the copy B6
         kept in ``automation.checkout_cache`` (persistent, worker-only) is adopted instead, only if its tree digest
@@ -638,7 +642,11 @@ class RunnerGuestPort:
         only way on is an approver's one-shot ``reprepare-automation`` authorization (:meth:`_reprepare`).
 
         A checkout remembered in this process but no longer on disk (released by the worker's checkout sweep once
-        its run was terminal, or lost with the tmpfs) is forgotten and adopted again as above (roadmap P0-1)."""
+        its run was terminal, or lost with the tmpfs) is forgotten and adopted again as above (roadmap P0-1).
+
+        ``step_id``, ``attempt``, ``fence``: the step attempt asking. Every re-clone is fenced, and only that step's
+        own authorization can be consumed, by an attempt still holding its lease (review PMR-2); without them no
+        authorization is consumed."""
         with self._lock:
             for rid in [r for r, p in self._prepared.items() if not p.checkout.is_dir()]:
                 del self._prepared[rid]
@@ -657,6 +665,7 @@ class RunnerGuestPort:
             prepared = self._reprepare(
                 run_id, resolved, spec, recorded,
                 refusal=(reprepare.CHECKOUT_UNVERIFIABLE, str(exc)),
+                step_id=step_id, attempt=attempt, fence=fence,
             )  # fmt: skip
         if prepared is None:
             if self._in_outage(run_id):
@@ -667,8 +676,11 @@ class RunnerGuestPort:
                         "the run's verified checkout is gone (worker container restarted without a checkout "
                         "cache?); re-cloning would contact the git host inside the downtime window",
                     ),
+                    step_id=step_id, attempt=attempt, fence=fence,
                 )  # fmt: skip
             else:
+                if fence is not None:
+                    fence.check("automation:prepare")
                 prepared, _reach = self._prepare_with_waivers(run_id, resolved, spec)
         else:
             self._waiver_reach(prepared, waivers)
@@ -684,14 +696,33 @@ class RunnerGuestPort:
         recorded: str | None,
         *,
         refusal: tuple[str, str],
+        step_id: str | None,
+        attempt: int | None,
+        fence: FenceLike | None,
     ) -> PreparedAutomation:
         """The only git contact allowed where the checkout cannot be adopted: an approver's one-shot authorization
         (``reprepare-automation``), consumed **before** the clone. The normal B6 path runs (pinned SHA, verify, lint,
         waivers, cache copy) and must yield the tree digest B6 recorded, when it recorded one; a different tree is
-        discarded and stops the step for a human. Without an authorization: ``refusal`` (reason, message)."""
-        auth = self._take_authorization(run_id)
+        discarded and stops the step for a human. Without an authorization: ``refusal`` (reason, message).
+
+        PMR-2: the fence is checked before the authorization is taken and again before the clone; only the
+        authorization given for this step is taken, and only while this attempt holds the step's lease in the
+        database (:func:`~ovlm.renewal.reprepare.take`). An attempt that lost its lease consumes nothing and
+        contacts no git host."""
+        if step_id is None or attempt is None or fence is None:
+            raise StepRefusal(ErrorClass.NEEDS_HUMAN, refusal[0], message=refusal[1][:300])
+        fence.check("automation:reprepare")
+        auth = self._take_authorization(run_id, step_id, attempt)
         if auth is None:
             raise StepRefusal(ErrorClass.NEEDS_HUMAN, refusal[0], message=refusal[1][:300])
+        try:
+            fence.check("automation:reprepare")
+        except FenceLost:
+            # lost between the take and the clone (the lease ran out in between): nothing was cloned
+            self._finish_authorization(
+                auth, ok=False, outcome="failed: the attempt lost its lease before the clone"
+            )
+            raise
         if auth.sha != spec.ref:
             self._finish_authorization(
                 auth, ok=False, outcome="refused: the authorized SHA is not the plan's pin"
@@ -733,9 +764,11 @@ class RunnerGuestPort:
         )  # fmt: skip
         return prepared
 
-    def _take_authorization(self, run_id: str) -> reprepare.Authorization | None:
+    def _take_authorization(
+        self, run_id: str, step_id: str, attempt: int
+    ) -> reprepare.Authorization | None:
         with self.engine.begin() as c:
-            return reprepare.take(c, run_id)
+            return reprepare.take(c, run_id, step_id=step_id, attempt=attempt)
 
     def _finish_authorization(self, auth: reprepare.Authorization, **outcome: Any) -> None:
         with self.engine.begin() as c:
@@ -833,8 +866,11 @@ class RunnerGuestPort:
             evidence["lint_waivers"] = reach
         return evidence
 
-    def has_phase(self, run_id: str, phase: str) -> bool:
-        prepared = self._prepared_for(run_id)
+    def has_phase(
+        self, run_id: str, phase: str, *, step_id: str | None = None, attempt: int | None = None,
+        fence: FenceLike | None = None,
+    ) -> bool:  # fmt: skip
+        prepared = self._prepared_for(run_id, step_id=step_id, attempt=attempt, fence=fence)
         return (
             prepared.checkout / prepared.spec.playbook_dir.strip("/") / f"{phase}.yml"
         ).is_file()
@@ -846,7 +882,7 @@ class RunnerGuestPort:
     ) -> PhaseResult:  # fmt: skip
         resolved = self._resolved(run_id)
         creds = self._creds(resolved)
-        prepared = self._prepared_for(run_id)
+        prepared = self._prepared_for(run_id, step_id=step_id, attempt=attempt, fence=fence)
         keys = self._target_keys(target, creds)
         if not keys:
             return PhaseResult("needs_human", "host key unverifiable")

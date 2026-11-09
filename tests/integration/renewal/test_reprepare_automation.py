@@ -27,6 +27,7 @@ from ovlm.auth.principal import Principal
 from ovlm.automation.model import RunnerConfig
 from ovlm.automation.store import ArtifactStore
 from ovlm.registry.errors import DomainError
+from ovlm.renewal import reprepare
 from ovlm.renewal import service as svc
 from ovlm.renewal.base import Deps, StepRefusal
 from ovlm.renewal.definition import BlueGreenFipV1
@@ -34,6 +35,7 @@ from ovlm.renewal.production import RunnerGuestPort
 from ovlm.renewal.reprobe import RenewalReprobe
 from ovlm.workflow.clock import FakeClock
 from ovlm.workflow.engine import WorkflowEngine
+from ovlm.workflow.fence import FenceLost
 from ovlm.workflow.registry import Registry
 from tests.integration.renewal.conftest import CFG, World, build_world, explain
 from tests.integration.renewal.doubles import FakeGuest, GuestState
@@ -291,3 +293,78 @@ def test_the_api_offers_and_checks_the_action(lab: Lab) -> None:
             svc.action(s, _who(w, "ap2"), UUID(w.run_id), "reprepare-automation", typed=w.blue_tc(),
                        stepup_id=None, attestation=None)  # fmt: skip
         assert exc.value.code == "human-session-required"
+
+
+# --- PMR-2: an authorization is bound to its step and fenced ------------------------------------------------------
+
+
+class _Fence:
+    def __init__(self, lost: bool = False) -> None:
+        self.lost, self.checks = lost, []  # type: tuple[bool, list[str]]
+
+    def check(self, action: str) -> None:
+        if self.lost:
+            raise FenceLost(action, "revoked")
+        self.checks.append(action)
+
+    def add_revoke_callback(self, cb: Any) -> Any:
+        return lambda: None
+
+
+def test_an_authorization_is_consumed_only_by_its_step_and_is_void_once_that_step_closed(
+    lab: Lab,
+) -> None:
+    """Review PMR-2: the approver authorized a re-clone for the parked W6; W6 then finishes without it (its checkout
+    is back), and much later another step finds the checkout gone inside the outage. That step must not consume the
+    old authorization (a git contact nobody authorized for it): it parks ``automation_checkout_lost``, the old row is
+    void, and the approver can decide again."""
+    w = lab.w
+    parked = lab.strand()
+    sig = lab.signal()
+    assert w.engine is not None and lab.port is not None
+    w.engine.process_signals()  # authorized, W6 re-queued (not run yet)
+    assert "authorized once" in lab.outcome(sig)
+    [auth] = lab.authorizations()
+    assert auth["step_id"] == parked["id"] and auth["consumed_at"] is None
+    port = lab.port
+    port._in_outage = lambda run_id: True  # type: ignore[method-assign]  # noqa: SLF001
+    other = next(s for s in w.steps() if s["step_key"] == "prepare_automation")
+    # another step's attempt: refused, nothing consumed, no git contact
+    with pytest.raises(StepRefusal, match="automation_checkout_lost"):
+        port._prepared_for(w.run_id, step_id=str(other["id"]), attempt=1, fence=_Fence())  # noqa: SLF001
+    # the step's own id, but no attempt of it holds the lease (W6 is queued, not running): nothing consumed
+    with pytest.raises(StepRefusal, match="automation_checkout_lost"):
+        port._prepared_for(w.run_id, step_id=str(parked["id"]), attempt=parked["attempt"] + 1,  # noqa: SLF001
+                           fence=_Fence())  # fmt: skip
+    # an attempt that lost its fence: refused before the authorization is even read
+    with pytest.raises(FenceLost):
+        port._prepared_for(w.run_id, step_id=str(parked["id"]), attempt=parked["attempt"] + 1,  # noqa: SLF001
+                           fence=_Fence(lost=True))  # fmt: skip
+    assert lab.runner.prepared == [w.run_id] and lab.authorizations()[0]["consumed_at"] is None
+    # W6's checkout is back (found in the cache): it finishes without using the authorization
+    spec = port._spec(w.run_id, port._resolved(w.run_id))  # noqa: SLF001
+    lab.runner.prepare_automation(spec, w.run_id)
+    lab.runner.prepared.pop()
+    del port._in_outage  # noqa: SLF001
+    r = w.drive()
+    assert r["state"] == "running" and w.open_step()["step_key"] == "await_retirement", explain(w)
+    assert next(s for s in w.steps() if s["id"] == parked["id"])["state"] == "succeeded"
+    with w.worker.connect() as c:
+        assert not reprepare.pending(c, w.run_id)  # void: a new authorization is not blocked by it
+    # later, the checkout is lost again inside an outage: the open step does not consume the old authorization
+    lab.runner.lose_checkouts()
+    lab.restart()
+    assert lab.port is not None
+    lab.port._in_outage = lambda run_id: True  # type: ignore[method-assign]  # noqa: SLF001
+    now = w.open_step()
+    # an attempt of it holds the lease (as the engine's claim leaves it)
+    w.x("UPDATE workflow_step SET state = 'running', attempt = attempt + 1, lease_owner = 'w2', "
+        "fencing_token = nextval('fencing_seq'), lease_expires_at = now() + interval '5 minutes' WHERE id = :i",
+        i=now["id"])  # fmt: skip
+    with pytest.raises(StepRefusal, match="automation_checkout_lost"):
+        lab.port._prepared_for(w.run_id, step_id=str(now["id"]), attempt=now["attempt"] + 1,  # noqa: SLF001
+                               fence=_Fence())  # fmt: skip
+    assert lab.runner.prepared == [w.run_id]  # no git contact since B6
+    [auth] = lab.authorizations()
+    assert auth["consumed_at"] is not None and auth["outcome"] == reprepare.EXPIRED
+    assert "automation.reprepare.expired" in w.audit_actions()

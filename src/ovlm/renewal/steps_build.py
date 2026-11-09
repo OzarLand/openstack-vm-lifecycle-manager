@@ -472,7 +472,9 @@ class PrepareAutomation(AnsibleStep):
     def act(self, ctx: StepContext, intent: Mapping[str, Any]) -> None:
         ev = self.d.guest.prepare(ctx.run.id, self.resolved(ctx)["automation"], ctx.fence)
         self.memo(ctx)["prepared"] = dict(ev)
-        if self.d.guest.has_phase(ctx.run.id, "preflight"):
+        if self.d.guest.has_phase(
+            ctx.run.id, "preflight", step_id=ctx.step.id, attempt=ctx.attempt, fence=ctx.fence
+        ):
             self.run(ctx)
 
     def verify(self, ctx: StepContext, intent: Mapping[str, Any]) -> Outcome:
@@ -584,7 +586,9 @@ class VerifyGreenReady(RStep):
         ref = self.green_ref(ctx)
         probe = self.d.guest.probe(ctx.run.id, ref, mount_point=None, units=())
         self.memo(ctx)["probe"] = probe
-        if probe.reachable and self.d.guest.has_phase(ctx.run.id, "preflight"):
+        if probe.reachable and self.d.guest.has_phase(
+            ctx.run.id, "preflight", step_id=ctx.step.id, attempt=ctx.attempt, fence=ctx.fence
+        ):
             self.memo(ctx)["pre"] = self.d.guest.run_phase(
                 run_id=ctx.run.id, step_id=ctx.step.id, attempt=ctx.attempt, phase="preflight", target=ref,
                 timeout=self.d.cfg.automation_timeout("preflight"), fence=ctx.fence,

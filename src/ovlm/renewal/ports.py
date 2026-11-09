@@ -170,8 +170,12 @@ class GuestPort(Protocol):
         """``quiesce_allow_unmounted``: S2 only (quiesce of green during restore); see contract 3.4."""
         ...
 
-    def has_phase(self, run_id: str, phase: str) -> bool:
-        """Whether the prepared repository has the optional playbook (``preflight``, ``rollback_hooks``)."""
+    def has_phase(
+        self, run_id: str, phase: str, *, step_id: str | None = None, attempt: int | None = None,
+        fence: FenceLike | None = None,
+    ) -> bool:  # fmt: skip
+        """Whether the prepared repository has the optional playbook (``preflight``, ``rollback_hooks``). ``step_id``,
+        ``attempt``, ``fence``: the step attempt asking (a re-adoption may need its re-clone authorization, PMR-2)."""
         ...
 
     def bootstrap(self, run_id: str, policy: str) -> Bootstrap: ...

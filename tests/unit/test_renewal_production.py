@@ -44,6 +44,7 @@ from ovlm.renewal.production import (
     identify,
     public_key_of,
 )
+from ovlm.workflow.fence import FenceLost
 from tests.unit.test_openstack_allowlist import CannedCloud
 
 PC = "0b0b0b0b-0000-4000-8000-000000000001"
@@ -359,6 +360,19 @@ class _Fence:
         return lambda: None
 
 
+class _LostFence(_Fence):
+    """A fence that refuses once ``after`` checks passed (the attempt lost its lease)."""
+
+    def __init__(self, after: int = 0) -> None:
+        super().__init__()
+        self.after = after
+
+    def check(self, action: str) -> None:
+        if len(self.checks) >= self.after:
+            raise FenceLost(action, "revoked")
+        super().check(action)
+
+
 def _guest(ssh: _Ssh) -> _ResolvedPort:
     return _ResolvedPort(None, None, _Static(), ssh=ssh, http=None)  # type: ignore[arg-type]
 
@@ -644,7 +658,7 @@ class _CheckoutPort(RunnerGuestPort):
     def _recorded_tree_digest(self, run_id: str) -> str | None:
         return None
 
-    def _take_authorization(self, run_id: str) -> Any:
+    def _take_authorization(self, run_id: str, step_id: str, attempt: int) -> Any:
         return None  # no approver authorized a re-clone
 
 
@@ -807,14 +821,17 @@ def test_reprepare_consumes_the_authorization_before_cloning_and_refuses_without
     from ovlm.renewal import reprepare
 
     finished: list[dict[str, Any]] = []
+    took: list[tuple[str, int]] = []
     auth = reprepare.Authorization("a", "run", "sig", "data_attach_green", "f" * 40, "ap")
+    attempt: dict[str, Any] = {"step_id": "st", "attempt": 2, "fence": _Fence()}
 
     class _Port(_CheckoutPort):
         def __init__(self, runner: Any, pending: Any) -> None:
             super().__init__(runner, outage=True)
             self.pending = pending
 
-        def _take_authorization(self, run_id: str) -> Any:
+        def _take_authorization(self, run_id: str, step_id: str, attempt: int) -> Any:
+            took.append((step_id, attempt))
             got, self.pending = self.pending, None  # one-shot
             return got
 
@@ -832,14 +849,32 @@ def test_reprepare_consumes_the_authorization_before_cloning_and_refuses_without
 
     runner = _Runner(on_disk=False)
     port = _Port(runner, auth)
-    port._prepared_for("run")  # noqa: SLF001
+    # PMR-2: without the asking step attempt (step id, attempt, fence) nothing is consumed
+    with pytest.raises(StepRefusal, match="automation_checkout_lost"):
+        port._prepared_for("run")  # noqa: SLF001
+    assert took == [] and runner.cloned == 0
+    # an attempt whose fence is lost consumes nothing and contacts no git host
+    with pytest.raises(FenceLost):
+        port._prepared_for("run", step_id="st", attempt=2, fence=_LostFence())  # noqa: SLF001
+    assert took == [] and runner.cloned == 0
+    port._prepared_for("run", **attempt)  # noqa: SLF001
+    assert took == [("st", 2)] and attempt["fence"].checks == ["automation:reprepare"] * 2
     assert runner.cloned == 1 and finished[-1]["ok"] is True
     port._prepared.clear()  # noqa: SLF001
     with pytest.raises(StepRefusal, match="automation_checkout_lost"):
-        port._prepared_for("run")  # noqa: SLF001
+        port._prepared_for("run", **attempt)  # noqa: SLF001
     assert runner.cloned == 1
     # an authorization for another SHA than the plan's pin is refused and recorded
     port = _Port(runner, reprepare.Authorization("b", "run", "sig2", "k", "0" * 40, "ap"))
     with pytest.raises(StepRefusal):
-        port._prepared_for("run")  # noqa: SLF001
+        port._prepared_for("run", **attempt)  # noqa: SLF001
     assert runner.cloned == 1 and finished[-1]["ok"] is False
+    # the lease runs out between the take and the clone: the consumed authorization says so, nothing is cloned
+    port = _Port(runner, auth)
+    fence = _LostFence(after=1)
+    with pytest.raises(FenceLost):
+        port._prepared_for("run", step_id="st", attempt=3, fence=fence)  # noqa: SLF001
+    assert runner.cloned == 1 and finished[-1] == {
+        "ok": False,
+        "outcome": "failed: the attempt lost its lease before the clone",
+    }
