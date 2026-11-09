@@ -743,6 +743,11 @@ def action(
         if not role_ok:
             raise DomainError(403, "forbidden", "Forbidden", who.needs_role_message("operator"),
                               "Sign out and sign in as an account that holds it.")  # fmt: skip
+        if kind == "probe" and accept.pending(s, str(run_id), kind="probe"):
+            # PMR-1: a probe may reach green over SSH in the worker's main loop; repeated clicks are not queued
+            raise DomainError(409, "probe-pending", "A probe is pending",
+                              "The worker has not applied the earlier probe yet: one pending probe per run.",
+                              "Reload the run page in a few seconds.")  # fmt: skip
     if not who.is_human and "operate" not in who.token_scopes:
         raise DomainError(
             403, "token-scope", "Forbidden", "The API token's scope does not allow this action."

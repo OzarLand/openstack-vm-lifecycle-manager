@@ -369,6 +369,15 @@ def run(settings: Settings | None = None) -> int:
     server: InternalServer | None = None
     try:
         check_schema_at_head(engine, settings.migrations_dir)
+        if settings.automation.checkout_cache is not None:
+            from ovlm.automation.runner import check_checkout_cache
+            from ovlm.automation.types import AutomationError
+
+            try:
+                check_checkout_cache(settings.automation.checkout_cache)
+            except AutomationError as exc:
+                log.error("refusing to start: %s", exc)
+                return 1
         workflow = WorkflowEngine(
             engine,
             build_registry(settings, engine),

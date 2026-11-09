@@ -547,7 +547,12 @@ class RecoverOldService(WindowAnsible):
         stateful = not self.resolved(ctx).get("stateless")
         for phase in ("rollback_hooks", "start_service"):
             mandatory = phase == "start_service" and stateful
-            if not (mandatory or self.d.guest.has_phase(ctx.run.id, phase)):
+            if not (
+                mandatory
+                or self.d.guest.has_phase(
+                    ctx.run.id, phase, step_id=ctx.step.id, attempt=ctx.attempt, fence=ctx.fence
+                )
+            ):
                 continue
             res = self.d.guest.run_phase(
                 run_id=ctx.run.id, step_id=ctx.step.id, attempt=ctx.attempt, phase=phase, target=target,

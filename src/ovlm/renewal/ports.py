@@ -55,6 +55,11 @@ class CloudPort(Protocol):
 Role = Literal["old", "new"]
 
 
+class GuestProbeTimeout(TimeoutError):
+    """The guest probe did not finish within its total time budget (``timeout`` of :meth:`GuestPort.probe`, PMR-1):
+    the probe's result is unknown, which every check reads as a failure."""
+
+
 @dataclass(frozen=True)
 class GuestRef:
     """A guest OVLM may SSH to. ``host_keys`` are pinned public keys (green after B5); ``fingerprint`` is blue's
@@ -165,8 +170,12 @@ class GuestPort(Protocol):
         """``quiesce_allow_unmounted``: S2 only (quiesce of green during restore); see contract 3.4."""
         ...
 
-    def has_phase(self, run_id: str, phase: str) -> bool:
-        """Whether the prepared repository has the optional playbook (``preflight``, ``rollback_hooks``)."""
+    def has_phase(
+        self, run_id: str, phase: str, *, step_id: str | None = None, attempt: int | None = None,
+        fence: FenceLike | None = None,
+    ) -> bool:  # fmt: skip
+        """Whether the prepared repository has the optional playbook (``preflight``, ``rollback_hooks``). ``step_id``,
+        ``attempt``, ``fence``: the step attempt asking (a re-adoption may need its re-clone authorization, PMR-2)."""
         ...
 
     def bootstrap(self, run_id: str, policy: str) -> Bootstrap: ...
@@ -194,9 +203,12 @@ class GuestPort(Protocol):
         mount_point: str | None,
         units: tuple[str, ...],
         data_volume_id: str | None = None,
+        timeout: float | None = None,
     ) -> GuestProbe:
         """The fixed read-only command list on ``target``. ``data_volume_id``: also read where the volume's by-id
-        device (``/dev/disk/by-id/virtio-<first 20 characters>``) is mounted (``accept-step``, ADR-0008)."""
+        device (``/dev/disk/by-id/virtio-<first 20 characters>``) is mounted (``accept-step``, ADR-0008).
+        ``timeout``: total budget in seconds for the whole list (every SSH command gets at most what is left);
+        :class:`GuestProbeTimeout` when it runs out. ``None``: each command has the port's own SSH timeout."""
         ...
 
     def external_probe(

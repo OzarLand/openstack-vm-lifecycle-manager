@@ -15,6 +15,8 @@ The refusals, the late outcome of the parked attempt, the table rules and the ap
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -29,11 +31,13 @@ from ovlm.auth.principal import Principal
 from ovlm.registry.errors import DomainError
 from ovlm.renewal import metrics
 from ovlm.renewal import service as svc
+from ovlm.renewal.reprobe import REPROBE_KIND, REPROBE_STRATEGY
 from ovlm.workflow import crashpoint
 from ovlm.workflow.clock import FakeClock
 from ovlm.workflow.contract import Done
 from ovlm.workflow.crashpoint import CrashPlan
 from ovlm.workflow.fence import Fence, FencedCommitRejected
+from ovlm.workflow.requests import request_run, send_signal
 from tests.integration.renewal.conftest import World, explain, to_cutover
 from tests.integration.renewal.test_failures import restored
 
@@ -644,3 +648,81 @@ def test_api_refuses_and_audits(world: World, case: str) -> None:
                       r=w.run_id)  # fmt: skip
         assert [r["after"]["refusal_code"] for r in refused] == [code], refused
     assert w.run()["state"] == "needs_human"
+
+
+# --- PMR-1: the guest probe is bounded and not repeated -----------------------------------------------------------
+
+BUDGET = 0.5
+
+
+def api_probe(w: World, user: str = "ap2") -> None:
+    """The Re-probe button as the api handles it."""
+    with Session(w.api) as s:
+        svc.action(
+            s, who(w, user), UUID(w.run_id), "probe", typed=None, stepup_id=None, attestation=None
+        )
+        s.commit()
+
+
+def test_a_hanging_green_does_not_hold_another_runs_signal_beyond_the_budget(world: World) -> None:
+    """Review PMR-1: green answers TCP but a command hangs. The probe signal of the parked run is ahead of another
+    run's abort in the queue; the worker's signal pass must apply the abort within the probe's budget, not after the
+    guest gives up. While that probe still runs, a second probe of the run does not start another one."""
+    w = world
+    park_s2(w)
+    w.make_engine(replace(w.cfg, accept_probe_timeout=BUDGET))
+    w.guest.probe_hang = 8.0  # longer than the budget, short enough that a regression fails fast
+    started = len(w.guest.probes)
+    try:
+        first = w.signal("probe", user="ap2")
+        with w.api.begin() as c:
+            other = request_run(
+                c, kind=REPROBE_KIND, strategy=REPROBE_STRATEGY, strategy_version="1"
+            )
+            abort = send_signal(c, other, "abort", actor_id=w.users["op"])
+        assert w.engine is not None
+        t0 = time.monotonic()
+        w.engine.process_signals()
+        elapsed = time.monotonic() - t0
+        assert elapsed < BUDGET + 3.0, f"the signal pass took {elapsed:.1f} s"
+        # applied in this pass (that job's definition refuses every signal: the outcome is its answer)
+        assert outcome(w, abort) == "refused: this job takes no signals"
+        assert outcome(w, first) == "current truth refreshed"
+        shown = w.run()["current_truth"]["accept_probe"]
+        assert shown["ok"] is False and shown["guest"]["error"] == "GuestProbeTimeout", shown
+        assert w.guest.probe_timeouts[-1] == BUDGET  # the port got the budget too
+        # the same run again while the first guest probe still hangs: no second SSH probe, refused at once
+        second = w.signal("probe", user="ap2")
+        t0 = time.monotonic()
+        w.engine.process_signals()
+        assert time.monotonic() - t0 < BUDGET
+        assert outcome(w, second) == "current truth refreshed"
+        shown = w.run()["current_truth"]["accept_probe"]
+        assert shown["ok"] is False and shown["guest"]["error"] == "GuestProbeInProgress", shown
+        assert len(w.guest.probes) == started + 1
+    finally:
+        w.guest.probe_release.set()
+    # once the hanging probe ended, the next one runs again and shows the postcondition
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        sig = w.signal("probe", user="ap2")
+        w.engine.process_signals()
+        assert outcome(w, sig) == "current truth refreshed"
+        if w.run()["current_truth"]["accept_probe"]["ok"]:
+            break
+        time.sleep(0.1)
+    assert w.run()["current_truth"]["accept_probe"]["ok"], w.run()["current_truth"]
+
+
+def test_api_refuses_a_second_pending_probe(world: World) -> None:
+    """Review PMR-1: repeated Re-probe clicks are not queued; the worker applies one probe per run at a time."""
+    w = world
+    park_s2(w)
+    api_probe(w)
+    with pytest.raises(DomainError) as exc:
+        api_probe(w, "ap3")
+    assert exc.value.code == "probe-pending" and exc.value.status == 409
+    assert len(w.q("SELECT id FROM run_signal WHERE run_id = :r AND kind = 'probe' AND consumed_at IS NULL",
+                   r=w.run_id)) == 1  # fmt: skip
+    w.drive()
+    api_probe(w, "ap3")  # applied: a new probe is accepted

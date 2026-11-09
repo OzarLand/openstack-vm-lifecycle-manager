@@ -9,6 +9,7 @@ import json
 import os
 import stat
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +28,7 @@ from ovlm.openstack.errors import ReadOnlyViolationError, WriteNotAllowedError
 from ovlm.openstack.ownership import InMemoryOwnershipRegistry
 from ovlm.openstack.sdk_write import WriteCredential
 from ovlm.renewal.base import StepRefusal
-from ovlm.renewal.ports import GuestRef
+from ovlm.renewal.ports import GuestProbeTimeout, GuestRef
 from ovlm.renewal.production import (
     NO_STORE_REASON,
     ROTATE_HOST_KEYS,
@@ -43,6 +44,7 @@ from ovlm.renewal.production import (
     identify,
     public_key_of,
 )
+from ovlm.workflow.fence import FenceLost
 from tests.unit.test_openstack_allowlist import CannedCloud
 
 PC = "0b0b0b0b-0000-4000-8000-000000000001"
@@ -358,6 +360,19 @@ class _Fence:
         return lambda: None
 
 
+class _LostFence(_Fence):
+    """A fence that refuses once ``after`` checks passed (the attempt lost its lease)."""
+
+    def __init__(self, after: int = 0) -> None:
+        super().__init__()
+        self.after = after
+
+    def check(self, action: str) -> None:
+        if len(self.checks) >= self.after:
+            raise FenceLost(action, "revoked")
+        super().check(action)
+
+
 def _guest(ssh: _Ssh) -> _ResolvedPort:
     return _ResolvedPort(None, None, _Static(), ssh=ssh, http=None)  # type: ignore[arg-type]
 
@@ -445,6 +460,42 @@ def test_accept_probe_adds_one_fixed_read_only_command_and_reads_units_line_by_l
     assert not any(c[0] == "lsblk" for c in ssh.commands)
     with pytest.raises(AutomationError):
         g.probe("run", target, mount_point=None, units=(), data_volume_id="x; reboot")
+
+
+class _SlowSsh(_Ssh):
+    """A green that answers TCP but hangs every command until the SSH timeout (PMR-1)."""
+
+    def __init__(self, host_key: PublicKey) -> None:
+        super().__init__(host_key)
+        self.timeouts: list[float] = []
+
+    def run(self, *, host: str, port: int, user: str, keys: Sequence[PublicKey], private_key: SecretBytes,
+            command: Sequence[str], timeout: float) -> SshResult:  # fmt: skip
+        self.timeouts.append(timeout)
+        self.commands.append(tuple(command))
+        time.sleep(min(timeout, 0.3))
+        return SshResult(0, "running\n")
+
+
+def test_probe_with_a_budget_never_waits_longer_than_the_budget() -> None:
+    """PMR-1: with a total budget each SSH command gets at most what is left of it, and none starts once it is
+    spent, so a hanging green costs at most the budget instead of five times the 60 s SSH timeout."""
+    _p, pub = _key()
+    ssh = _SlowSsh(parse_public_key(pub))
+    g = _guest(ssh)
+    target = GuestRef(GREEN, "10.0.0.9", "new", (pub,))
+    t0 = time.monotonic()
+    with pytest.raises(GuestProbeTimeout):
+        g.probe("run", target, mount_point="/srv/data", units=("app.service",),
+                data_volume_id="5e1f0c2a-7b7d-4c3e-9f00-0123456789ab", timeout=0.5)  # fmt: skip
+    assert time.monotonic() - t0 < 0.5 + 0.3
+    assert ssh.timeouts and all(t <= 0.5 for t in ssh.timeouts), ssh.timeouts
+    assert len(ssh.commands) < 5, ssh.commands
+    # without a budget: the port's own per-command timeout, as before
+    ssh.timeouts.clear()
+    g.ssh_timeout = 0.01
+    g.probe("run", target, mount_point=None, units=())
+    assert ssh.timeouts == [0.01, 0.01]
 
 
 def test_blue_is_reached_only_with_the_registered_fingerprint() -> None:
@@ -607,7 +658,7 @@ class _CheckoutPort(RunnerGuestPort):
     def _recorded_tree_digest(self, run_id: str) -> str | None:
         return None
 
-    def _take_authorization(self, run_id: str) -> Any:
+    def _take_authorization(self, run_id: str, step_id: str, attempt: int) -> Any:
         return None  # no approver authorized a re-clone
 
 
@@ -770,14 +821,17 @@ def test_reprepare_consumes_the_authorization_before_cloning_and_refuses_without
     from ovlm.renewal import reprepare
 
     finished: list[dict[str, Any]] = []
+    took: list[tuple[str, int]] = []
     auth = reprepare.Authorization("a", "run", "sig", "data_attach_green", "f" * 40, "ap")
+    attempt: dict[str, Any] = {"step_id": "st", "attempt": 2, "fence": _Fence()}
 
     class _Port(_CheckoutPort):
         def __init__(self, runner: Any, pending: Any) -> None:
             super().__init__(runner, outage=True)
             self.pending = pending
 
-        def _take_authorization(self, run_id: str) -> Any:
+        def _take_authorization(self, run_id: str, step_id: str, attempt: int) -> Any:
+            took.append((step_id, attempt))
             got, self.pending = self.pending, None  # one-shot
             return got
 
@@ -795,14 +849,32 @@ def test_reprepare_consumes_the_authorization_before_cloning_and_refuses_without
 
     runner = _Runner(on_disk=False)
     port = _Port(runner, auth)
-    port._prepared_for("run")  # noqa: SLF001
+    # PMR-2: without the asking step attempt (step id, attempt, fence) nothing is consumed
+    with pytest.raises(StepRefusal, match="automation_checkout_lost"):
+        port._prepared_for("run")  # noqa: SLF001
+    assert took == [] and runner.cloned == 0
+    # an attempt whose fence is lost consumes nothing and contacts no git host
+    with pytest.raises(FenceLost):
+        port._prepared_for("run", step_id="st", attempt=2, fence=_LostFence())  # noqa: SLF001
+    assert took == [] and runner.cloned == 0
+    port._prepared_for("run", **attempt)  # noqa: SLF001
+    assert took == [("st", 2)] and attempt["fence"].checks == ["automation:reprepare"] * 2
     assert runner.cloned == 1 and finished[-1]["ok"] is True
     port._prepared.clear()  # noqa: SLF001
     with pytest.raises(StepRefusal, match="automation_checkout_lost"):
-        port._prepared_for("run")  # noqa: SLF001
+        port._prepared_for("run", **attempt)  # noqa: SLF001
     assert runner.cloned == 1
     # an authorization for another SHA than the plan's pin is refused and recorded
     port = _Port(runner, reprepare.Authorization("b", "run", "sig2", "k", "0" * 40, "ap"))
     with pytest.raises(StepRefusal):
-        port._prepared_for("run")  # noqa: SLF001
+        port._prepared_for("run", **attempt)  # noqa: SLF001
     assert runner.cloned == 1 and finished[-1]["ok"] is False
+    # the lease runs out between the take and the clone: the consumed authorization says so, nothing is cloned
+    port = _Port(runner, auth)
+    fence = _LostFence(after=1)
+    with pytest.raises(FenceLost):
+        port._prepared_for("run", step_id="st", attempt=3, fence=fence)  # noqa: SLF001
+    assert runner.cloned == 1 and finished[-1] == {
+        "ok": False,
+        "outcome": "failed: the attempt lost its lease before the clone",
+    }
