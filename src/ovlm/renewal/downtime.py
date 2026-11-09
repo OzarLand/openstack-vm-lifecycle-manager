@@ -14,7 +14,8 @@ a restore) and, after a cutover, a revert (S2 to S9). Every interval is a row; t
 * An interval left open (a parked run) is **ongoing**; a read never invents an end.
 
 Each open/close writes an audit row in the same transaction and each close observes ``ovlm_renewal_downtime_seconds``
-with the interval kind.
+with the interval kind. :func:`refresh_open_metric` (a worker metrics refresher) sets
+``ovlm_renewal_downtime_open_seconds{kind}`` to the age of the oldest open interval of each kind.
 """
 
 from __future__ import annotations
@@ -72,6 +73,18 @@ def close_open(c: Connection, run_id: str, *, step_key: str) -> list[tuple[str, 
             )  # fmt: skip
         metrics.DOWNTIME.labels(kind).observe(seconds)
     return closed
+
+
+def refresh_open_metric(c: Connection) -> None:
+    """Set ``ovlm_renewal_downtime_open_seconds{kind}`` for both kinds: the age (DB clock) of the oldest open interval,
+    ``0`` when none is open (so the series always exists and an alert never sees stale data)."""
+    rows = c.execute(
+        text("SELECT kind, EXTRACT(EPOCH FROM now() - min(started_at)) FROM run_downtime "
+             "WHERE ended_at IS NULL GROUP BY kind"),
+    ).all()  # fmt: skip
+    ages = {str(k): float(sec) for k, sec in rows}
+    for kind in (WINDOW, RESTORE):
+        metrics.DOWNTIME_OPEN.labels(kind).set(max(0.0, ages.get(kind, 0.0)))
 
 
 def intervals(c: Any, run_id: str) -> list[dict[str, Any]]:

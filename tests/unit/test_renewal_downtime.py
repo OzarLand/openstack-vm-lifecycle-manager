@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from ovlm.observability.metrics import REGISTRY
 from ovlm.renewal import downtime
 
 NOW = datetime(2026, 11, 8, 12, 0, tzinfo=UTC)
@@ -58,3 +59,40 @@ def test_run_columns_read_as_the_first_window_interval() -> None:
     (only,) = downtime.from_run_columns(run, NOW)
     assert only["kind"] == "window" and only["seconds"] == 42.0 and not only["ongoing"]
     assert downtime.from_run_columns({"downtime_started_at": None}, NOW) == []
+
+
+class _Rows:
+    def __init__(self, rows: list[tuple[str, float]]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[tuple[str, float]]:
+        return self._rows
+
+
+class _Conn:
+    def __init__(self, rows: list[tuple[str, float]]) -> None:
+        self.rows = rows
+        self.sql: list[str] = []
+
+    def execute(self, stmt: object, *_: object) -> _Rows:
+        self.sql.append(str(stmt))
+        return _Rows(self.rows)
+
+
+def _open_gauge(kind: str) -> float | None:
+    return REGISTRY.get_sample_value("ovlm_renewal_downtime_open_seconds", {"kind": kind})
+
+
+def test_open_interval_gauge_reports_the_oldest_open_interval_per_kind() -> None:
+    conn = _Conn([("restore", 1900.5)])
+    downtime.refresh_open_metric(conn)  # type: ignore[arg-type]
+    assert "ended_at IS NULL" in conn.sql[0]
+    assert _open_gauge("restore") == 1900.5
+    assert _open_gauge("window") == 0.0  # both series always exist
+
+
+def test_open_interval_gauge_drops_to_zero_once_closed() -> None:
+    downtime.refresh_open_metric(_Conn([("window", 12.0), ("restore", 40.0)]))  # type: ignore[arg-type]
+    assert (_open_gauge("window"), _open_gauge("restore")) == (12.0, 40.0)
+    downtime.refresh_open_metric(_Conn([]))  # type: ignore[arg-type]
+    assert (_open_gauge("window"), _open_gauge("restore")) == (0.0, 0.0)

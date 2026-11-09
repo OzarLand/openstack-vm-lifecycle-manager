@@ -330,6 +330,7 @@ connection, with the credential from the encrypted store.
 | TLS proxy example configuration | ⬜ Not provided. Bring your own |
 | Backup and restore of the database and the key | ⬜ Designed ([security-model.md §5](security-model.md)), not documented as a procedure |
 | Upgrades between versions | ⬜ No upgrade guide. Expect to start clean |
+| Alerts and paging | 🟡 Sample Prometheus rules and runbooks: [operations.md](operations.md). Paging is mandatory before any real renewal; not lab validated |
 
 The day-by-day state is in [team-log.md](team-log.md) and the backlog in [roadmap.md](roadmap.md).
 

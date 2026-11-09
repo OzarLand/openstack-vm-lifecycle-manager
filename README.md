@@ -205,6 +205,7 @@ Felcloud provides cloud credit for OzarLand's labs and has no say over the conte
 | [Renewal workflow](docs/renewal-workflow.md) · [ADR-0004](docs/decisions/ADR-0004-mvp-renewal-strategy.md) | The state machine, rollback and failure handling |
 | [Security model](docs/security-model.md) · [OpenStack integration](docs/openstack-integration.md) | Credentials, least privilege, verified API behaviour |
 | [Automation contract](docs/automation-contract.md) · [ansible/](ansible/README.md) | What your Ansible content must provide |
+| [Operations: alerts and paging](docs/operations.md) | Prometheus rules, Alertmanager routing, a runbook per alert |
 | [Testing strategy](docs/testing-strategy.md) · [ADR-0007](docs/decisions/ADR-0007-lab-on-felcloud.md) | How claims become "lab validated" on Felcloud |
 | [Decisions](docs/decisions/) · [Reviews](docs/reviews/) | Why things are the way they are |
 

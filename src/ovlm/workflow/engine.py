@@ -1656,6 +1656,12 @@ class WorkflowEngine:
                     "FROM workflow_step WHERE state = 'running'"
                 )
             ).one()
+            for refresh in self.registry.metric_refreshers:
+                try:
+                    with c.begin_nested():
+                        refresh(c)
+                except Exception:
+                    log.exception("metrics refresher failed")
         m.RUNS.clear()
         for kind, state, n in runs:
             m.RUNS.labels(kind, state).set(n)
