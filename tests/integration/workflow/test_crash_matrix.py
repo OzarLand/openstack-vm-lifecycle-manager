@@ -26,7 +26,13 @@ from ovlm.workflow import crashpoint
 from ovlm.workflow.clock import FakeClock
 from ovlm.workflow.crashpoint import CrashPlan, SimulatedCrash
 from tests.integration.conftest import ROOT
-from tests.integration.workflow.conftest import TEST_CONFIG, RecordingAudit, WfDb, drive
+from tests.integration.workflow.conftest import (
+    TEST_CONFIG,
+    CrashWithBeatDue,
+    RecordingAudit,
+    WfDb,
+    drive,
+)
 from tests.integration.workflow.dummy import BLOCKERS, plan_step
 
 LOCKS = [["service", "svc-1"], ["server", "blue-1"], ["volume", "vol-1"]]
@@ -115,6 +121,44 @@ def _crash_in_process(wf: WfDb, point: str, occurrence: int) -> None:
             a.run_once()
     crashpoint.install(None)
     assert plan.fired
+
+
+#: Points where a beat of the crashing attempt can be due; async.after_probe#2 failed in CI (2026-11-09, twice).
+BEAT_DUE_POINTS = [
+    ("set.after_intent", 1),
+    ("async.after_probe", 2),
+    ("set_destructive.after_verify_before_commit", 1),
+]
+
+
+@pytest.mark.parametrize(
+    ("point", "occurrence"), BEAT_DUE_POINTS, ids=[f"{p}#{n}" for p, n in BEAT_DUE_POINTS]
+)
+def test_crash_with_a_heartbeat_due_is_taken_over_at_once(
+    wf: WfDb, plan3: Callable[[], list[dict[str, Any]]], point: str, occurrence: int
+) -> None:
+    """The matrix with the slow-runner timing forced: the crashing attempt's heartbeat has a beat due when the
+    crash propagates, and that beat goes out only after ``expire_leases``. Before the fix it extended the lease
+    by 30 s, the new engine's passes ran out, and the oracle saw the run still 'running'."""
+    run_id = wf.request(plan3(), locks=LOCKS)
+    plan = CrashWithBeatDue(point, occurrence)
+    crashpoint.install(plan)
+    a = wf.make_engine()
+    with pytest.raises(SimulatedCrash):
+        for _ in range(100):
+            a.run_once()
+    wf.expire_leases()
+    plan.release()
+    crashpoint.install(None)
+    assert plan.fired and plan.beat_due.is_set()
+    expired = wf.q(
+        "SELECT step_key FROM workflow_step WHERE state = 'running' AND lease_expires_at < now()"
+    )
+    assert [s["step_key"] for s in expired] == [point.split(".")[0]], (
+        "the dead attempt's lease was extended"
+    )
+    drive(wf.make_engine(), run_id, wf)
+    _oracle(wf, run_id)
 
 
 @pytest.mark.parametrize(("point", "occurrence"), MATRIX, ids=[f"{p}#{n}" for p, n in MATRIX])
