@@ -153,6 +153,164 @@ def test_a_failing_sweep_does_not_stop_the_worker(
     assert w._started  # noqa: SLF001
 
 
+# ---- the run-level checkouts on run_root (roadmap P0-1) ----------------------------------------------------------
+
+
+class _Runs:
+    """A database double for the checkout sweep: ``workflow_run`` reduced to ``{id: state}``."""
+
+    def __init__(self, states: dict[str, str]) -> None:
+        self.states = states
+        self.queries = 0
+
+    def connect(self) -> Any:
+        runs = self
+
+        class _Conn:
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *_a: object) -> None: ...
+
+            def execute(self, _sql: Any, p: dict[str, Any]) -> Any:
+                runs.queries += 1
+                t = set(p["t"])
+                rows: list[tuple[Any]]
+                if "i" in p:  # one run: is it terminal?
+                    rows = [(1,)] if runs.states.get(p["i"]) in t else []
+                elif "ids" in p:  # the terminal runs among these ids
+                    rows = [(i,) for i in p["ids"] if runs.states.get(i) in t]
+                else:  # every non-terminal run
+                    rows = [(i,) for i, st in runs.states.items() if st not in t]
+                return type("R", (), {"first": lambda _s: rows[0] if rows else None,
+                                      "__iter__": lambda _s: iter(rows)})()  # fmt: skip
+
+        return _Conn()
+
+
+_LIVE, _DONE, _GONE = (
+    "6f1d9a3e-0000-4000-8000-00000000000a",
+    "6f1d9a3e-0000-4000-8000-00000000000b",
+    "6f1d9a3e-0000-4000-8000-00000000000c",
+)
+
+
+def _checkout(root: Path, run_id: str, *, old: bool = False) -> Path:
+    from ovlm.automation import checkout as co
+
+    entry = root / run_id
+    (entry / "_checkout").mkdir(parents=True)
+    (entry / "_checkout" / "site.yml").write_text("- hosts: all\n")
+    co.make_read_only(entry / "_checkout")
+    (entry / "_checkout.sha").write_text("a" * 40 + "\n")
+    if old:
+        then = time.time() - 365 * 86400
+        os.utime(entry, (then, then))
+    return entry
+
+
+def _worker(tmp_path: Path, runs: _Runs, wf: Any = None, *, cache: bool = True) -> Worker:
+    automation: dict[str, Any] = {"run_root": str(tmp_path / "run"), "run_user": None}
+    if cache:
+        automation["checkout_cache"] = str(tmp_path / "cache")
+    return Worker(Settings(process_role="worker", automation=automation), runs, wf)  # type: ignore[arg-type]
+
+
+def test_a_finished_runs_checkout_is_released_after_its_last_step(tmp_path: Path) -> None:
+    """The step thread that ran the run's last step frees its checkout on run_root and its cached copy as soon as
+    the database reads the run terminal; another run's checkout is not touched."""
+    runs = _Runs({_DONE: "running", _LIVE: "waiting"})
+    for root in (tmp_path / "run", tmp_path / "cache"):
+        _checkout(root, _DONE)
+        _checkout(root, _LIVE)
+
+    class Wf:
+        worker_id = "w"
+
+        def execute(self, claim: Any) -> str:
+            runs.states[claim.run.id] = (
+                "completed"  # the last step committed the terminal transition
+            )
+            return "succeeded"
+
+    w = _worker(tmp_path, runs, Wf())
+    claim = type("C", (), {"run": type("V", (), {"id": _DONE})()})()
+    w._run_step(claim)  # noqa: SLF001
+    for root in (tmp_path / "run", tmp_path / "cache"):
+        assert not (root / _DONE).exists(), root
+        assert (root / _LIVE / "_checkout").is_dir(), root
+
+
+@pytest.mark.parametrize("state", ["completed", "rolled_back", "failed", "cancelled", "rejected"])
+def test_every_terminal_state_releases_the_checkout(tmp_path: Path, state: str) -> None:
+    runs = _Runs({_DONE: state})
+    _checkout(tmp_path / "run", _DONE)
+    _worker(tmp_path, runs)._sweep_checkouts(_DONE)  # noqa: SLF001
+    assert not (tmp_path / "run" / _DONE).exists()
+
+
+@pytest.mark.parametrize("state", ["requested", "running", "waiting", "needs_human"])
+def test_a_non_terminal_runs_checkout_is_kept_after_a_step(tmp_path: Path, state: str) -> None:
+    runs = _Runs({_LIVE: state})
+    for root in (tmp_path / "run", tmp_path / "cache"):
+        _checkout(root, _LIVE, old=True)
+    w = _worker(tmp_path, runs)
+    w._sweep_checkouts(_LIVE)  # noqa: SLF001
+    w._sweep_checkouts()  # noqa: SLF001  (the periodic sweep: kept whatever its age)
+    for root in (tmp_path / "run", tmp_path / "cache"):
+        assert (root / _LIVE / "_checkout").is_dir() and (root / _LIVE / "_checkout.sha").is_file()
+
+
+def test_a_step_of_a_run_without_a_checkout_does_not_read_the_database(tmp_path: Path) -> None:
+    runs = _Runs({})
+    w = _worker(tmp_path, runs)
+    w._sweep_checkouts(_DONE)  # noqa: SLF001
+    w._sweep_checkouts("not-a-run-id")  # noqa: SLF001
+    assert runs.queries == 0
+
+
+def test_the_start_up_sweep_removes_run_root_checkouts_of_finished_and_unknown_runs(
+    tmp_path: Path,
+) -> None:
+    """Before the first claim: a terminal run's checkout goes at once, an unknown one once older than the orphan max
+    age; a live run keeps its own whatever its age, and so do the worker's own files (``.ca``, ``.ssh-*``)."""
+    root = tmp_path / "run"
+    runs = _Runs({_LIVE: "needs_human", _DONE: "rolled_back"})
+    live, done = _checkout(root, _LIVE, old=True), _checkout(root, _DONE)
+    gone, fresh = (
+        _checkout(root, _GONE, old=True),
+        _checkout(root, "6f1d9a3e-0000-4000-8000-00000000000d"),
+    )
+    (root / ".ca").mkdir()
+    (root / ".ssh-1234abcd").mkdir()
+
+    class Wf:
+        worker_id = "w"
+        registry = type("R", (), {"sweepers": []})()
+
+        def register_worker(self, _v: str) -> None: ...
+
+    w = _worker(tmp_path, runs, Wf(), cache=False)
+    w._start_workflow()  # noqa: SLF001
+    assert not done.exists() and not gone.exists()
+    assert (live / "_checkout").is_dir() and (fresh / "_checkout").is_dir()
+    assert sorted(p.name for p in root.iterdir()) == sorted(
+        [".ca", ".ssh-1234abcd", live.name, fresh.name]
+    )
+
+
+def test_a_failing_checkout_sweep_is_not_fatal(tmp_path: Path) -> None:
+    class Down:
+        def connect(self) -> Any:
+            raise OSError("database down")
+
+    _checkout(tmp_path / "run", _DONE)
+    w = _worker(tmp_path, Down())  # type: ignore[arg-type]
+    w._sweep_checkouts()  # noqa: SLF001
+    w._sweep_checkouts(_DONE)  # noqa: SLF001
+    assert (tmp_path / "run" / _DONE / "_checkout").is_dir()  # nothing removed without the database
+
+
 def test_restricted_read_rule() -> None:
     p = "project:6f1d9a3e-0000-4000-8000-000000000001"
     q = "project:6f1d9a3e-0000-4000-8000-000000000002"

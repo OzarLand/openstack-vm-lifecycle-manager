@@ -76,7 +76,7 @@ class Harness:
 
     def start_worker(self) -> Worker:
         # the same run_root (tmpfs in the container): B6's checkout survives a worker process restart
-        runner = RunnerDouble(self.w.guest, self.keys, self.tmp / "checkout")
+        runner = RunnerDouble(self.w.guest, self.keys, self.settings.automation.run_root)
         self.runners.append(runner)
         store = ArtifactStore(RunnerConfig(run_root=self.tmp / "run"))
         guest = RunnerGuestPort(self.w.worker, runner, self.creds, ssh=SshDouble(self.keys), http=self.http,
@@ -141,7 +141,7 @@ def test_full_renewal_through_the_worker_loop_with_a_crash_in_the_window(
     plan = CrashPlan("attach_volume_green.after_act", action=crash)
     crashpoint.install(plan)
     try:
-        w.start()
+        checkout = settings.automation.run_root / w.start()
         h.start_worker()
         h.wait("G2", lambda: h.waiting_at("await_cutover"))
         assert w.keys() == ORDER[:9]
@@ -155,8 +155,11 @@ def test_full_renewal_through_the_worker_loop_with_a_crash_in_the_window(
         first_owner = st["lease_owner"]
         assert w.run()["downtime_started_at"] is not None  # we are inside the outage
 
-        h.start_worker()  # restarted worker: new lease owner, new adapter (empty checkout cache: it re-adopts B6's checkout from disk)
+        # restarted worker: new lease owner, new adapter (empty checkout cache: it re-adopts B6's checkout from disk);
+        # its start-up sweep keeps the checkout of this live run (roadmap P0-1)
+        h.start_worker()
         h.wait("G3", lambda: h.waiting_at("await_retirement"))
+        assert (checkout / "_checkout").is_dir(), "a live run keeps its run_root checkout"
         w.approve("retirement", decider="ap2")
         h.wait("completion", lambda: w.run()["state"] == "completed")
     finally:
@@ -165,6 +168,8 @@ def test_full_renewal_through_the_worker_loop_with_a_crash_in_the_window(
 
     run = w.run()
     assert run["state"] == "completed" and not run["auto_restore_used"], explain(w)
+    # roadmap P0-1: the run is over, its checkout no longer holds tmpfs (RAM) on the worker
+    assert not checkout.exists(), sorted(p.name for p in checkout.iterdir())
     succeeded = [s["step_key"] for s in w.steps() if s["state"] == "succeeded"]
     assert succeeded == ORDER, succeeded
     # the takeover: same step, a new attempt, by the restarted worker, after a fresh probe
