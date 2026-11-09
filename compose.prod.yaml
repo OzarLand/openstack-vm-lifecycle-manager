@@ -1,0 +1,183 @@
+# Production Compose file (roadmap P1-9). compose.yaml stays the development and CI file; do not combine the two.
+#
+# Use it for every Compose command by putting `COMPOSE_FILE=compose.prod.yaml` in `.env` next to this file (the Make
+# targets backup, restore, upgrade-preflight and smoke then follow it too), or pass `-f compose.prod.yaml` each time.
+# Guide: docs/install-guide-real-cloud.md section 5. `docker compose config` prints the resolved file.
+#
+# What differs from compose.yaml:
+#   * development mode is never set (the default is off); the api refuses to start without OVLM_EXTERNAL_URL;
+#   * the TOML configuration ./config/ovlm.toml is mounted read-only and loaded by migrate, api and worker;
+#   * images come from OVLM_IMAGE / OVLM_WORKER_IMAGE (required): a pinned tag you built (`make build IMAGE_TAG=...`)
+#     or a registry reference pinned by digest (registry.example.org/ovlm@sha256:...); nothing is built here;
+#   * restart policies, log rotation, a fixed network address for the TLS proxy's hop (OVLM_HTTP__TRUSTED_PROXIES).
+# Unchanged: the per-service secrets (the KEK private key and the worker DB password reach the worker only; the
+# TOTP key, the KEK public key and the api DB password reach the api only), read-only root file systems, dropped
+# capabilities, the worker's tmpfs run root and KEK copy, the `checkouts` volume, healthchecks.
+#
+# No TLS here: the api is published on 127.0.0.1:8000 for a reverse proxy on the same host (deploy/proxy/).
+#
+# Secret files (./secrets, directory 0700; `make secrets` creates missing files and never changes existing modes):
+#   db_*_password    0444  PostgreSQL (uid 999) reads all four at first start; each OVLM service reads its own
+#   worker_kek       0400  your host user; the worker's launcher (root + CAP_DAC_READ_SEARCH) copies it once
+#   worker_kek.pub   0444
+#   totp_key         0400  owned by 10001:10001 (uid ovlm, the api): `sudo chown 10001:10001 secrets/totp_key`
+# Compose mounts file secrets with their host owner and mode: they are not changed here.
+name: ${COMPOSE_PROJECT_NAME:-ovlm-prod}   # not `ovlm`: `make down` (development, deletes volumes) never reaches it
+
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "50m", max-file: "5"}   # ship the logs off the host as well (audit lines, install guide 8.1)
+
+x-config-mount: &config-mount   # the TOML configuration (0644, no secret), read-only
+  type: bind
+  source: ${OVLM_CONFIG:-./config/ovlm.toml}
+  target: /etc/ovlm/ovlm.toml
+  read_only: true
+  bind: {create_host_path: false}   # a missing file is an error, not an empty directory
+
+x-ovlm: &ovlm
+  image: ${OVLM_IMAGE:?set OVLM_IMAGE in .env to a pinned api image (ovlm:<tag> or <registry>/ovlm@sha256:...)}
+  pull_policy: missing
+  environment: &ovlm-env
+    OVLM_CONFIG_FILE: /etc/ovlm/ovlm.toml
+    OVLM_DB__HOST: postgres
+    OVLM_DB__NAME: ovlm
+    OVLM_DB__SSLMODE: disable        # private Compose network; an external PostgreSQL needs verify-full
+  volumes: [*config-mount]
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging: *logging
+
+services:
+  postgres:
+    image: postgres:16-bookworm@sha256:e8a07d2c7579b038938cdba6c539e580e5001caf9ea203d397b5cc83e76bd938
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_superuser_password
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    secrets: [db_superuser_password, db_owner_password, db_api_password, db_worker_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/10-ovlm-roles.sh:/docker-entrypoint-initdb.d/10-ovlm-roles.sh:ro
+    restart: unless-stopped
+    stop_grace_period: 60s           # a clean shutdown, not a crash recovery at the next start
+    logging: *logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ovlm"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+      start_period: 60s
+    # Suggested limits (not measured; the only measured host had 2 vCPU and 4 GB for the whole stack):
+    # mem_limit: 1g
+    # cpus: 1.0
+    # not published outside the Compose network
+
+  migrate:
+    <<: *ovlm
+    command: ["migrate"]
+    environment:
+      <<: *ovlm-env
+      OVLM_DB__PASSWORD_FILE: /run/secrets/db_owner_password
+    secrets: [db_owner_password]   # only the migrate service sees the owner secret (SEC-R-18)
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"                  # runs once per `up`; api and worker wait for it to exit 0
+
+  api:
+    <<: *ovlm
+    command: ["api"]
+    environment:
+      <<: *ovlm-env
+      OVLM_DB__PASSWORD_FILE: /run/secrets/db_api_password
+      OVLM_HTTP__HOST: 0.0.0.0        # container-internal; published on loopback only below
+      OVLM_HTTP__METRICS_HOST: 0.0.0.0 # reachable on the Compose network only, never published
+      OVLM_EXTERNAL_URL: ${OVLM_EXTERNAL_URL:?set OVLM_EXTERNAL_URL in .env to the public https origin}
+      # The address the api sees the proxy as: a proxy on the host reaches the published port through the Compose
+      # network's gateway (fixed below). A containerised proxy on this network is listed by its own address.
+      OVLM_HTTP__TRUSTED_PROXIES: ${OVLM_TRUSTED_PROXIES:-${OVLM_NETWORK_GATEWAY:-172.30.240.1}/32}
+      OVLM_KEK__PUBLIC_KEY_FILE: /run/secrets/worker_kek_pub   # seal only: the api never holds the private key
+      OVLM_AUTH__TOTP_KEY_FILE: /run/secrets/totp_key          # 0400, owner 10001 on the host
+    secrets: [db_api_password, worker_kek_pub, totp_key]
+    ports:
+      - "127.0.0.1:${OVLM_HTTP_PORT:-8000}:8000"   # loopback only: the TLS proxy on this host forwards here
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2).status == 200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+    # Suggested limits (not measured):
+    # mem_limit: 512m
+    # cpus: 1.0
+    # pids_limit: 256
+
+  worker:
+    <<: *ovlm
+    image: ${OVLM_WORKER_IMAGE:?set OVLM_WORKER_IMAGE in .env to the pinned worker image of the same release}
+    command: ["worker"]
+    # Same privilege model as compose.yaml (see the comments there): starts as root with five capabilities; the
+    # entrypoint copies the KEK, drops to uid ovlm with SETUID/SETGID/KILL only, then runs tini. No `init: true`.
+    # Enter it only as `docker compose exec -u ovlm worker ...`.
+    user: "0:0"
+    cap_add: [SETUID, SETGID, SETPCAP, KILL, DAC_READ_SEARCH]
+    environment:
+      <<: *ovlm-env
+      OVLM_DB__PASSWORD_FILE: /run/secrets/db_worker_password
+      OVLM_HTTP__METRICS_HOST: 0.0.0.0
+      OVLM_AUTOMATION__RUN_ROOT: /run/ovlm
+      OVLM_AUTOMATION__REQUIRE_TMPFS: "true"
+      OVLM_AUTOMATION__RUN_USER: ovlm-ansible
+      OVLM_AUTOMATION__CHECKOUT_CACHE: /var/lib/ovlm/checkouts
+      OVLM_KEK__PRIVATE_KEY_FILE: /run/ovlm-kek/worker_kek   # the launcher's 0600 copy, readable by uid ovlm only
+      # Egress proxy for the OpenStack APIs only (install-guide.md 5a); guests are always reached directly.
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,::1}
+    secrets: [db_worker_password, worker_kek]   # the KEK private key: worker only (security-model.md 5.1)
+    tmpfs:
+      - /run/ovlm:mode=0710,uid=10001,gid=10002       # automation.run_root: memory only (counts against mem_limit)
+      - /run/ovlm-kek:mode=0700,uid=10001,gid=10001   # the KEK copy: uid ovlm only
+    volumes:
+      - *config-mount
+      - checkouts:/var/lib/ovlm/checkouts           # automation.checkout_cache, 0700 ovlm (seeded by the image)
+    stop_grace_period: 40s                          # worker.shutdown_grace (30 s) plus margin
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped         # a restarted worker takes its runs over (LAB-01); never leave it stopped
+    healthcheck:
+      test: ["CMD", "setpriv", "--reuid=10001", "--regid=10001", "--clear-groups", "--inh-caps=-all", "--bounding-set=-all", "--no-new-privs", "--", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/healthz', timeout=2).status == 200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+    # Suggested limits (not measured; each concurrent run holds a checkout in the /run/ovlm tmpfs):
+    # mem_limit: 2g
+    # cpus: 2.0
+    # pids_limit: 1024
+
+networks:
+  default:
+    ipam:
+      config:
+        # Fixed so that the proxy's hop has a known address. Change both if the range is used on your network.
+        - subnet: ${OVLM_NETWORK_SUBNET:-172.30.240.0/24}
+          gateway: ${OVLM_NETWORK_GATEWAY:-172.30.240.1}
+
+secrets:
+  db_superuser_password: {file: ./secrets/db_superuser_password}
+  db_owner_password: {file: ./secrets/db_owner_password}
+  db_api_password: {file: ./secrets/db_api_password}
+  db_worker_password: {file: ./secrets/db_worker_password}
+  worker_kek: {file: ./secrets/worker_kek}           # 0400, your host user: worker only
+  worker_kek_pub: {file: ./secrets/worker_kek.pub}
+  totp_key: {file: ./secrets/totp_key}               # 0400, 10001:10001: api only
+
+volumes:
+  pgdata:
+  checkouts:   # worker only: automation.checkout_cache

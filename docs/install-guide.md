@@ -101,7 +101,7 @@ repository.
   sudo chown 10001:10001 secrets/totp_key && sudo chmod 0400 secrets/totp_key
   ```
 
-  `make secrets` leaves the development key at `0444` so that the development stack works without `sudo`: Compose
+  `make secrets` creates the development key at `0444` (and never changes the mode of an existing key) so that the development stack works without `sudo`: Compose
   mounts a file secret with its host owner and mode, and a `0400` file owned by your host user is unreadable by the
   api's uid. Do not keep that mode outside a development machine.
 
@@ -112,7 +112,8 @@ full procedure, `make backup` and `make restore`: [backup-restore-upgrade.md](ba
 > [!NOTE]
 > `compose.yaml` is the **development and CI** file. It sets `OVLM_DEVELOPMENT_MODE: "true"` and publishes the api
 > on loopback. §5 shows how to switch the api to production-mode checks. Nothing in this guide makes the stack
-> highly available or backed up.
+> highly available or backed up. A real installation uses `compose.prod.yaml` instead
+> ([install-guide-real-cloud.md §5.4](install-guide-real-cloud.md#54-the-production-compose-file-and-env)).
 
 ## 4. Create the first admin (enrolment link)
 

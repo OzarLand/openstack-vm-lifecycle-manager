@@ -15,8 +15,12 @@
 > of that VM is down or moving, and a stopped worker keeps it down until it is back. `ovlm upgrade preflight` refuses
 > in that state (§4.1). Let the window finish, or follow the run's runbook in [operations.md](operations.md).
 
-Commands in this page are for the Compose stack ([install-guide.md](install-guide.md)). ⚠️ marks a command that
-changes state, 🛑 one that destroys data.
+Commands in this page are for the Compose stack. On a real installation that is `compose.prod.yaml`, named by
+`COMPOSE_FILE=compose.prod.yaml` in `.env` ([install-guide-real-cloud.md §5.4](install-guide-real-cloud.md#54-the-production-compose-file-and-env)):
+every `docker compose` command below and the targets `make backup`, `make restore`, `make upgrade-preflight` and
+`make smoke` then use it (or pass `COMPOSE_FILE=compose.prod.yaml` to `make`). Without it they use the development
+file `compose.yaml` ([install-guide.md](install-guide.md)). ⚠️ marks a command that changes state, 🛑 one that
+destroys data.
 
 ## 1. What to back up
 
@@ -28,7 +32,7 @@ changes state, 🛑 one that destroys data.
 | **TOTP key** | `secrets/totp_key` | With the KEK, apart from the dump (install-guide.md §3a) | Encrypts every TOTP secret. Without it every admin and approver is locked out of step-up |
 | Database passwords | `secrets/db_*_password` | With the deployment's secrets | Not in the dump: the roles get them again on a new volume. New passwords also work (§3, step 2) |
 | KEK public key | `secrets/worker_kek.pub` | Optional | Derived from the private key: `ovlm kek public --private-in <file>` |
-| Configuration | `compose.yaml`, `.env`, the TLS proxy, `deploy/prometheus/` | Version control or the deployment's config backup | Not data |
+| Configuration | `.env` (image references, external URL), `config/ovlm.toml`, any site Compose file, the TLS proxy, `deploy/prometheus/` | Version control or the deployment's config backup | Not data |
 
 **Not backed up:**
 
@@ -85,8 +89,9 @@ Use it to recover from a lost or corrupted database, to move OVLM to a new host,
 still readable. Stop renewals: nobody confirms a cutover until step 6 passed.
 
 1. Put the keys of the backup back: `secrets/worker_kek` (the private key whose `kek_id` the manifest lists, mode
-   `0400`) and `secrets/totp_key` (install-guide.md §3a), **before** `make secrets` or `make up` run: both create a
-   missing key, and a new key does not open the backup. Derive the public key if it is missing:
+   `0400`) and `secrets/totp_key` (install-guide.md §3a; on a real installation `0400` owned by `10001`), **before**
+   `make secrets` or `make up` run: both create a missing key, and a new key does not open the backup. `make secrets`
+   never changes a file that exists, or its mode. Derive the public key if it is missing:
    ```bash
    # ⚠️ State-changing: writes secrets/worker_kek.pub (as `make secrets` does)
    openssl pkey -in secrets/worker_kek -pubout -out secrets/worker_kek.pub && chmod 0444 secrets/worker_kek.pub
@@ -158,11 +163,15 @@ maintenance.
 
 ### 4.2 Procedure (Compose)
 
-1. Read the release notes. Get the new release and build its images; running containers keep the old ones:
+1. Read the release notes. Get the new release and build its images under a new tag; running containers keep the
+   old ones:
    ```bash
    git fetch --tags && git checkout <new release tag>
-   make build
+   make build IMAGE_TAG=$(git rev-parse --short=12 HEAD)
    ```
+   With `compose.prod.yaml`, set `OVLM_IMAGE` and `OVLM_WORKER_IMAGE` in `.env` to the new tag now (keep the old
+   values for §4.3): `make upgrade-preflight` runs the new image, and step 7 starts it. Pulled images: the new
+   digests. (The development stack builds `:dev` and needs no `.env` change.)
 2. Preflight with the worker still running (read-only):
    ```bash
    make upgrade-preflight
@@ -210,8 +219,8 @@ one (`database-ahead`).
 
 | Failure | Way back |
 |---|---|
-| `migrate` fails (step 7) | All pending migrations run in one transaction (PostgreSQL transactional DDL): the database is still at the old revision. Check out the old release, `make build`, `docker compose up -d --wait`. Report the migration error. |
-| `make smoke` or the checks of step 8 fail, the worker has not run a renewal step yet | Restore: check out the old release, `make build`, then `make restore DUMP=<the backup of step 5> CONFIRM=replace-ovlm-database` (§3). Nothing is lost: nothing changed since the backup. |
+| `migrate` fails (step 7) | All pending migrations run in one transaction (PostgreSQL transactional DDL): the database is still at the old revision. Put the old image references back in `.env` (development stack: check out the old release, `make build`), `docker compose up -d --wait`. Report the migration error. |
+| `make smoke` or the checks of step 8 fail, the worker has not run a renewal step yet | Restore: check out the old release and put its image references back in `.env` (development stack: `make build`), then `make restore DUMP=<the backup of step 5> CONFIRM=replace-ovlm-database` (§3). Nothing is lost: nothing changed since the backup. |
 | A problem found after renewals ran on the new release | Prefer a fix forward. A restore loses every run step, approval and audit row since the upgrade (§2, rule 6) and puts runs back behind their OpenStack state; if you must, follow §3 in full, step 6 included. |
 
 ## 5. What is tested

@@ -3,7 +3,8 @@
 * Every ``make <target>`` in a code span or block of the guide is a target of the Makefile.
 * Every ``ovlm <subcommand> [<subcommand>]`` in a code span or block is accepted by the CLI: ``ovlm.cli.main`` is
   called with the words and ``--help``, which every sub-parser answers with exit 0 and an unknown word with exit 2.
-* Every ``OVLM_*`` environment variable maps to a field of ``Settings`` (``__`` separates the nesting levels).
+* Every ``OVLM_*`` environment variable maps to a field of ``Settings`` (``__`` separates the nesting levels), unless
+  it is a variable that ``compose.prod.yaml`` interpolates (``${OVLM_IMAGE:?...}``) and the guide sets in ``.env``.
 * The TOML example, placeholders filled, loads and sets every renewal key the strategy needs.
 """
 
@@ -22,6 +23,7 @@ from ovlm.renewal.config import RenewalConfig
 ROOT = Path(__file__).parents[2]
 GUIDE = ROOT / "docs" / "install-guide-real-cloud.md"
 MAKEFILE = ROOT / "Makefile"
+PROD_COMPOSE = ROOT / "compose.prod.yaml"
 
 _FENCE = re.compile(r"^```[^\n]*\n(.*?)^```", re.MULTILINE | re.DOTALL)
 _SPAN = re.compile(r"`([^`\n]+)`")
@@ -31,6 +33,8 @@ _OVLM = re.compile(r"(?<![\w./:-])(?<!-u )ovlm((?: [a-z][a-z-]*){1,2})")
 _ENV = re.compile(r"\bOVLM_[A-Z0-9_]+\b")
 #: Read by the settings loader itself, not a field.
 _ENV_NOT_FIELDS = {"OVLM_CONFIG_FILE"}
+#: Interpolated by the production Compose file (image references, network, proxy address), set in ``.env``.
+_COMPOSE_VARS = set(re.findall(r"\$\{(OVLM_[A-Z0-9_]+)", PROD_COMPOSE.read_text()))
 
 
 def _code(text: str) -> list[str]:
@@ -101,7 +105,11 @@ def test_every_ovlm_command_in_the_guide_exists(capsys: pytest.CaptureFixture[st
 
 
 def test_every_ovlm_environment_variable_in_the_guide_is_a_setting() -> None:
-    names = set(_ENV.findall(GUIDE.read_text())) - _ENV_NOT_FIELDS
+    names = (
+        set(_ENV.findall(GUIDE.read_text()))
+        - _ENV_NOT_FIELDS
+        - (_COMPOSE_VARS - {"OVLM_EXTERNAL_URL"})
+    )
     assert names, "the guide names no OVLM_ variable: the extraction is broken"
     unknown = sorted(n for n in names if not _setting_exists(n))
     assert not unknown, f"OVLM_ variables named in {GUIDE.name} that are not settings: {unknown}"
@@ -130,3 +138,5 @@ def test_the_checks_catch_drift(capsys: pytest.CaptureFixture[str]) -> None:
     assert not _setting_exists("OVLM_NO__SUCH")
     assert _setting_exists("OVLM_HTTP__TRUSTED_PROXIES")
     assert not _setting_exists("OVLM_HTTP__TRUSTED_PROXIES__X")
+    assert {"OVLM_IMAGE", "OVLM_WORKER_IMAGE", "OVLM_TRUSTED_PROXIES"} <= _COMPOSE_VARS
+    assert not _setting_exists("OVLM_TRUSTED_PROXIES")

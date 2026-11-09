@@ -32,6 +32,8 @@ jobs:
       - run: make lock-check
       - run: make install
       - run: make lint
+      # docker compose config parses and interpolates both Compose files; it needs the plugin, not the daemon.
+      - run: make compose-check
 
   unit:
     name: unit tests
