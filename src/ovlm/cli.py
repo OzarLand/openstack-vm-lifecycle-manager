@@ -27,6 +27,9 @@ def _run_api() -> int:
     configure_logging(
         "api", settings.log.level, openstack_http_debug=settings.log.openstack_http_debug
     )
+    from ovlm.renewal.config import RenewalConfig, log_effective
+
+    log_effective(RenewalConfig.from_settings(settings), log)
     # One uvicorn worker: /metrics is per process (no multiprocess mode yet).
     uvicorn.run(
         create_app(settings),

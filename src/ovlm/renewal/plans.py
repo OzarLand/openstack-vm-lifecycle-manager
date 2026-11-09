@@ -389,8 +389,23 @@ def resolve_plan(
     if missing:
         raise _err(
             409, "renewal-config-incomplete", "Renewal configuration incomplete",
-            "These configuration keys have no value (defaults are set from lab measurements): "
-            + ", ".join(missing), "Ask an admin to set them in the OVLM configuration.",
+            "These configuration keys have no value: " + ", ".join(missing),
+            "Ask an admin to set them in the OVLM configuration.",
+        )  # fmt: skip
+    asked = spec["automation"].get("timeouts") or {}
+    over = sorted(
+        f"{phase} ({float(v):g} s > {cfg.automation[phase]:g} s)"
+        for phase, v in asked.items()
+        if phase in cfg.automation and float(v) > float(cfg.automation[phase])
+    )
+    if over:
+        # the step deadline (and the worst case shown at G2) would end before the playbook the profile allows
+        raise _err(
+            409, "renewal-timeouts-inconsistent", "Profile timeouts exceed the renewal's step bounds",
+            "The profile asks the Ansible runner for more time than the renewal allows the step: " + ", ".join(over)
+            + ". The step deadline and the worst-case window shown at G2 would be wrong.",
+            "Lower the profile's automation.timeouts, or ask an admin to raise renewal.automation_timeouts.<phase> "
+            "(docs/timeouts.md).",
         )  # fmt: skip
     units = spec["automation"].get("inventory_vars", {}).get("service_units", [])
     return {
@@ -429,6 +444,8 @@ def resolve_plan(
         "auto_restore_in_window": bool(policy_row["auto_restore_in_window"]),
         "max_window_duration_seconds": int(policy_row["max_window_duration_seconds"]),
         "worst_case_window_seconds": cfg.worst_case_window(snapshot=snapshot, stateless=stateless),
+        # every timeout the run is held to, and which ones came from the built-in defaults (roadmap P1-8)
+        "renewal_settings": cfg.record(),
         "profile_version": {
             "id": str(pv["id"]),
             "number": pv["number"],
@@ -457,6 +474,14 @@ def blast_radius(resolved: Mapping[str, Any], gate: str) -> dict[str, Any]:
         "volume": (resolved.get("data_volume") or {}).get("volume_id"),
         "floating_ip": resolved["floating_ip"]["address"],
     }
+    rs = resolved.get("renewal_settings")
+    if rs:  # plans created before P1-8 have no record
+        out["timeouts"] = {
+            "defaults": rs["defaults"],
+            "keys_from_defaults": len(rs["defaulted"]),
+            "note": "every step deadline is in resolved.renewal_settings.values; keys not set in the OVLM "
+            "configuration use the named built-in defaults (docs/timeouts.md)",
+        }
     if gate == "cutover":
         out |= {
             "outage_start": "at quiesce of the current VM (step W1), after green is proven ready (B9)",

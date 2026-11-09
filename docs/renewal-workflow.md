@@ -36,8 +36,9 @@ typed confirmation, credentials): [security-model.md](security-model.md). OpenSt
 **LO = LAB-OBSERVED** (EXP-01/EXP-01b, Felcloud, member-equivalent credential, 2026-11-04; one cloud, few runs).
 Ansible phases: [automation-contract.md](automation-contract.md) ("AC").
 
-Names: **blue** = current (old) VM, **green** = replacement. All timeouts are config keys; **defaults TBD in lab**.
-EXP-01 times (§10) inform documentation only; they are not defaults.
+Names: **blue** = current (old) VM, **green** = replacement. All timeouts are config keys. Their built-in defaults
+(`ovlm-renewal-defaults/1`, roadmap P1-8) are derived from the lab times of §10 and the Felcloud runs with margins, each
+with its source in [timeouts.md](timeouts.md); a configured key wins, and every plan records the effective values.
 
 ## 1. Strategy preconditions (readiness blockers for this strategy)
 
@@ -433,7 +434,7 @@ locks, refreshes the run's **current-truth panel** (§6.1) and shows: the stuck 
 | 8 | Human go before `quiesce` and before cutover (AC §3.4, §10) | **Confirmed as one gate**: G2 before W1 covers both; no gate inside the window. |
 | 9 | OVLM's own rollback comes first; `rollback_hooks` optional (AC §3.8) | **Confirmed**: restore sequence §4 converges without hooks (S6); hooks run in S7 if present. |
 | 10 | Exit-code classification and data-phase needs_human (AC §6) | **Confirmed**; worker-crash during data phase → needs_human with automatic read-only probe evidence. |
-| 11 | Timeout values in AC §6 | **Rejected as defaults**: they become config keys `automation.timeout.<phase>`, defaults TBD in lab (TCG timings not representative, ADR-0001). |
+| 11 | Timeout values in AC §6 | **Rejected as defaults** at design time: they become config keys `automation.timeout.<phase>`. Since P1-8 the renewal's step bounds default to the runner's phase timeouts, and the window phases were lowered to 120 s from the Felcloud measurements ([timeouts.md](timeouts.md)). |
 | 12 | `expected_serial` = volume ID prefix (AC §3.3) | **Confirmed, LO**: OVLM passes the full volume ID; the guest shows `/dev/disk/by-id/virtio-<first 20 characters>`; the playbook prefix-matches 20 characters (EXP-01 Q2). |
 | 13 | Unverified profiles need human override to run (AC §9) | **Confirmed**: MVP never auto-starts runs; an `unverified` reproducibility verdict is a readiness warning; starting needs G1 regardless. |
 | 14 | Who cleans up OVLM-created unreferenced resources (test-env §7.3) | **OVLM detects** (orphan report, **report-only** in MVP, SEC-R-25); deletes only ledger resources of its own runs as defined run steps (ADR-0005). |
@@ -465,8 +466,8 @@ create and tag filter; metadata filter ignored; lock refuses stop and detach; du
 
 ## 10. Lab observations (EXP-01 and EXP-01b, Felcloud, 2026-11-04)
 
-EXP-01: one run; EXP-01b: three windows (R1–R3). One cloud, 1 vCPU guest, `NVMe` volume type. **These are observations for documentation, not defaults**; all
-timeout defaults stay TBD from the lab campaign.
+EXP-01: one run; EXP-01b: three windows (R1–R3). One cloud, 1 vCPU guest, `NVMe` volume type. These observations, with
+the later Felcloud runs (mvp-report.md), are the evidence the timeout defaults are derived from ([timeouts.md](timeouts.md)).
 
 | Segment | Observed |
 |---|---|

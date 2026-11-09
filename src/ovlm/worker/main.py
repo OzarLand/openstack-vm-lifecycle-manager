@@ -363,6 +363,9 @@ class Worker:
 def run(settings: Settings | None = None) -> int:
     settings = settings or Settings(process_role="worker")
     configure_logging("worker", settings.log.level)
+    from ovlm.renewal.config import RenewalConfig, log_effective
+
+    log_effective(RenewalConfig.from_settings(settings), log)
     if os.environ.get(CRASHPOINT_ENV):
         log.error("refusing to start: %s is a test-only setting", CRASHPOINT_ENV)
         return 1

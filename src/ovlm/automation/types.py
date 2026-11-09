@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from ovlm.config.renewal_defaults import AUTOMATION_PHASE_DEFAULTS
+
 
 class Phase(StrEnum):
     PREFLIGHT = "preflight"
@@ -29,15 +31,10 @@ class Classification(StrEnum):
 #: ``rollback_hooks`` is included: it acts on the data path of the OLD VM after a failure.
 DATA_PHASES: frozenset[Phase] = frozenset({Phase.QUIESCE, Phase.DATA_ATTACH, Phase.ROLLBACK_HOOKS})
 
-#: Contract section 6 defaults (ASSUMPTION: tuned in the lab): (total timeout, idle timeout) in seconds.
+#: Contract section 6 defaults: (total timeout, idle timeout) in seconds. One table, kept in ``ovlm.config`` so the
+#: renewal's step bounds default to the same values (docs/timeouts.md, roadmap P1-8).
 DEFAULT_TIMEOUTS: dict[Phase, tuple[int, int]] = {
-    Phase.PREFLIGHT: (120, 60),
-    Phase.CONFIGURE: (1800, 300),
-    Phase.DATA_ATTACH: (300, 120),
-    Phase.QUIESCE: (300, 120),
-    Phase.START_SERVICE: (300, 120),
-    Phase.HEALTHCHECK: (60, 30),
-    Phase.ROLLBACK_HOOKS: (300, 120),
+    Phase(name): value for name, value in AUTOMATION_PHASE_DEFAULTS.items()
 }
 
 #: Seconds between SIGTERM and SIGKILL of the process group (contract section 6).

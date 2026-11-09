@@ -5,7 +5,8 @@
   called with the words and ``--help``, which every sub-parser answers with exit 0 and an unknown word with exit 2.
 * Every ``OVLM_*`` environment variable maps to a field of ``Settings`` (``__`` separates the nesting levels), unless
   it is a variable that ``compose.prod.yaml`` interpolates (``${OVLM_IMAGE:?...}``) and the guide sets in ``.env``.
-* The TOML example, placeholders filled, loads and sets every renewal key the strategy needs.
+* The TOML example loads as written (renewal keys left to their built-in defaults), and with every commented override
+  uncommented it still loads, every value in it equal to the default it documents (docs/timeouts.md, roadmap P1-8).
 """
 
 from __future__ import annotations
@@ -115,18 +116,39 @@ def test_every_ovlm_environment_variable_in_the_guide_is_a_setting() -> None:
     assert not unknown, f"OVLM_ variables named in {GUIDE.name} that are not settings: {unknown}"
 
 
-def test_the_configuration_example_sets_every_renewal_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The guide's TOML, with its placeholders filled, loads into ``Settings`` and leaves no renewal key missing."""
+def _toml_example() -> str:
     blocks = re.findall(r"^```toml\n(.*?)^```", GUIDE.read_text(), re.MULTILINE | re.DOTALL)
     assert len(blocks) == 1
+    return str(blocks[0])
+
+
+def test_the_configuration_example_needs_no_renewal_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guide's TOML as written loads into ``Settings``, and the renewal needs nothing more (built-in defaults)."""
     config = tmp_path / "ovlm.toml"
-    config.write_text(re.sub(r"<(?:seconds|count)>", "1", blocks[0]))
+    config.write_text(_toml_example())
     monkeypatch.setenv("OVLM_CONFIG_FILE", str(config))
     settings = Settings(process_role="worker")
-    assert RenewalConfig.from_settings(settings).missing(snapshot=True) == []
+    cfg = RenewalConfig.from_settings(settings)
+    assert cfg.missing(snapshot=True) == []
+    assert len(cfg.defaulted) == len(cfg.values())  # every renewal key from the defaults
     assert settings.automation.allowed_repos
+
+
+def test_the_commented_overrides_are_the_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Uncommented, the guide's optional overrides load, set every renewal key, and repeat the documented defaults."""
+    text = re.sub(r"^# ?(\[renewal[^\]]*\]|[a-z_]+ = )", r"\1", _toml_example(), flags=re.MULTILINE)
+    config = tmp_path / "ovlm.toml"
+    config.write_text(text)
+    monkeypatch.setenv("OVLM_CONFIG_FILE", str(config))
+    settings = Settings(process_role="worker")
+    cfg = RenewalConfig.from_settings(settings)
+    assert cfg.defaulted == ()  # every key is set by the example
+    monkeypatch.setenv("OVLM_CONFIG_FILE", str(tmp_path / "absent.toml"))
+    assert cfg.values() == RenewalConfig.from_settings(Settings(process_role="worker")).values()
 
 
 def test_the_checks_catch_drift(capsys: pytest.CaptureFixture[str]) -> None:

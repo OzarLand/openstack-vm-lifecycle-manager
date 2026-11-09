@@ -19,6 +19,7 @@ from pydantic_settings import (
 )
 from sqlalchemy.engine import URL
 
+from ovlm.config import renewal_defaults
 from ovlm.config.secrets import read_secret_file
 
 ProcessRole = Literal["api", "worker", "migrate"]
@@ -128,31 +129,36 @@ class AlertSettings(_Section):
     after: float = Field(default=300.0, gt=0)
 
 
+# The renewal keys below are **overrides**: ``None`` / absent takes the built-in default of
+# ``ovlm.config.renewal_defaults`` (documented with its source in docs/timeouts.md, roadmap P1-8). The effective
+# values are recorded in every plan, with the list of keys that used a default.
+
+
 class RenewalGreenReady(_Section):
-    #: ``green_ready.max_age``: B9 success must be younger than this when W1 is claimed. Default TBD in lab.
+    #: ``green_ready.max_age``: B9 success must be younger than this when W1 is claimed.
     max_age: float | None = Field(default=None, gt=0)
 
 
 class RenewalHealthcheck(_Section):
-    #: ``healthcheck.max_attempts`` / ``healthcheck.interval`` (W8). Defaults TBD in lab.
+    #: ``healthcheck.max_attempts`` / ``healthcheck.interval`` (W8, S7).
     max_attempts: int | None = Field(default=None, ge=1)
     interval: float | None = Field(default=None, ge=0)
 
 
 class RenewalExternalVerify(_Section):
-    #: ``external_verify.required_successes`` / ``external_probe.interval`` (W10, S9). Defaults TBD in lab.
+    #: ``external_verify.required_successes`` / ``external_probe.interval`` (W10, S9).
     required_successes: int | None = Field(default=None, ge=1)
     interval: float | None = Field(default=None, ge=0)
 
 
 class RenewalRetire(_Section):
-    #: ``retire.health_max_age``: X1 needs a green healthcheck younger than this. Default TBD in lab.
+    #: ``retire.health_max_age``: X1 needs a green healthcheck younger than this.
     health_max_age: float | None = Field(default=None, gt=0)
 
 
 class RenewalApprovalValidity(_Section):
     #: ``approval.validity.*`` in seconds. Plan 24 h and cutover 4 h are the security-model.md 7.1 defaults; the
-    #: retirement validity has no documented default and must be configured.
+    #: retirement validity defaults to 4 h like the cutover (an irreversible step; docs/timeouts.md).
     plan: float = Field(default=24 * 3600, gt=0)
     cutover: float = Field(default=4 * 3600, gt=0)
     retirement: float | None = Field(default=None, gt=0)
@@ -161,11 +167,12 @@ class RenewalApprovalValidity(_Section):
 class RenewalSettings(_Section):
     #: Global cap on admitted (non-terminal, non-requested) renewal runs (NFR-9). Checked at admission.
     max_concurrent_runs: int = Field(default=5, ge=1)
-    #: ``timeouts.<key>`` of renewal-workflow.md (seconds). **No defaults** (TBD in lab): a run whose strategy
-    #: needs a key that is not configured is rejected at admission with the list of missing keys.
+    #: ``timeouts.<key>`` of renewal-workflow.md (seconds), overrides only: a key left out takes its built-in
+    #: default (``renewal_defaults.TIMEOUT_DEFAULTS``). Unknown keys are errors.
     timeouts: dict[str, float] = Field(default_factory=dict)
     #: ``automation.timeout.<phase>`` (seconds) as the renewal uses them for step deadlines, leases and the
-    #: worst-case window shown at G2. No defaults (renewal-workflow.md section 8 item 11: TBD in lab).
+    #: worst-case window shown at G2. A phase left out takes the runner's timeout of that phase
+    #: (``automation.timeout.<phase>`` or the contract default), so step bound and runner agree by construction.
     automation_timeouts: dict[str, float] = Field(default_factory=dict)
     green_ready: RenewalGreenReady = RenewalGreenReady()
     healthcheck: RenewalHealthcheck = RenewalHealthcheck()
@@ -191,6 +198,22 @@ class RenewalSettings(_Section):
         if value is not None and not value.is_absolute():
             raise ValueError("renewal.credentials_dir must be an absolute path")
         return value
+
+    @model_validator(mode="after")
+    def _known_keys(self) -> RenewalSettings:
+        for name, known in (
+            ("timeouts", renewal_defaults.TIMEOUT_DEFAULTS),
+            ("automation_timeouts", renewal_defaults.AUTOMATION_PHASE_DEFAULTS),
+        ):
+            table: dict[str, float] = getattr(self, name)
+            for key, seconds in table.items():
+                if key not in known:
+                    raise ValueError(
+                        f"renewal.{name}: unknown key {key!r} (known: {', '.join(sorted(known))})"
+                    )
+                if seconds <= 0:
+                    raise ValueError(f"renewal.{name}.{key} must be positive")
+        return self
 
 
 class InventorySettings(_Section):
@@ -262,21 +285,15 @@ class AuthSettings(_Section):
     login_ip_delay_seconds: int = Field(default=10, ge=1, le=60)
 
 
-AUTOMATION_PHASES: tuple[str, ...] = (
-    "preflight",
-    "configure",
-    "quiesce",
-    "data_attach",
-    "start_service",
-    "healthcheck",
-    "rollback_hooks",
-)
+AUTOMATION_PHASES: tuple[str, ...] = tuple(renewal_defaults.AUTOMATION_PHASE_DEFAULTS)
 _OS_USER = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
 class AutomationSettings(_Section):
-    """``automation.*`` (architecture.md section 5, automation-contract.md section 11). Worker only: the api never
-    reads it. Secrets are files (``*_file``); nothing here holds a secret value."""
+    """``automation.*`` (architecture.md section 5, automation-contract.md section 11). Worker only, except
+    ``timeout``: the api reads it for the default step bounds of the renewal's worst-case window (docs/timeouts.md),
+    so the api and the worker must be given the same values. Secrets are files (``*_file``); nothing here holds a
+    secret value."""
 
     #: Parent of the per-attempt run directories. tmpfs in the worker container (secrets touch only memory).
     run_root: Path = Path("/run/ovlm")
@@ -421,6 +438,9 @@ class Settings(BaseSettings):
                     raise ValueError(
                         f"automation.checkout_cache must not be or contain the {name}, nor sit inside it"
                     )
+        bad = renewal_defaults.problems(self.renewal_effective(), self.automation.timeout)
+        if bad:
+            raise ValueError("renewal timeouts are inconsistent: " + "; ".join(bad))
         if self.http.port == self.http.metrics_port and self.http.host == self.http.metrics_host:
             raise ValueError(
                 "http.port and http.metrics_port must differ (metrics use a separate port)"
@@ -463,6 +483,10 @@ class Settings(BaseSettings):
             env_settings,
             TomlConfigSettingsSource(settings_cls, toml_file=toml_path),
         )
+
+    def renewal_effective(self) -> renewal_defaults.EffectiveRenewal:
+        """The renewal keys as configured, the built-in defaults filling the gaps (docs/timeouts.md)."""
+        return renewal_defaults.effective(self.renewal, self.automation.timeout)
 
     @property
     def db_role(self) -> str:

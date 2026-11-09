@@ -1,18 +1,27 @@
-"""Renewal configuration: the named keys of renewal-workflow.md, with no invented defaults (api-safe module).
+"""Renewal configuration: the named keys of renewal-workflow.md (api-safe module).
 
-Every timeout is a config key whose default is "TBD in lab". This module therefore has **no** defaults: a key the
-strategy needs and the configuration does not set is reported by :meth:`RenewalConfig.missing`; the worker rejects
-the run at admission with that list, and the api refuses to create a plan (the worst-case window shown at G2 could
-not be computed). The only defaults are the two the security model states (approval validity: plan 24 h, cutover
-4 h), carried by ``Settings``.
+Every timeout is a named config key. A key the configuration leaves out takes the built-in default of
+``ovlm.config.renewal_defaults`` (roadmap P1-8; each value's source in ``docs/timeouts.md``): explicit, versioned
+(:data:`DEFAULTS_ID`), logged at start (:func:`log_effective`) and recorded in each plan (:meth:`RenewalConfig.record`,
+bound into the plan hash and shown at G1/G2). :meth:`RenewalConfig.missing` stays for a config built by hand (tests,
+tools): a key it does not set is still refused at plan creation and at admission.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from ovlm.config import Settings
+from ovlm.config.renewal_defaults import (
+    ANSIBLE_SLACK,
+    DEFAULTS_ID,
+    KEYSTONE_DEFAULT_TOKEN_LIFETIME,
+)
+
+__all__ = ["ANSIBLE_SLACK", "DEFAULTS_ID", "RenewalConfig", "log_effective"]
 
 #: Step -> ``timeouts.<key>`` (renewal-workflow.md sections 2.1-2.3, 4). ``server_start`` is not named by the
 #: design (S6 "stop/start retryable"); it is added here as its own key (reported).
@@ -89,8 +98,6 @@ RESTORE_STEPS = (
     "verify_external_old",
     "lock_green",
 )
-#: Kill grace + slack a supervised Ansible phase needs on top of its timeout (runner.lease_needed).
-ANSIBLE_SLACK = 60.0
 
 
 @dataclass(frozen=True)
@@ -109,25 +116,52 @@ class RenewalConfig:
     max_concurrent_runs: int = 5
     #: ``renewal.accept_probe_timeout``: total budget of the accept-step guest probe (seconds, PMR-1).
     accept_probe_timeout: float = 20.0
+    #: Settings paths that took the built-in default (empty for a config built by hand).
+    defaulted: tuple[str, ...] = ()
 
     @classmethod
     def from_settings(cls, s: Settings) -> RenewalConfig:
         r = s.renewal
+        eff = s.renewal_effective()
+        sc = eff.scalars
         return cls(
-            timeouts=dict(r.timeouts),
-            automation=dict(r.automation_timeouts),
-            green_ready_max_age=r.green_ready.max_age,
-            healthcheck_max_attempts=r.healthcheck.max_attempts,
-            healthcheck_interval=r.healthcheck.interval,
-            external_required_successes=r.external_verify.required_successes,
-            external_interval=r.external_verify.interval,
-            retire_health_max_age=r.retire.health_max_age,
+            timeouts=dict(eff.timeouts),
+            automation=dict(eff.automation),
+            green_ready_max_age=float(sc["green_ready.max_age"]),
+            healthcheck_max_attempts=int(sc["healthcheck.max_attempts"]),
+            healthcheck_interval=float(sc["healthcheck.interval"]),
+            external_required_successes=int(sc["external_verify.required_successes"]),
+            external_interval=float(sc["external_verify.interval"]),
+            retire_health_max_age=float(sc["retire.health_max_age"]),
             validity_plan=r.approval_validity.plan,
             validity_cutover=r.approval_validity.cutover,
-            validity_retirement=r.approval_validity.retirement,
+            validity_retirement=float(sc["approval_validity.retirement"]),
             max_concurrent_runs=r.max_concurrent_runs,
             accept_probe_timeout=r.accept_probe_timeout,
+            defaulted=eff.defaulted,
         )
+
+    def values(self) -> dict[str, float | int | None]:
+        """Every renewal key by its settings path (as ``EffectiveRenewal.values``), sorted."""
+        out: dict[str, float | int | None] = {
+            f"renewal.timeouts.{k}": float(v) for k, v in self.timeouts.items()
+        }
+        out |= {f"renewal.automation_timeouts.{k}": float(v) for k, v in self.automation.items()}
+        out |= {
+            "renewal.green_ready.max_age": self.green_ready_max_age,
+            "renewal.healthcheck.max_attempts": self.healthcheck_max_attempts,
+            "renewal.healthcheck.interval": self.healthcheck_interval,
+            "renewal.external_verify.required_successes": self.external_required_successes,
+            "renewal.external_verify.interval": self.external_interval,
+            "renewal.retire.health_max_age": self.retire_health_max_age,
+            "renewal.approval_validity.retirement": self.validity_retirement,
+        }
+        return dict(sorted(out.items()))
+
+    def record(self) -> dict[str, Any]:
+        """What a plan records (``resolved.renewal_settings``, bound into the plan hash): the effective value of every
+        key, which of them came from the built-in defaults, and the defaults' identifier."""
+        return {"defaults": DEFAULTS_ID, "defaulted": list(self.defaulted), "values": self.values()}
 
     def missing(self, *, snapshot: bool = False) -> list[str]:
         """Config keys this strategy needs that are not set (sorted, by their documented names)."""
@@ -203,3 +237,25 @@ class RenewalConfig:
                 continue
             total += self.step_timeout(key) or 0.0
         return total
+
+
+def log_effective(cfg: RenewalConfig, log: logging.Logger) -> None:
+    """Start-up notice (api and worker): which renewal keys use the built-in defaults, and the worst-case windows
+    they give. Warns when a worst case reaches Keystone's default token lifetime (W1 would be refused)."""
+    worst = {
+        "stateless": cfg.worst_case_window(snapshot=False, stateless=True),
+        "volume": cfg.worst_case_window(snapshot=False, stateless=False),
+        "volume_snapshot": cfg.worst_case_window(snapshot=True, stateless=False),
+    }
+    log.info(
+        "renewal settings: %d key(s) use the built-in defaults %s; worst-case windows %s",
+        len(cfg.defaulted), DEFAULTS_ID, ", ".join(f"{k} {v:.0f} s" for k, v in worst.items()),
+        extra={"renewal_defaults": DEFAULTS_ID, "renewal_defaulted_keys": list(cfg.defaulted),
+               "renewal_worst_case_window_seconds": worst},
+    )  # fmt: skip
+    if max(worst.values()) >= KEYSTONE_DEFAULT_TOKEN_LIFETIME:
+        log.warning(
+            "renewal worst-case window (%.0f s) reaches Keystone's default token lifetime (%.0f s): W1 is refused "
+            "unless the cloud issues longer tokens; lower the renewal timeouts (docs/timeouts.md)",
+            max(worst.values()), KEYSTONE_DEFAULT_TOKEN_LIFETIME,
+        )  # fmt: skip
