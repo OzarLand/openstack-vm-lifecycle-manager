@@ -175,6 +175,8 @@ def test_only_the_owner_can_submit_a_password_structural() -> None:
         ("POST", "/approvals/{approval_id}/decision"),
         ("POST", "/renewals/runs/{run_id}/cutover-request"),
         ("POST", "/renewals/runs/{run_id}/actions/{name}"),
+        # SF-10: an operator with TOTP confirms a host key with the same single-use step-up (own password + code).
+        ("POST", "/inventory/servers/{server_id}/host-key/confirm"),
     }
 
 
