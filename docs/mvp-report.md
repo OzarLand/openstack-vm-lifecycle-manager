@@ -1,10 +1,10 @@
-# MVP report — DRAFT
+# MVP report
 
 | Field | Value |
 |---|---|
 | Owner | Agent 1 — PM / Engineering Manager |
-| Status | **Draft, 2026-11-08.** The primary acceptance scenario **passed on Felcloud** (ACC-01d, run `01a1b752`, 2026-11-07). The first attempt (ACC-01c) had failed at the cutover (bugs W and X, fixed in #31). The three kept failure scenarios **passed on Felcloud** (LAB-04; LAB-01 re-run `01a1bce5` after fixes Z, AA, AB; operator rollback on the same run). Teardown pending. Nothing below is marked "lab validated" without stored evidence. |
-| Code | `main` at `49b495a` or later (PRs #1–#38) |
+| Status | **Final, 2026-11-09. MVP done: lab validated on Felcloud, not production validated.** Primary acceptance scenario passed (ACC-01d, run `01a1b752`, 2026-11-07) after a failed first attempt (ACC-01c, bugs W and X). The three kept failure scenarios passed (LAB-04; LAB-01 re-run `01a1bce5` after fixes Z, AA, AB; operator rollback on the same run). Lab torn down 2026-11-09, guard PASS against the first baseline. Nothing below is marked "lab validated" without stored evidence. |
+| Code | `main` at `49b495a` or later (code: PRs #1–#38; docs: #39, this report) |
 
 ## 1. What the MVP is
 
@@ -98,6 +98,13 @@ client) could not see. All are fixed, each with a test that fails without the fi
   S2–S10 ran on their own. Volume never attached twice (2,181 samples), marker and fs UUID equal, guard PASS. The lab
   service was down about 13 h (06:49 to about 20:04Z), almost all of it waiting for fixes Z and AA. This run is **not**
   evidence of a converging window; LAB-01 was re-run after the fixes and passed with no manual action.
+- **D-9 (teardown):** OVLM has no hard delete for users, so `lab-agent-a`, `lab-agent-b` and `lab-agent-admin` were
+  **disabled**, not deleted (their rows stay for audit integrity), by a temporary admin that disabled itself at the end.
+  Their secrets were shredded. The audit rows by or about each account are exported with the evidence. `destroy-lab.sh`
+  deleted the kit's own resources, including the lab data volume `ovlm-acc-data` (lab data; OVLM itself never deletes
+  a volume). Floating IPs were disassociated and stay allocated; the `ovlm:managed` tag was removed from the set-aside
+  one. The TCP 443 rule and the TLS relay (D-4) are removed. Guard diff PASS before/after teardown and against the
+  first baseline (2026-11-05): the only difference is the floating IPs the maintainer allocated.
 
 ## 5. What remains before the MVP is done
 
@@ -105,8 +112,11 @@ client) could not see. All are fixed, each with a test that fails without the fi
 2. ~~The failure scenarios on Felcloud~~, reduced by the maintainer's decision to three: done (LAB-04, LAB-01 re-run,
    operator rollback). The others (LAB-02/03/05..09) remain
    integration tested only.
-3. Evidence, guard diff, teardown (`destroy-lab.sh`; floating IPs stay allocated).
-4. This report finalised and the README statuses updated with what is lab validated.
+3. ~~Evidence, guard diff, teardown~~: done 2026-11-09 (D-9). Evidence (177 files, sha256 manifest) is kept off the
+   lab, with the maintainer's agent host.
+4. ~~This report finalised and the README statuses updated~~: done.
+
+Nothing remains for the MVP.
 
 ## 6. After the MVP
 
