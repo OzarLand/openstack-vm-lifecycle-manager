@@ -18,7 +18,8 @@ is left. accept-step is that path, kept narrow:
   task state, the data volume ``in-use`` with exactly one attachment, on green; over SSH (fixed command list, never
   repository code) green reachable, the data device (by-id) mounted nowhere, the mount point not a mount, every
   service unit ``inactive`` or ``failed``. The probe shown to the approver (:data:`TRUTH_KEY` in the run's current
-  truth, with its id and time) must be at most :data:`FRESH_SECONDS` old at commit, and the worker's own probe, taken
+  truth, with its id, the DB time it **started** and its duration, review PMR-4) must be at most
+  :data:`FRESH_SECONDS` old at commit, and the worker's own probe, taken
   just before the transaction, must show the same facts.
 * **Effect** (worker, one transaction): the step is closed ``succeeded`` with ``resolution = accepted`` (playbook not
   run), compare-and-set on ``(needs_human, attempt)``, the parked attempt's fencing token is retired; the run goes on
@@ -191,7 +192,8 @@ def shown_probe(truth: Any) -> Mapping[str, Any] | None:
 
 
 def probe_age(probe: Mapping[str, Any] | None, now: datetime) -> float | None:
-    """Seconds since the probe was stored (its ``at``, DB clock); ``None`` when it has no time."""
+    """Seconds since the probe started (its ``at``, DB clock read before the first read call, review PMR-4);
+    ``None`` when it has no time."""
     if not isinstance(probe, Mapping) or not probe.get("at"):
         return None
     try:

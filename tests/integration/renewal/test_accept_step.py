@@ -418,6 +418,30 @@ def test_worker_refuses_when_the_state_changed_since_the_probe_shown(world: Worl
     _refused(w, sig, "probe-mismatch")
 
 
+def test_pmr4_the_shown_probe_is_timestamped_when_taken_not_when_stored(world: World) -> None:
+    """Review PMR-4 (a): the probe's ``at`` was the commit time of the probe signal, after the cloud reads and the
+    SSH commands; the approver read a probe older than its timestamp by the probe's duration. ``at`` is now the
+    database time read before the probe starts, and its duration is stored next to it."""
+    w = world
+    park_s2(w)
+    w.guest.probe_hang = 1.5  # a slow green: each guest probe takes 1.5 s (well under the budget)
+    sig = w.signal("probe", user="ap2")
+    w.drive()
+    assert outcome(w, sig) == "current truth refreshed"
+    p = w.run()["current_truth"]["accept_probe"]
+    [stored] = w.q("SELECT consumed_at FROM run_signal WHERE id = :i", i=sig)
+    taken = datetime.fromisoformat(p["at"])
+    assert (stored["consumed_at"] - taken).total_seconds() >= 1.4, (taken, stored["consumed_at"])
+    assert p["duration_s"] >= 1.4, p
+    # its age is judged from when it started: aged by the probe's duration already
+    with Session(w.api) as s:
+        now = s.execute(text("SELECT now()")).scalar_one()
+    from ovlm.renewal import accept
+
+    age = accept.probe_age(p, now)
+    assert age is not None and age >= 1.4
+
+
 def test_pmr8_a_replayed_stepup_does_not_authorize_another_accept_signal(world: World) -> None:
     """Review PMR-8 (REN-10 for the new kinds): the worker accepts an ``accept_step`` signal only with a step-up spent
     by **that** signal. A second signal carrying the step-up of an earlier one (a replay only a compromised api could

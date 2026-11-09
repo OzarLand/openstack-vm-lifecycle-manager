@@ -775,6 +775,45 @@ def _action_context(
     }, target  # fmt: skip
 
 
+@router.get("/renewals/runs/{run_id}/actions/accept-step/probe", response_class=HTMLResponse)
+def accept_probe_panel(
+    request: Request, run_id: str, db: Db, who: Principal = VIEWER
+) -> HTMLResponse:
+    """The accept probe panel of the accept-step form, polled in place (HTMX; review PMR-4). No typed field inside."""
+    rid = _uuid(run_id)
+    if rid is None:
+        return _fail_page(request, 404, "Run not found", "No such run.")
+    ctx, _ = _action_context(db, who, rid, "accept-step")
+    return render(request, "renewals/_accept_probe.html", **ctx)
+
+
+@router.post("/renewals/runs/{run_id}/actions/accept-step/reprobe", response_class=HTMLResponse)
+def accept_reprobe(
+    request: Request, run_id: str, db: Db, attestation: Annotated[str, Form()] = "",
+    who: Principal = VIEWER,
+) -> Response:  # fmt: skip
+    """Re-probe from the accept-step form without leaving it (review PMR-4): the button submits the form here, the
+    worker is asked for a new probe (the ``probe`` action, same checks as on the run page), and the form comes back
+    with the attestation typed so far. Nothing else of the form is used or kept (never the password or the code)."""
+    rid = _uuid(run_id)
+    if rid is None:
+        return _fail_page(request, 404, "Run not found", "No such run.")
+    form = {"attestation": attestation}
+    status, error, notice = 200, None, None
+    try:
+        svc.action(db, who, rid, "probe", typed=None, stepup_id=None, attestation=None)
+        db.commit()
+        notice = "Probe requested. The probe panel shows the new probe as soon as the worker has stored it."
+    except (ProblemError, DomainError) as exc:
+        db.rollback()
+        status, error = _problem(exc)
+        if status == 404:
+            raise
+    ctx, _ = _action_context(db, who, rid, "accept-step")
+    return render(request, "renewals/action.html", status, active="renewals", error=error, notice=notice,
+                  form=form, **ctx)  # fmt: skip
+
+
 @router.get("/renewals/runs/{run_id}/actions/{name}", response_class=HTMLResponse)
 def action_page(
     request: Request, run_id: str, name: str, db: Db, who: Principal = VIEWER

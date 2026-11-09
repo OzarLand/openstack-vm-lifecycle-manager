@@ -3,6 +3,7 @@
 {% block content %}
 <p class="crumbs"><a href="/renewals">Renewals</a> › <a href="/renewals/runs/{{ run.id }}">Run <span class="mono">{{ run.id | short_id }}</span></a> › {{ label }}</p>
 <h1>{{ label }}</h1>
+{% if notice %}<p role="status" class="banner ok">{{ notice }}</p>{% endif %}
 {% if error %}<p role="alert" class="banner error"><strong>{{ error.title }}.</strong> {{ error.detail }}{% if error.next_action %} <em>{{ error.next_action }}</em>{% endif %}</p>{% endif %}
 
 <section class="panel attention" aria-labelledby="effect-h">
@@ -28,21 +29,7 @@
   {% else %}<p class="empty">No refused result recorded.</p>{% endif %}
 </section>
 
-<section class="panel" aria-labelledby="probe-h">
-  <h2 id="probe-h">OVLM's own probe of the postcondition
-    {% if accept.available %}<span class="badge ok">met</span>{% else %}<span class="badge err">not usable</span>{% endif %}</h2>
-  {% if accept.probe %}
-    <p class="muted">Probe <span class="mono">{{ accept.probe_id }}</span>, taken {{ accept.probe_at | timestamp }}. Read-only: OpenStack read calls and OVLM's fixed command list on the new VM, never repository code. It must be at most 60 s old when the worker applies your decision, and the worker probes again: any change refuses the request.</p>
-    <table><thead><tr><th scope="col">Check</th><th scope="col">Result</th><th scope="col">Detail</th></tr></thead>
-    <tbody>{% for name, ok, detail in accept.checks %}<tr><td>{{ name.replace("_", " ") }}</td><td><span class="badge {{ 'ok' if ok else 'err' }}">{{ "met" if ok else "not met" }}</span></td><td class="mono">{{ detail }}</td></tr>{% endfor %}</tbody></table>
-  {% else %}<p class="empty">No probe yet.</p>{% endif %}
-  {% if not accept.available and accept.why %}<p role="alert" class="banner warn">{{ accept.why }}</p>{% endif %}
-  <form method="post" action="/renewals/runs/{{ run.id }}/actions/probe" class="inline">
-    <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
-    <input type="hidden" name="idempotency_key" value="{{ key }}-probe">
-    <button type="submit">Re-probe</button> <span class="muted">then reload this page when the worker has stored the new probe</span>
-  </form>
-</section>
+{% include "renewals/_accept_probe.html" %}
 {% endif %}
 
 <section class="panel" aria-labelledby="confirm-h">
@@ -50,7 +37,7 @@
   {% if is_token %}
     <p role="alert" class="banner warn"><strong>API tokens cannot confirm this.</strong> Typed confirmations are for people only: sign in to the web interface with your own account.</p>
   {% else %}
-  <form method="post" action="/renewals/runs/{{ run.id }}/actions/{{ action_name }}" class="card">
+  <form method="post" action="/renewals/runs/{{ run.id }}/actions/{{ action_name }}" class="card" id="action-form">
     <input type="hidden" name="csrf_token" value="{{ who.csrf_token }}">
     <input type="hidden" name="idempotency_key" value="{{ key }}">
     {% if action_name == "mark-resolved" %}
@@ -59,7 +46,6 @@
     {% endif %}
     {% if accept %}
     <input type="hidden" name="step_id" value="{{ accept.step_id }}">
-    <input type="hidden" name="probe_id" value="{{ accept.probe_id }}">
     <p><label for="att">Attestation</label>What you checked and why the playbook's refusal is wrong (20 to 2,000 characters). The step will be recorded as accepted by you, its playbook not run; your words are kept as evidence.
       <textarea id="att" name="attestation" rows="4" minlength="20" maxlength="2000" required>{{ form.attestation or "" }}</textarea></p>
     {% endif %}
