@@ -4,7 +4,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Docs only, not validated on a second cloud.** Every command, setting, Make target and endpoint here was checked against the code at the time of writing. The renewal itself is lab validated on one cloud (Felcloud, [MVP report](mvp-report.md)). The production-mode setup in this guide (TLS proxy, `development_mode` off, configuration file, restart policy) has not run a renewal anywhere. |
+| Status | **Docs only, not validated on a second cloud.** Every command, setting, Make target and endpoint here was checked against the code at the time of writing. The renewal itself is lab validated on one cloud (Felcloud, [MVP report](mvp-report.md)). The production Compose file of this guide (`compose.prod.yaml`: TLS proxy in front, `development_mode` off, configuration file, restart policies) is checked by `docker compose config` and unit tests in CI, but has not started a stack or run a renewal anywhere. |
 | Audience | The operator who installs OVLM next to a real OpenStack project, and the cloud administrator who prepares that project |
 | Companion | [install-guide.md](install-guide.md) (evaluation on a throw-away host). Read it first if you have never started the stack |
 | Last updated | 2026-11-09 |
@@ -48,7 +48,7 @@ flowchart LR
     M --> W
 ```
 
-One host runs the repository's Compose stack: `postgres`, `migrate` (runs once), `api` and `worker`. The api serves
+One host runs the repository's production Compose file, `compose.prod.yaml`: `postgres`, `migrate` (runs once), `api` and `worker`. The api serves
 the UI and the API and never calls OpenStack. The worker holds the credentials, calls OpenStack, reaches the guests
 over SSH and runs Ansible as a separate OS user. Only the worker unseals secrets ([credential-store.md](credential-store.md)).
 
@@ -74,13 +74,15 @@ locked for a way back; delete blue after a second, separate approval.
 
 | Choice | What it means today |
 |---|---|
-| **Bundled** (the `postgres` service of `compose.yaml`, PostgreSQL 16 pinned by digest) | The supported path. `make backup`, `make restore` and `make upgrade-preflight` assume it. One instance, on the same host, no replication: the host is a single point of failure. Back it up (§8.2) |
+| **Bundled** (the `postgres` service of `compose.prod.yaml`, PostgreSQL 16 pinned by digest) | The supported path. `make backup`, `make restore` and `make upgrade-preflight` assume it. One instance, on the same host, no replication: the host is a single point of failure. Back it up (§8.2) |
 | **External** (a managed or separate PostgreSQL) | Possible but **not described or tested end to end** by the project. Create the three roles as `docker/postgres/10-ovlm-roles.sh` does (`ovlm_owner` with `CREATEROLE`, `ovlm_api`, `ovlm_worker`; none a superuser), the database `ovlm` owned by `ovlm_owner`, set `OVLM_DB__HOST`, `OVLM_DB__PORT` and `OVLM_DB__SSLMODE` (`verify-full` for a remote server) on every service, and remove the `postgres` service from your stack. The Make targets for backup and restore do not work there: follow [backup-restore-upgrade.md §3](backup-restore-upgrade.md#3-restore) "PostgreSQL outside Compose" and run the client tools of the server's major version |
 
 ### 2.3 TLS termination in front of the api
 
 OVLM does not terminate TLS. Its cookies are `Secure` (`__Host-ovlm_session`), so the UI only works over HTTPS.
-Bring a reverse proxy on the same host (no example configuration ships with OVLM).
+Bring a reverse proxy on the same host. A sample nginx configuration that does everything in the table below is
+[`deploy/proxy/nginx-ovlm.conf`](../deploy/proxy/nginx-ovlm.conf) (not tested by the project: run `nginx -t` and
+check the headers yourself).
 
 | The proxy must | Why |
 |---|---|
@@ -91,9 +93,13 @@ Bring a reverse proxy on the same host (no example configuration ships with OVLM
 | Add HSTS | security-model.md §9: HSTS is the proxy's job |
 | Not expose `/metrics`, not cache or rewrite responses | The api answers 404 for `/metrics` on its public port; the UI uses HTMX fragments |
 
-Then tell the api where it is (§5.4): `OVLM_EXTERNAL_URL` and `OVLM_HTTP__TRUSTED_PROXIES`. With Docker port
-publishing the api may see the Docker bridge gateway instead of `127.0.0.1`: if every client in the audit log has
-the same address, list that address (never a wider range than the proxy).
+Then tell the api where it is (§5.4): `OVLM_EXTERNAL_URL`, and the address it sees the proxy as. A proxy on the host
+reaches the published port through the Compose network's gateway, not `127.0.0.1`: `compose.prod.yaml` fixes that
+network (`172.30.240.0/24`, gateway `172.30.240.1`) and trusts the gateway by default
+(`OVLM_HTTP__TRUSTED_PROXIES=172.30.240.1/32`). Every process on the host that connects to `127.0.0.1:8000` arrives
+from the same address, which is acceptable only because a shell on this host is already admin-equivalent (§2.1). If
+every client in the audit log still has the same address, your Docker setup differs: list the address the api
+actually sees (never a wider range than the proxy). Not verified on a real host.
 
 ### 2.4 Time
 
@@ -225,7 +231,7 @@ delete, a floating IP that stays `DOWN`. **Name a cloud administrator who can be
 | worker | Keystone and every catalog endpoint of the connection's `interface` (`public` or `internal`): compute, block storage, network, image | 443 (whatever the catalog says) | inventory, validation, renewal | TLS verification is always on. A private CA goes in the cloud's `ca_bundle_pem`. `insecure` is refused |
 | worker | blue and green **fixed IPs** | 22 | host-key scan, Ansible, the read-only probe | Address = `fixed_ips[0]` of the port the service floating IP is on; green has no floating IP before the cutover. **No jump host:** `guest_access` is stored but no worker code uses it (security-model.md §6.3), so the worker needs a direct route to the project network (the lab host sat on it) |
 | worker | the service **floating IP** | the profile's `health_check.external.port` | B8, W10, S9 external check | Never through a proxy (§4.2). See the hairpin caveat (§4.1) |
-| worker | automation git host | 443 (`https://`) or 22 (`ssh://`) | B6, and `reprepare-automation` | Once per run, before the window. An `https://` repository can go through the egress proxy; an `ssh://` one needs direct access and a deploy key (`automation.git_ssh_key_file` and `automation.git_ssh_known_hosts_file`, not wired in `compose.yaml` and not tested) |
+| worker | automation git host | 443 (`https://`) or 22 (`ssh://`) | B6, and `reprepare-automation` | Once per run, before the window. An `https://` repository can go through the egress proxy; an `ssh://` one needs direct access and a deploy key (`automation.git_ssh_key_file` and `automation.git_ssh_known_hosts_file`, not wired in either Compose file and not tested) |
 | guests | package mirrors | | your playbooks | OVLM never needs guests to reach it |
 | Prometheus | api and worker `:9100` | 9100 | metrics | Compose network only (§8.1) |
 
@@ -249,10 +255,11 @@ reach the fixed IPs on port 22 some other way (VPN or a routed management networ
 ### 4.2 Egress proxy (optional, not lab tested)
 
 If the project network has no direct Internet, the worker can reach the OpenStack APIs through an HTTPS-only proxy
-(`CONNECT` to 443) while reaching guests directly. Put `HTTPS_PROXY` and `NO_PROXY` in `.env` next to `compose.yaml`;
+(`CONNECT` to 443) while reaching guests directly. Put `HTTPS_PROXY` and `NO_PROXY` in the `.env` of §5.4;
 `NO_PROXY` must list loopback, the Compose service names, the project subnet(s) and any guest address. SSH never
-uses the proxy and OVLM's own health probe ignores proxy variables. The same values are build arguments of the
-worker image. Details and the hosts a build needs: [install-guide.md §5a](install-guide.md#5a-reaching-openstack-through-an-egress-proxy-optional).
+uses the proxy and OVLM's own health probe ignores proxy variables. Building the worker image behind the proxy
+needs the same values as build arguments: `make build` passes none, so set them in Docker's client proxy
+configuration or build with `docker build --build-arg HTTPS_PROXY=... --build-arg NO_PROXY=...`. Details and the hosts a build needs: [install-guide.md §5a](install-guide.md#5a-reaching-openstack-through-an-egress-proxy-optional).
 **Status:** unit tested only (roadmap E5-8, P1-5). The Felcloud lab had direct egress for the renewal runs; no
 renewal has run through a proxy.
 
@@ -264,11 +271,13 @@ renewal has run through a proxy.
 git clone https://github.com/OzarLand/openstack-vm-lifecycle-manager.git
 cd openstack-vm-lifecycle-manager
 git checkout <commit SHA or release tag>     # never a moving branch on a real installation
-make build                                    # images ovlm:dev (api, migrate) and ovlm-worker:dev (worker)
+make build IMAGE_TAG=$(git rev-parse --short=12 HEAD)   # images ovlm:<tag> (api, migrate), ovlm-worker:<tag> (worker)
 ```
 
-There are no published images: you build from the source you checked out. Record the commit; backups and upgrades
-refer to it.
+There are no published images: you build from the source you checked out, tagged with its commit, never `:dev`
+(that is the development stack's tag, rebuilt by `make up`). Record the commit; backups and upgrades refer to it.
+§5.4 names the two images in `.env`. If you push them to your own registry, name them there by digest
+(`registry.example.org/ovlm@sha256:...`) instead.
 
 ### 5.2 Secrets: KEK, TOTP key, database passwords ⚠️
 
@@ -277,7 +286,8 @@ make secrets
 ```
 
 It creates `./secrets` (mode 0700) with four database passwords, the TOTP key (`totp_key`, api only), and the
-worker key pair (`worker_kek`, mode 0400, worker only; `worker_kek.pub`, api). It never overwrites a file.
+worker key pair (`worker_kek`, mode 0400, worker only; `worker_kek.pub`, api). It creates only missing files: it
+never overwrites a file or changes an existing file's mode (it warns if `worker_kek` is readable by group or others).
 
 | File | Holder | If it is lost |
 |---|---|---|
@@ -303,11 +313,12 @@ worker key pair (`worker_kek`, mode 0400, worker only; `worker_kek.pub`, api). I
    sudo chown 10001:10001 secrets/totp_key && sudo chmod 0400 secrets/totp_key
    ```
 
-   `make secrets` resets this file to `0444` every time it runs, and `make up` runs `make secrets`. After this step,
-   start the stack with `docker compose up -d --wait` (§5.5), not `make up`, or repeat the command above.
+   `make secrets` leaves the tightened mode as it is. Do not run `make up` on this host: it builds and starts the
+   development stack (`compose.yaml`).
 
 The database password files stay `0444` inside the `0700` directory: Compose mounts file secrets with their host
-owner and mode, and PostgreSQL and the service that uses each file run as different uids.
+owner and mode (`compose.prod.yaml` does not change them), and PostgreSQL and the service that uses each file run as
+different uids.
 
 ### 5.3 The configuration file
 
@@ -381,56 +392,65 @@ Notes:
   changing it means editing the file and restarting the worker.
 - Unknown keys are errors: the api and worker refuse to start on a typo.
 
-### 5.4 Production-mode overrides
+### 5.4 The production Compose file and `.env`
 
-`compose.yaml` is the development and CI file: it sets `OVLM_DEVELOPMENT_MODE: "true"` on the api and
-`OVLM_CONFIG_FILE: /nonexistent` everywhere. Create `compose.override.yaml` next to it (Compose reads it
-automatically; keep it in your deployment's configuration management):
+`compose.yaml` is the development and CI file (development mode on the api, no configuration file, no restart
+policy, images built as `:dev`). A real installation uses **`compose.prod.yaml`** instead, never both together. It
+builds nothing, runs no service in development mode, mounts `config/ovlm.toml` read-only into `migrate`, `api` and
+`worker` and loads it, restarts `postgres`, `api` and `worker` (`unless-stopped`), rotates the container logs, and
+keeps the secret split, read-only root file systems, dropped capabilities, the worker's tmpfs run root and the
+`checkouts` volume of the development file (a unit test compares the two). Its project name is `ovlm-prod`, so `make
+down` (the development stack, which deletes its volumes) never touches it. Resource limits are in it as commented
+suggestions: none is measured.
 
-```yaml
-services:
-  api:
-    environment:
-      OVLM_DEVELOPMENT_MODE: "false"
-      OVLM_EXTERNAL_URL: "https://ovlm.example.org"   # the public origin: CSRF Origin check, enrolment links
-      OVLM_HTTP__TRUSTED_PROXIES: "127.0.0.1/32"      # the address(es) the api sees your proxy as (section 2.3)
-      OVLM_CONFIG_FILE: /etc/ovlm/ovlm.toml
-    volumes:
-      - ./config/ovlm.toml:/etc/ovlm/ovlm.toml:ro
-    restart: unless-stopped
-  worker:
-    environment:
-      OVLM_CONFIG_FILE: /etc/ovlm/ovlm.toml
-    volumes:
-      - ./config/ovlm.toml:/etc/ovlm/ovlm.toml:ro
-    restart: unless-stopped
-  postgres:
-    restart: unless-stopped
+Create `.env` next to it (Compose reads it; git-ignored; keep a copy in your deployment's configuration management):
+
+```bash
+# ⚠️ Every Compose command and the Make targets backup, restore, upgrade-preflight and smoke use this file
+COMPOSE_FILE=compose.prod.yaml
+# The images of §5.1 (required): the tag you built, or <registry>/ovlm@sha256:... and <registry>/ovlm-worker@sha256:...
+OVLM_IMAGE=ovlm:<tag>
+OVLM_WORKER_IMAGE=ovlm-worker:<tag>
+# The public origin behind the TLS proxy (required): CSRF Origin check, enrolment links
+OVLM_EXTERNAL_URL=https://ovlm.example.org
+# Optional, with their defaults: the Compose network (change both if the range is in use on your network) and the
+# proxy address the api trusts for X-Forwarded-For (section 2.3)
+# OVLM_NETWORK_SUBNET=172.30.240.0/24
+# OVLM_NETWORK_GATEWAY=172.30.240.1
+# OVLM_TRUSTED_PROXIES=172.30.240.1/32
+# Optional egress proxy for the worker (section 4.2)
+# HTTPS_PROXY=http://proxy.example:3128
+# NO_PROXY=localhost,127.0.0.1,::1,postgres,api,worker,192.0.2.0/24
 ```
 
-- `docker compose config` prints the merged file: check that the api and the worker (not `migrate`) carry
-  `OVLM_CONFIG_FILE: /etc/ovlm/ovlm.toml` and the mount. This guide checked the merge; it has not started a stack
-  with it.
-- With `development_mode` off the api **refuses to start** without `OVLM_EXTERNAL_URL`, and settings refuse
-  `renewal.credentials_dir` (plain-file credentials) and `log.openstack_http_debug`. The worker already runs in
-  production mode in `compose.yaml` and refuses to start without its separate Ansible user. Treat a refused start as
-  the check working.
-- `compose.yaml` has **no restart policy**: without one, a host reboot or a crashed worker leaves every run, and any
-  window in progress, stopped until a human starts it. The worker is built to be restarted (a killed worker was taken
-  over in the window in LAB-01). The `restart:` lines above are this guide's recommendation; the project has not
-  tested them.
+Check it before the first start (read-only; it needs no running daemon):
+
+```bash
+docker compose config        # the resolved file; it refuses to print without OVLM_IMAGE, OVLM_WORKER_IMAGE, OVLM_EXTERNAL_URL
+```
+
+- `config/ovlm.toml` must exist (§5.3): a missing file fails the start instead of becoming an empty directory.
+- With `development_mode` off the api **refuses to start** without `OVLM_EXTERNAL_URL`, settings refuse
+  `renewal.credentials_dir` (plain-file credentials) and `log.openstack_http_debug`, and the worker refuses to start
+  without its separate Ansible user (the file sets it). Treat a refused start as the check working.
+- Restart policies: a host reboot or a crashed worker would otherwise leave every run, and any window in progress,
+  stopped until a human starts it. The worker is built to be restarted (a killed worker was taken over in the window
+  in LAB-01). The policies themselves have not been exercised on a real host.
+- Site-specific additions (a Prometheus service, a deploy key for `ssh://` repositories) go in a file of your own,
+  listed after it: `COMPOSE_FILE=compose.prod.yaml:compose.site.yaml`. `compose.override.yaml` is not read once
+  `COMPOSE_FILE` is set.
 - Do not add `OVLM_RENEWAL__CREDENTIALS_DIR`, `OVLM_LOG__OPENSTACK_HTTP_DEBUG` or `OVLM_KEK__PRIVATE_KEY_FILE` to
   the api.
 
 ### 5.5 Start and check ⚠️
 
 ```bash
-docker compose up -d --wait        # postgres, migrate (once), api, worker; waits until healthy
+docker compose up -d --wait        # compose.prod.yaml (from .env): postgres, migrate (once), api, worker; waits until healthy
 make smoke                         # assertions against the running stack; prints "smoke OK"
 curl -fsS https://ovlm.example.org/readyz
 ```
 
-`make smoke` runs in CI against the development stack; it has not been run with the overrides above. `/readyz`
+`make smoke` runs in CI against the development stack; it has not been run against `compose.prod.yaml`. `/readyz`
 answers 503 when the database or the schema is not ready, or when the api's KEK public key is not one the worker
 announced (`checks.kek`, review SF-6). Enter the worker only as its own user: `docker compose exec -u ovlm worker ...`
 (a plain `exec` is a root shell that can read the KEK).
@@ -662,10 +682,12 @@ which is the only copy of audit rows written after your last backup if you ever 
 | Backup ⚠️ | `make backup` (refuses when the keys on hand cannot restore the dump; `ovlm backup check`) | outside a window; store dumps encrypted; keep the KEK and TOTP key of each manifest's `kek_id` offline |
 | Restore 🛑 | `make restore DUMP=backups/<time> CONFIRM=replace-ovlm-database` | keys back in `./secrets` **before** the restore; then `ovlm backup check` in the api and `ovlm kek status` in the worker; probe every non-terminal run |
 | Restore test | into a throw-away stack, at least quarterly and after every KEK rotation | a backup never restored is not a backup |
-| Upgrade ⚠️ | check out the new commit, `make build`, `make upgrade-preflight`, stop the worker, `make upgrade-preflight PREFLIGHT_ARGS=--worker-stopped`, `make backup`, stop the api, `docker compose up -d --wait`, `make smoke` | never mid-window (`ovlm upgrade preflight` refuses); no downgrades: the way back is a restore |
+| Upgrade ⚠️ | check out the new commit, `make build IMAGE_TAG=<new commit>`, set `OVLM_IMAGE` and `OVLM_WORKER_IMAGE` in `.env` to the new tag, `make upgrade-preflight`, stop the worker, `make upgrade-preflight PREFLIGHT_ARGS=--worker-stopped`, `make backup`, stop the api, `docker compose up -d --wait`, `make smoke` | never mid-window (`ovlm upgrade preflight` refuses); no downgrades: the way back is a restore |
 | KEK rotation | [credential-store.md §5](credential-store.md#5-rotating-the-kek-security-modelmd-51): worker first, then the api; `ovlm kek status` exit 0 before the old key goes | keep an old KEK while a retained backup needs it |
 
-`make down` deletes the database volume: 🛑 never run it on a real installation. Use `docker compose down`.
+`make down` stops the **development** stack (`compose.yaml`, project `ovlm`) and deletes its volumes; it never reaches
+the `ovlm-prod` project. To stop the production stack use `docker compose down`, never with `-v` (🛑 deletes the
+database volume).
 
 ## 9. Security checklist
 
@@ -715,7 +737,7 @@ which is the only copy of audit rows written after your last backup if you ever 
 - **Integration tested only**, never on a real cloud: LAB-02, LAB-03 and LAB-05 to LAB-09 (capacity, provisioning,
   health-check and cutover failures, database restart, detach refused, data-safety negatives; roadmap P1-1).
 - **This guide** has not been followed end to end on any cloud. The Felcloud lab ran the development Compose stack
-  behind an SSH tunnel and later a TLS relay (lab README step 3, MVP report D-4), not the production-mode overrides of §5.4.
+  behind an SSH tunnel and later a TLS relay (lab README step 3, MVP report D-4), not `compose.prod.yaml` (§5.4).
 - **Egress proxy** (§4.2): unit tested; no renewal has run through one (roadmap E5-8, P1-5).
 - **Paging, backup/restore, upgrade**: rules and procedures exist and are tested in CI where possible; no deployment
   has paged, the Make targets have not run on a real installation, and no upgrade between two releases has been tested.
@@ -733,10 +755,9 @@ which is the only copy of audit rows written after your last backup if you ever 
 | Gap | Effect | Workaround today |
 |---|---|---|
 | No published images, no release tags process described | You build from a commit you choose | pin the commit (§5.1) |
-| `compose.yaml` is a development file (dev mode on the api, no configuration file, no restart policy, images tagged `:dev`) | A real install needs the override of §5.4 | §5.4 (restart policy untested) |
-| No TLS proxy example | Bring your own | §2.3 |
+| `compose.prod.yaml` has not started a stack on a real host (only `docker compose config` and unit tests in CI); `make smoke` is not run against it in CI | Restart policies, the fixed network and the proxy's address are unverified | §5.4, §5.5; check the audit log's client addresses (§2.3) |
+| The sample TLS proxy configuration is untested | | `nginx -t` and check the headers (§2.3) |
 | Renewal timeouts have no defaults | No plan until all are set | measure; §5.3 |
-| `make secrets` / `make up` reset `totp_key` to 0444 | The tightened mode is lost | start with `docker compose up` after §5.2 |
 | No UI for clouds, connections, credentials, users, services, profiles; no OpenAPI document | Setup is API-only, by hand, with a session and CSRF | §5.6, api-design.md |
 | Automation repository allowlist is a worker setting, checked at B6 only (the admin API in the design is not built) | A wrong repository is found after G1 | check it before G1 (§7.1) |
 | No lint at profile save (`lint_status: pending`) | Lint findings appear at B6 | lint your repository before G1 |
@@ -744,7 +765,7 @@ which is the only copy of audit rows written after your last backup if you ever 
 | Jump host not wired (`guest_access` stored, unused) | The worker needs a direct route to the fixed IPs | place the worker on a routed network (§4) |
 | Role names fixed to `reader` / `member`; extra implied roles are rejected | Clouds with other role models cannot connect | none |
 | Application credential access rules untested | | leave them off, or test validation yourself |
-| `ssh://` automation repositories need a deploy key mount not in `compose.yaml` | | use `https://` |
+| `ssh://` automation repositories need a deploy key mount not in either Compose file | | use `https://` |
 | External PostgreSQL not described end to end; Make backup targets assume the bundled one | | §2.2 |
 | Readiness does not check fstab `nofail`, enabled units, `delete_on_termination`, worker-to-guest reachability | Found at preflight or in the window | the checklist of §7.1 |
 | The orphan report (`GET /orphans`) of the design is not served | Leftover `ovlm:*` resources are found by hand | list markers after failed runs |

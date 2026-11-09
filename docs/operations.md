@@ -37,8 +37,8 @@ alerting:
     - static_configs: [{targets: ["alertmanager:9093"]}]
 ```
 
-One way to put Prometheus on the Compose network is an override file next to `compose.yaml`
-(`compose.override.yaml`, not shipped) with a `prometheus` service that mounts `deploy/prometheus/` read-only at
+One way to put Prometheus on the Compose network is a site file of your own (not shipped) listed after the
+production file, `COMPOSE_FILE=compose.prod.yaml:compose.site.yaml` in `.env`, with a `prometheus` service that mounts `deploy/prometheus/` read-only at
 `/etc/prometheus/rules/`. Do not publish the metrics ports to get them scraped.
 
 Load or reload the rules:

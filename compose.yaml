@@ -1,4 +1,5 @@
 # Development/CI Compose file. Secrets are files under ./secrets (see `make secrets`); never env values.
+# A real installation uses compose.prod.yaml instead (docs/install-guide-real-cloud.md section 5.4).
 name: ovlm
 
 x-ovlm: &ovlm
