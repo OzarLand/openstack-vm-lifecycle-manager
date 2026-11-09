@@ -225,14 +225,15 @@ def effect(probe: Mapping[str, Any], volume_id: str | None, step_key: str) -> st
 # --- rows ------------------------------------------------------------------------------------------------------
 
 
-def pending(c: Any, run_id: str) -> bool:
-    """An accept-step request of the run not yet applied by the worker (one pending accept per run)."""
+def pending(c: Any, run_id: str, kind: str = "accept_step") -> bool:
+    """A request of ``kind`` (``accept_step``, or ``probe``: PMR-1) of the run not yet applied by the worker (one
+    pending accept, and one pending probe, per run)."""
     return (
         c.execute(
             text(
-                "SELECT 1 FROM run_signal WHERE run_id = :r AND kind = 'accept_step' AND consumed_at IS NULL"
+                "SELECT 1 FROM run_signal WHERE run_id = :r AND kind = :k AND consumed_at IS NULL"
             ),
-            {"r": run_id},
+            {"r": run_id, "k": kind},
         ).first()
         is not None
     )

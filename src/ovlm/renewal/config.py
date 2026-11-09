@@ -107,6 +107,8 @@ class RenewalConfig:
     validity_cutover: float = 4 * 3600
     validity_retirement: float | None = None
     max_concurrent_runs: int = 5
+    #: ``renewal.accept_probe_timeout``: total budget of the accept-step guest probe (seconds, PMR-1).
+    accept_probe_timeout: float = 20.0
 
     @classmethod
     def from_settings(cls, s: Settings) -> RenewalConfig:
@@ -124,6 +126,7 @@ class RenewalConfig:
             validity_cutover=r.approval_validity.cutover,
             validity_retirement=r.approval_validity.retirement,
             max_concurrent_runs=r.max_concurrent_runs,
+            accept_probe_timeout=r.accept_probe_timeout,
         )
 
     def missing(self, *, snapshot: bool = False) -> list[str]:

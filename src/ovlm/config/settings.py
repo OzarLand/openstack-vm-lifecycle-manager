@@ -172,6 +172,12 @@ class RenewalSettings(_Section):
     external_verify: RenewalExternalVerify = RenewalExternalVerify()
     retire: RenewalRetire = RenewalRetire()
     approval_validity: RenewalApprovalValidity = RenewalApprovalValidity()
+    #: Total budget (seconds) of the guest part of the accept-step probe (ADR-0008; review PMR-1): the probe that a
+    #: ``probe`` or ``accept_step`` signal takes on green for a run parked at S2. The worker's main loop waits at
+    #: most this long for it (other runs' signals and claims wait behind it), each SSH command gets at most what is
+    #: left of it, and a probe that runs out reads "guest unknown" (every check fails). Kept well under the 60 s
+    #: freshness limit of the probe an accept rests on.
+    accept_probe_timeout: float = Field(default=20.0, gt=0, le=40.0)
     #: **Development only, off by default**: a worker-only directory holding ``<project_connection_id>.json``
     #: (write application credential) and ``<id>.guest_key`` (OpenSSH private key of the guest ``ovlm`` user),
     #: owned by the worker user, mode 0700/0600. It replaces the encrypted credential store (security-model.md 5.1)

@@ -45,6 +45,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -97,6 +98,7 @@ from ovlm.renewal.ports import (
     FenceLike,
     Gate,
     GuestProbe,
+    GuestProbeTimeout,
     GuestRef,
     HostKeyResult,
     PhaseResult,
@@ -985,8 +987,9 @@ class RunnerGuestPort:
 
     def probe(
         self, run_id: str, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...],
-        data_volume_id: str | None = None,
+        data_volume_id: str | None = None, timeout: float | None = None,
     ) -> GuestProbe:  # fmt: skip
+        deadline = None if timeout is None else time.monotonic() + timeout
         resolved = self._resolved(run_id)
         creds, user = self._creds(resolved), resolved["guest_access"]["ssh_user"]
         keys = self._target_keys(target, creds)
@@ -998,19 +1001,35 @@ class RunnerGuestPort:
             raise AutomationError("unit name not allowed in a probe", Classification.FATAL)
         if data_volume_id is not None and not _VOLUME.match(data_volume_id):
             raise AutomationError("volume id not allowed in a probe", Classification.FATAL)
-        state = self._ssh(target, user, keys, creds, ("systemctl", "is-system-running"))
+        state = self._ssh(
+            target, user, keys, creds, deadline=deadline, command=("systemctl", "is-system-running")
+        )
         if not state.connected:
             return GuestProbe(False)
         mounted = None
         if mount_point is not None:
             mounted = (
-                self._ssh(target, user, keys, creds, ("findmnt", "-n", "--", mount_point)).exit_code
+                self._ssh(
+                    target,
+                    user,
+                    keys,
+                    creds,
+                    deadline=deadline,
+                    command=("findmnt", "-n", "--", mount_point),
+                ).exit_code
                 == 0
             )
         active = None
         unit_states: dict[str, str] | None = None
         if units:
-            res = self._ssh(target, user, keys, creds, ("systemctl", "is-active", "--", *units))
+            res = self._ssh(
+                target,
+                user,
+                keys,
+                creds,
+                deadline=deadline,
+                command=("systemctl", "is-active", "--", *units),
+            )
             active = res.exit_code == 0
             unit_states = unit_states_of(units, res.stdout)
         device_mounted: bool | None = None
@@ -1018,13 +1037,20 @@ class RunnerGuestPort:
         if data_volume_id is not None:
             device = by_id_device(data_volume_id)
             res = self._ssh(
-                target, user, keys, creds, ("lsblk", "-n", "-o", "MOUNTPOINT", "--", device)
+                target,
+                user,
+                keys,
+                creds,
+                deadline=deadline,
+                command=("lsblk", "-n", "-o", "MOUNTPOINT", "--", device),
             )
             # any other exit: the device is absent or unreadable, i.e. unknown (never "mounted nowhere")
             if res.exit_code == 0:
                 device_mountpoints = tuple(x.strip() for x in res.stdout.splitlines() if x.strip())
                 device_mounted = bool(device_mountpoints)
-        ci = self._ssh(target, user, keys, creds, ("cloud-init", "status"))
+        ci = self._ssh(
+            target, user, keys, creds, deadline=deadline, command=("cloud-init", "status")
+        )
         return GuestProbe(
             True,
             mounted,
@@ -1075,11 +1101,19 @@ class RunnerGuestPort:
 
     def _ssh(
         self, target: GuestRef, user: str, keys: Sequence[PublicKey], creds: ProjectCredentials,
-        command: Sequence[str],
+        command: Sequence[str], *, deadline: float | None = None,
     ) -> SshResult:  # fmt: skip
+        """One SSH command. ``deadline`` (monotonic): the command gets at most the time left before it, and none
+        is started once it has passed (:class:`GuestProbeTimeout`)."""
+        timeout = self.ssh_timeout
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise GuestProbeTimeout("the guest probe's time budget is spent")
+            timeout = min(timeout, left)
         return self.ssh.run(
             host=target.address, port=22, user=user, keys=keys, private_key=creds.guest_key,
-            command=command, timeout=self.ssh_timeout,
+            command=command, timeout=timeout,
         )  # fmt: skip
 
 

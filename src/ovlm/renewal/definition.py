@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -62,7 +63,7 @@ from ovlm.renewal.plans import (
     outage_marks,
     tc_target,
 )
-from ovlm.renewal.ports import GuestRef
+from ovlm.renewal.ports import GuestProbe, GuestProbeTimeout, GuestRef
 from ovlm.renewal.steps_after import (
     AttachToOld,
     AwaitDiscard,
@@ -167,6 +168,10 @@ def _no_writes(action: str) -> None:
     raise WriteNotAllowedError(f"read-only re-probe refused {action}")
 
 
+class GuestProbeInProgress(Exception):  # noqa: N818 - a state, read as "guest unknown"
+    """An earlier accept-step guest probe of the run is still running (PMR-1): no second one is started."""
+
+
 def _elapsed(prepared: Mapping[str, Any]) -> float:
     """Seconds since the worker started the accept probe in ``prepare_signal`` (monotonic); infinite without one."""
     t0 = prepared.get("t0")
@@ -190,6 +195,9 @@ class BlueGreenFipV1(WorkflowDefinition):
             MoveFipToOld, VerifyExternalOld, LockGreen, AwaitDiscard, DiscardGreen,
         ]  # fmt: skip
         self._steps: dict[str, Step] = {c.key: c(deps) for c in classes}
+        # PMR-1: the accept-step guest probe of each run still running in its own thread (one per run at most)
+        self._guest_probes: dict[str, threading.Thread] = {}
+        self._guest_probes_lock = threading.Lock()
 
     @property
     def steps(self) -> Mapping[str, Step]:
@@ -715,8 +723,8 @@ class BlueGreenFipV1(WorkflowDefinition):
                 green_id, det.get("fixed_ip") or "", "new", tuple(det.get("pinned") or ())
             )
             try:
-                gp = self.d.guest.probe(run_id, ref, mount_point=dv.get("mount_point"), units=units,
-                                        data_volume_id=dv.get("volume_id"))  # fmt: skip
+                gp = self._bounded_guest_probe(run_id, ref, mount_point=dv.get("mount_point"), units=units,
+                                               data_volume_id=dv.get("volume_id"))  # fmt: skip
                 guest |= {
                     "reachable": gp.reachable, "mount_point_mounted": gp.mounted,
                     "device": "/dev/disk/by-id/virtio-" + str(dv.get("volume_id"))[:20],
@@ -731,6 +739,48 @@ class BlueGreenFipV1(WorkflowDefinition):
             "green_id": green_id, "volume_id": dv.get("volume_id"), "cloud": cloud, "guest": guest,
             "checks": checks, "ok": all(x["ok"] for x in checks),
         }  # fmt: skip
+
+    def _bounded_guest_probe(
+        self, run_id: str, ref: GuestRef, *, mount_point: str | None, units: tuple[str, ...],
+        data_volume_id: str | None,
+    ) -> GuestProbe:  # fmt: skip
+        """The guest probe of :meth:`accept_probe` under a total deadline (``renewal.accept_probe_timeout``, review
+        PMR-1). It runs on its own thread; the caller (the worker's main loop, through ``prepare_signal``) waits at
+        most the budget, so a green that answers TCP but hangs a command cannot hold other runs' signals and claims
+        behind it. The port also gets the budget, so its SSH commands end soon after. While a probe of the run is
+        still running (it overran the budget), no second one is started: the new request reads
+        :class:`GuestProbeInProgress` at once (a failed check), so queued Re-probe clicks do not pile up."""
+        budget = float(self.d.cfg.accept_probe_timeout)
+        box: dict[str, Any] = {}
+
+        def work() -> None:
+            try:
+                box["result"] = self.d.guest.probe(run_id, ref, mount_point=mount_point, units=units,
+                                                   data_volume_id=data_volume_id, timeout=budget)  # fmt: skip
+            except BaseException as exc:  # noqa: BLE001 - handed to the waiting caller
+                box["error"] = exc
+            finally:
+                with self._guest_probes_lock:
+                    if self._guest_probes.get(run_id) is threading.current_thread():
+                        del self._guest_probes[run_id]
+
+        with self._guest_probes_lock:
+            running = self._guest_probes.get(run_id)
+            if running is not None and running.is_alive():
+                raise GuestProbeInProgress("a guest probe of this run is still running")
+            thread = threading.Thread(target=work, name=f"accept-probe-{run_id[:8]}", daemon=True)
+            self._guest_probes[run_id] = thread
+            thread.start()
+        thread.join(budget)
+        if thread.is_alive():
+            log.warning(
+                "accept probe: green did not answer within %g s", budget, extra={"run_id": run_id}
+            )
+            raise GuestProbeTimeout(f"the guest probe did not finish within {budget:g} s")
+        if "error" in box:
+            raise box["error"]
+        result: GuestProbe = box["result"]
+        return result
 
     def prepare_signal(self, run: RunView, signal: SignalView) -> Any:
         if signal.kind == "accept_step":

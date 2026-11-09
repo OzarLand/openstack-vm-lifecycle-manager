@@ -14,6 +14,7 @@ checks both).
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -90,6 +91,12 @@ class FakeGuest:
     pre_aa_role: bool = False
     #: (server id, data_volume_id) of every read-only probe: the fixed command list, never a mutation
     probes: list[tuple[str, str | None]] = field(default_factory=list)
+    #: PMR-1: a green that answers TCP but hangs a command. Each probe blocks until ``probe_release`` is set or
+    #: ``probe_hang`` seconds have passed (0: no hang).
+    probe_hang: float = 0.0
+    probe_release: threading.Event = field(default_factory=threading.Event)
+    #: total budget passed by the caller of every probe (``None``: none)
+    probe_timeouts: list[float | None] = field(default_factory=list)
 
     def g(self, sid: str) -> GuestState:
         return self.state.setdefault(sid, GuestState())
@@ -220,10 +227,13 @@ class FakeGuest:
 
     def probe(
         self, run_id: str, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...],
-        data_volume_id: str | None = None,
+        data_volume_id: str | None = None, timeout: float | None = None,
     ) -> GuestProbe:  # fmt: skip
-        self.sync()
         self.probes.append((target.server_id, data_volume_id))
+        self.probe_timeouts.append(timeout)
+        if self.probe_hang:
+            self.probe_release.wait(self.probe_hang)
+        self.sync()
         if not self._active(target.server_id):
             return GuestProbe(False)
         st = self.g(target.server_id)

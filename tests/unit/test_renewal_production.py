@@ -9,6 +9,7 @@ import json
 import os
 import stat
 import sys
+import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +28,7 @@ from ovlm.openstack.errors import ReadOnlyViolationError, WriteNotAllowedError
 from ovlm.openstack.ownership import InMemoryOwnershipRegistry
 from ovlm.openstack.sdk_write import WriteCredential
 from ovlm.renewal.base import StepRefusal
-from ovlm.renewal.ports import GuestRef
+from ovlm.renewal.ports import GuestProbeTimeout, GuestRef
 from ovlm.renewal.production import (
     NO_STORE_REASON,
     ROTATE_HOST_KEYS,
@@ -445,6 +446,42 @@ def test_accept_probe_adds_one_fixed_read_only_command_and_reads_units_line_by_l
     assert not any(c[0] == "lsblk" for c in ssh.commands)
     with pytest.raises(AutomationError):
         g.probe("run", target, mount_point=None, units=(), data_volume_id="x; reboot")
+
+
+class _SlowSsh(_Ssh):
+    """A green that answers TCP but hangs every command until the SSH timeout (PMR-1)."""
+
+    def __init__(self, host_key: PublicKey) -> None:
+        super().__init__(host_key)
+        self.timeouts: list[float] = []
+
+    def run(self, *, host: str, port: int, user: str, keys: Sequence[PublicKey], private_key: SecretBytes,
+            command: Sequence[str], timeout: float) -> SshResult:  # fmt: skip
+        self.timeouts.append(timeout)
+        self.commands.append(tuple(command))
+        time.sleep(min(timeout, 0.3))
+        return SshResult(0, "running\n")
+
+
+def test_probe_with_a_budget_never_waits_longer_than_the_budget() -> None:
+    """PMR-1: with a total budget each SSH command gets at most what is left of it, and none starts once it is
+    spent, so a hanging green costs at most the budget instead of five times the 60 s SSH timeout."""
+    _p, pub = _key()
+    ssh = _SlowSsh(parse_public_key(pub))
+    g = _guest(ssh)
+    target = GuestRef(GREEN, "10.0.0.9", "new", (pub,))
+    t0 = time.monotonic()
+    with pytest.raises(GuestProbeTimeout):
+        g.probe("run", target, mount_point="/srv/data", units=("app.service",),
+                data_volume_id="5e1f0c2a-7b7d-4c3e-9f00-0123456789ab", timeout=0.5)  # fmt: skip
+    assert time.monotonic() - t0 < 0.5 + 0.3
+    assert ssh.timeouts and all(t <= 0.5 for t in ssh.timeouts), ssh.timeouts
+    assert len(ssh.commands) < 5, ssh.commands
+    # without a budget: the port's own per-command timeout, as before
+    ssh.timeouts.clear()
+    g.ssh_timeout = 0.01
+    g.probe("run", target, mount_point=None, units=())
+    assert ssh.timeouts == [0.01, 0.01]
 
 
 def test_blue_is_reached_only_with_the_registered_fingerprint() -> None:
