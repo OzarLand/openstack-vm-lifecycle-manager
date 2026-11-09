@@ -397,6 +397,18 @@ Worker → guest SSH (22) on the fixed IP: green has no FIP before cutover. Opti
 network, or a bastion (`ProxyJump`, its host key pinned). Profiles' security groups allow 22 only from the worker/
 bastion source address; OVLM's readiness check flags `0.0.0.0/0` on 22 as a warning. Guests never connect to OVLM.
 
+**Jump host not wired yet (review N-1, roadmap SF-2).** A project connection stores `guest_access` (`direct`, or
+`jump_host` with host, port and the jump host's pinned key); changing it through the API takes a step-up and the typed
+connection name. That step-up is an **API-level control only**: the `ovlm_api` role can still update the column, and
+`guest_access` is not part of the `ssh_key` AAD binding (`Destination`: connection, kind, cloud, endpoint digest).
+Today this has no effect, because no worker code reads the connection's `guest_access`: every guest SSH call (B5's
+`ssh_argv`, the Ansible inventory's `ansible_ssh_common_args`, `ssh-keyscan`) goes straight to the VM's address, and
+public-key authentication sends a signature, never the key. Binding it now would bind a value nothing uses, so SF-2
+is moot until the jump host is wired. The day it is, the `ssh_key` binding must cover a digest of `guest_access` (or
+the jump host's key must be pinned outside what `ovlm_api` can write): `tests/unit/test_jump_host_binding_guard.py`
+fails if a `ProxyJump`/`ProxyCommand`/`-J` option, a read of the connection's `guest_access` or a jump-host field of
+the worker's connection snapshot appears while the binding does not cover it.
+
 ### 6.4 Guest output is untrusted
 Healthcheck JSON, Ansible facts, stdout and `set_stats` are attacker-controlled once a guest is compromised:
 size cap (e.g. 1 MiB per step), strict JSON schema with allowlisted fields, parsed with a safe parser (no YAML

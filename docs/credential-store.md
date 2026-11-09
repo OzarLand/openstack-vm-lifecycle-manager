@@ -97,6 +97,9 @@ Monitoring (worker metrics port): `ovlm_credentials_expiring{within="30d"|"7d"|"
   uploaded for.
 * `PATCH /api/v1/project-connections/{id}` with a changed `guest_access` takes a step-up
   (`project_connection.update`, the connection id) and the typed connection name. Name and `enabled` changes do not.
+  This is an API-level control only: `guest_access` is not in the `ssh_key` binding, which is harmless while no
+  worker code uses the jump host (security-model.md §6.3, roadmap SF-2; a guard test fails if it gets wired without
+  the binding).
 
 ## 4. Rotating an application credential (security-model.md §4.4)
 
