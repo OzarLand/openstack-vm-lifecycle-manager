@@ -143,11 +143,13 @@ PMR-3, probe script (kept out of the tree):
 # python -I probe_sweep.py <repo>/src
 import os, sys, tempfile, time
 from pathlib import Path
+
 sys.path.insert(0, sys.argv[1])
 from ovlm.automation.runner import sweep_checkout_cache
 
 d = Path(tempfile.mkdtemp())
-(d / "credentials").mkdir(); (d / "credentials" / "secret.json").write_text("x")
+(d / "credentials").mkdir()
+(d / "credentials" / "secret.json").write_text("x")
 (d / "3f0c2b1e-0000-4000-8000-000000000001").mkdir()
 old = time.time() - 10 * 3600
 for p in d.iterdir():
