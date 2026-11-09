@@ -45,6 +45,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -97,11 +98,13 @@ from ovlm.renewal.ports import (
     FenceLike,
     Gate,
     GuestProbe,
+    GuestProbeTimeout,
     GuestRef,
     HostKeyResult,
     PhaseResult,
 )
 from ovlm.workflow.contract import ErrorClass
+from ovlm.workflow.fence import FenceLost
 
 log = logging.getLogger("ovlm.renewal.production")
 
@@ -626,7 +629,10 @@ class RunnerGuestPort:
             store_diffs=bool(a.get("store_diffs")), accept_degraded=bool(hc.get("accept_degraded")),
         )  # fmt: skip
 
-    def _prepared_for(self, run_id: str) -> PreparedAutomation:
+    def _prepared_for(
+        self, run_id: str, *, step_id: str | None = None, attempt: int | None = None,
+        fence: FenceLike | None = None,
+    ) -> PreparedAutomation:  # fmt: skip
         """B6's checkout for this run. Another process prepared it (a restarted worker): re-adopt the checkout on
         disk, re-verified locally. After a worker **container** restart the tmpfs ``run_root`` is empty: the copy B6
         kept in ``automation.checkout_cache`` (persistent, worker-only) is adopted instead, only if its tree digest
@@ -636,7 +642,11 @@ class RunnerGuestPort:
         only way on is an approver's one-shot ``reprepare-automation`` authorization (:meth:`_reprepare`).
 
         A checkout remembered in this process but no longer on disk (released by the worker's checkout sweep once
-        its run was terminal, or lost with the tmpfs) is forgotten and adopted again as above (roadmap P0-1)."""
+        its run was terminal, or lost with the tmpfs) is forgotten and adopted again as above (roadmap P0-1).
+
+        ``step_id``, ``attempt``, ``fence``: the step attempt asking. Every re-clone is fenced, and only that step's
+        own authorization can be consumed, by an attempt still holding its lease (review PMR-2); without them no
+        authorization is consumed."""
         with self._lock:
             for rid in [r for r, p in self._prepared.items() if not p.checkout.is_dir()]:
                 del self._prepared[rid]
@@ -652,9 +662,12 @@ class RunnerGuestPort:
                 spec, run_id, waivers=waivers, expected_digest=recorded
             )
         except CheckoutUnverifiable as exc:
+            if exc.detail.get("quarantined_checkout"):
+                self._audit_quarantine(run_id, step_id, exc.detail)
             prepared = self._reprepare(
                 run_id, resolved, spec, recorded,
                 refusal=(reprepare.CHECKOUT_UNVERIFIABLE, str(exc)),
+                step_id=step_id, attempt=attempt, fence=fence, detail=exc.detail,
             )  # fmt: skip
         if prepared is None:
             if self._in_outage(run_id):
@@ -665,8 +678,11 @@ class RunnerGuestPort:
                         "the run's verified checkout is gone (worker container restarted without a checkout "
                         "cache?); re-cloning would contact the git host inside the downtime window",
                     ),
+                    step_id=step_id, attempt=attempt, fence=fence,
                 )  # fmt: skip
             else:
+                if fence is not None:
+                    fence.check("automation:prepare")
                 prepared, _reach = self._prepare_with_waivers(run_id, resolved, spec)
         else:
             self._waiver_reach(prepared, waivers)
@@ -682,14 +698,40 @@ class RunnerGuestPort:
         recorded: str | None,
         *,
         refusal: tuple[str, str],
+        step_id: str | None,
+        attempt: int | None,
+        fence: FenceLike | None,
+        detail: Mapping[str, str] | None = None,
     ) -> PreparedAutomation:
         """The only git contact allowed where the checkout cannot be adopted: an approver's one-shot authorization
         (``reprepare-automation``), consumed **before** the clone. The normal B6 path runs (pinned SHA, verify, lint,
         waivers, cache copy) and must yield the tree digest B6 recorded, when it recorded one; a different tree is
-        discarded and stops the step for a human. Without an authorization: ``refusal`` (reason, message)."""
-        auth = self._take_authorization(run_id)
+        discarded and stops the step for a human. Without an authorization: ``refusal`` (reason, message).
+
+        PMR-2: the fence is checked before the authorization is taken and again before the clone; only the
+        authorization given for this step is taken, and only while this attempt holds the step's lease in the
+        database (:func:`~ovlm.renewal.reprepare.take`). An attempt that lost its lease consumes nothing and
+        contacts no git host."""
+        # a mismatching cached copy moved aside: where, and both digests (PMR-6)
+        evidence = dict(detail or {})
+        if step_id is None or attempt is None or fence is None:
+            raise StepRefusal(
+                ErrorClass.NEEDS_HUMAN, refusal[0], message=refusal[1][:300], **evidence
+            )
+        fence.check("automation:reprepare")
+        auth = self._take_authorization(run_id, step_id, attempt)
         if auth is None:
-            raise StepRefusal(ErrorClass.NEEDS_HUMAN, refusal[0], message=refusal[1][:300])
+            raise StepRefusal(
+                ErrorClass.NEEDS_HUMAN, refusal[0], message=refusal[1][:300], **evidence
+            )
+        try:
+            fence.check("automation:reprepare")
+        except FenceLost:
+            # lost between the take and the clone (the lease ran out in between): nothing was cloned
+            self._finish_authorization(
+                auth, ok=False, outcome="failed: the attempt lost its lease before the clone"
+            )
+            raise
         if auth.sha != spec.ref:
             self._finish_authorization(
                 auth, ok=False, outcome="refused: the authorized SHA is not the plan's pin"
@@ -727,13 +769,27 @@ class RunnerGuestPort:
             )  # fmt: skip
         self._finish_authorization(
             auth, ok=True, outcome="re-cloned and verified", recorded_digest=recorded,
-            tree_digest=prepared.tree_digest,
+            tree_digest=prepared.tree_digest, quarantined=evidence.get("quarantined_checkout"),
         )  # fmt: skip
         return prepared
 
-    def _take_authorization(self, run_id: str) -> reprepare.Authorization | None:
+    def _audit_quarantine(
+        self, run_id: str, step_id: str | None, detail: Mapping[str, str]
+    ) -> None:
+        """Audit ``automation.checkout.quarantined``: a cached copy that did not match B6's digest was moved aside
+        (PMR-6). Never fails the caller."""
+        try:
+            with self.engine.begin() as c:
+                reprepare.record_quarantine(c, run_id=run_id, step_id=step_id, detail=detail)
+        except Exception as exc:  # noqa: BLE001 - evidence, never fatal: the refusal still carries it
+            log.error("could not audit the quarantined checkout", extra={"run_id": run_id,
+                                                                         "error": type(exc).__name__})  # fmt: skip
+
+    def _take_authorization(
+        self, run_id: str, step_id: str, attempt: int
+    ) -> reprepare.Authorization | None:
         with self.engine.begin() as c:
-            return reprepare.take(c, run_id)
+            return reprepare.take(c, run_id, step_id=step_id, attempt=attempt)
 
     def _finish_authorization(self, auth: reprepare.Authorization, **outcome: Any) -> None:
         with self.engine.begin() as c:
@@ -831,8 +887,11 @@ class RunnerGuestPort:
             evidence["lint_waivers"] = reach
         return evidence
 
-    def has_phase(self, run_id: str, phase: str) -> bool:
-        prepared = self._prepared_for(run_id)
+    def has_phase(
+        self, run_id: str, phase: str, *, step_id: str | None = None, attempt: int | None = None,
+        fence: FenceLike | None = None,
+    ) -> bool:  # fmt: skip
+        prepared = self._prepared_for(run_id, step_id=step_id, attempt=attempt, fence=fence)
         return (
             prepared.checkout / prepared.spec.playbook_dir.strip("/") / f"{phase}.yml"
         ).is_file()
@@ -844,7 +903,7 @@ class RunnerGuestPort:
     ) -> PhaseResult:  # fmt: skip
         resolved = self._resolved(run_id)
         creds = self._creds(resolved)
-        prepared = self._prepared_for(run_id)
+        prepared = self._prepared_for(run_id, step_id=step_id, attempt=attempt, fence=fence)
         keys = self._target_keys(target, creds)
         if not keys:
             return PhaseResult("needs_human", "host key unverifiable")
@@ -985,8 +1044,9 @@ class RunnerGuestPort:
 
     def probe(
         self, run_id: str, target: GuestRef, *, mount_point: str | None, units: tuple[str, ...],
-        data_volume_id: str | None = None,
+        data_volume_id: str | None = None, timeout: float | None = None,
     ) -> GuestProbe:  # fmt: skip
+        deadline = None if timeout is None else time.monotonic() + timeout
         resolved = self._resolved(run_id)
         creds, user = self._creds(resolved), resolved["guest_access"]["ssh_user"]
         keys = self._target_keys(target, creds)
@@ -998,19 +1058,35 @@ class RunnerGuestPort:
             raise AutomationError("unit name not allowed in a probe", Classification.FATAL)
         if data_volume_id is not None and not _VOLUME.match(data_volume_id):
             raise AutomationError("volume id not allowed in a probe", Classification.FATAL)
-        state = self._ssh(target, user, keys, creds, ("systemctl", "is-system-running"))
+        state = self._ssh(
+            target, user, keys, creds, deadline=deadline, command=("systemctl", "is-system-running")
+        )
         if not state.connected:
             return GuestProbe(False)
         mounted = None
         if mount_point is not None:
             mounted = (
-                self._ssh(target, user, keys, creds, ("findmnt", "-n", "--", mount_point)).exit_code
+                self._ssh(
+                    target,
+                    user,
+                    keys,
+                    creds,
+                    deadline=deadline,
+                    command=("findmnt", "-n", "--", mount_point),
+                ).exit_code
                 == 0
             )
         active = None
         unit_states: dict[str, str] | None = None
         if units:
-            res = self._ssh(target, user, keys, creds, ("systemctl", "is-active", "--", *units))
+            res = self._ssh(
+                target,
+                user,
+                keys,
+                creds,
+                deadline=deadline,
+                command=("systemctl", "is-active", "--", *units),
+            )
             active = res.exit_code == 0
             unit_states = unit_states_of(units, res.stdout)
         device_mounted: bool | None = None
@@ -1018,13 +1094,20 @@ class RunnerGuestPort:
         if data_volume_id is not None:
             device = by_id_device(data_volume_id)
             res = self._ssh(
-                target, user, keys, creds, ("lsblk", "-n", "-o", "MOUNTPOINT", "--", device)
+                target,
+                user,
+                keys,
+                creds,
+                deadline=deadline,
+                command=("lsblk", "-n", "-o", "MOUNTPOINT", "--", device),
             )
             # any other exit: the device is absent or unreadable, i.e. unknown (never "mounted nowhere")
             if res.exit_code == 0:
                 device_mountpoints = tuple(x.strip() for x in res.stdout.splitlines() if x.strip())
                 device_mounted = bool(device_mountpoints)
-        ci = self._ssh(target, user, keys, creds, ("cloud-init", "status"))
+        ci = self._ssh(
+            target, user, keys, creds, deadline=deadline, command=("cloud-init", "status")
+        )
         return GuestProbe(
             True,
             mounted,
@@ -1075,11 +1158,19 @@ class RunnerGuestPort:
 
     def _ssh(
         self, target: GuestRef, user: str, keys: Sequence[PublicKey], creds: ProjectCredentials,
-        command: Sequence[str],
+        command: Sequence[str], *, deadline: float | None = None,
     ) -> SshResult:  # fmt: skip
+        """One SSH command. ``deadline`` (monotonic): the command gets at most the time left before it, and none
+        is started once it has passed (:class:`GuestProbeTimeout`)."""
+        timeout = self.ssh_timeout
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise GuestProbeTimeout("the guest probe's time budget is spent")
+            timeout = min(timeout, left)
         return self.ssh.run(
             host=target.address, port=22, user=user, keys=keys, private_key=creds.guest_key,
-            command=command, timeout=self.ssh_timeout,
+            command=command, timeout=timeout,
         )  # fmt: skip
 
 
